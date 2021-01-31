@@ -154,22 +154,43 @@ class Object:
         
     def setAttr(self, key, attr):
         lines = self[key]
+        if lines == '':
+            lines = []
+            self[key] = lines
+
+        if type(lines) == str:
+            lines = [ lines ]
+            self[key] = lines
+
         if attr in lines:
             return
+        lines.append(attr)
+        self[key] = lines
+        """
         at = ''
         for line in lines:
             at += line + '\n'
         at += attr + '\n'
         self[key] = at
+        """
         
     def delAttr(self, key, attr):
-        at = self[key]
-        if attr in at:
-            at.remove(attr)
+        attrs = self[key]
+        if attrs == '':
+            self[key] = []
+        if type(at) == str:
+            atttrs = [attrs]
+            self[key] = attrs
+
+        if attr in attrs:
+            attrs.remove(attr)
+            """
             text = ''
             for s in at:
                 if s == '':
                     continue
                 text += s + '\n'
             self.set(key, text)
+            """
+            self[key] = attrs
         

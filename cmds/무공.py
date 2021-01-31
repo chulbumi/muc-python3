@@ -32,7 +32,8 @@ class CmdObj(Command):
                 msg += '[1m[40m[32m▷ %s[0m[40m[37m\r\n' % mname
                 slist = MAIN_CONFIG[mname]
                 c = 0
-                for mm in slist.split('\r\n'):
+                #for mm in slist.split('\r\n'):
+                for mm in slist:
                     m = mm.strip()
                     if m == '':
                         continue

@@ -29,7 +29,7 @@ class CmdObj(Command):
             if obj.checkAttr('아이템속성', '올숙이천무기'):
                 if self.checkSuk(ob, 2000) == False:
                     continue
-            if savedSet not in obj['반응이름'].split():
+            if savedSet not in obj['반응이름']:
                 continue
             ob.armor += getInt(obj['방어력'])
             ob.attpower += getInt(obj['공격력'])

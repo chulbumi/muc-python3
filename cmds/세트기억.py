@@ -18,15 +18,21 @@ class CmdObj(Command):
                 continue
             cnt += 1
             aclist = []
-            for name in obj['반응이름'].split():
+            react = obj['반응이름']
+            if type(react) == str:
+                react = [ react ]
+            for name in react:
                 if name.startswith('SET-'):
                     continue
                 aclist.append(name)
             aclist.append(savedSet)
+            obj['반응이름'] = aclist
+            """
             acline = ''
             for a in aclist:
                  acline += a + '\r\n'
             obj['반응이름'] = acline[:-2]
+            """
 
         ob['세트기억'] = savedSet
 

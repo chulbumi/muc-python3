@@ -20,7 +20,10 @@ class CmdObj(Command):
                     if is_han(name):
                         item_str += '[' + ob.ItemUseLevel[item.get('계층')] + '] [36m' + item.get('이름') + '[37m\r\n'
                     else:
-                        item_str += '[' + ob.ItemUseLevel[item.get('계층')] + '] [36m' + item.get('이름') + '(' + item.get('반응이름').split()[0] + ')[37m\r\n'
+                        alias = item['반응이름']
+                        if type(alias) == list:
+                            alias = alias[0]
+                        item_str += '[' + ob.ItemUseLevel[item.get('계층')] + '] [36m' + item.get('이름') + '(' + alias + ')[37m\r\n'
         ob.write(item_str)
         if c == 0:
             ob.sendLine('[36m☞ 혈혈단신 맨몸으로 강호를 주유중입니다.[37m')

@@ -124,7 +124,7 @@ class Room(Object):
                 continue
             c = c + 1
             str1 = str1 + '[32m' + exitName +  '[37mː'
-        str1 = str1[:-2]
+        str1 = str1[:-1]
         if c == 0:
             exit_str = '\n  ○  어느 쪽으로도 이동할 수 없습니다.\n'
         else:
@@ -421,7 +421,6 @@ class Room(Object):
 
         
 def getRoom(path):
-
     i = path.find(':')
     if i == -1:
         return None
@@ -465,7 +464,7 @@ def loadAllMap():
         files = glob.glob('*.json')
         os.chdir(pwd)
         for file in files:
-            room = getRoom(dir + ':' + file[:-4])
+            room = getRoom(dir + ':' + file[:-5])
             if room != None:
                 c = c + 1
     log(str(c) + '개의 맵이 로딩되었습니다.')

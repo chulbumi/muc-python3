@@ -23,8 +23,15 @@ class CmdObj(Command):
         l.sort()
         for at in l:
             msg += '#%s\r\n' % at
+            attr = target.attr[at]
+            if type(attr) == list:
+                msg += '\r\n'.join(attr) + '\r\n'
+            else:
+                msg += str(attr) + '\r\n'
+            """
             for m in str(target.attr[at]):
                 msg += ':%s\r\n' % m
+            """
             msg += '\r\n'
             
         ob.sendLine(msg)

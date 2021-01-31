@@ -1,10 +1,6 @@
 # -*- coding: utf-8 -*-
 
-import json
-import io
 import os
-import fnmatch
-import os.path
 
 
 def find(line, word):
@@ -23,7 +19,29 @@ def find(line, word):
         i += 1
     return -1
 
-def ttoNumber(s):
+def toNumber1(s):
+    if s.find('.') == -1 and s.startswith('0'):
+        return s
+    try:
+        v = float(s)
+        if s.find('.') == -1:
+            return int(s)
+        return v
+    except ValueError:
+        return s
+
+def toNumber(s):
+    if s.find('.') == -1 and s.startswith('0') and len(s) > 1:
+        return s
+    try:
+        v = float(s)
+        if s.find('.') == -1:
+            return int(s)
+        return v
+    except ValueError:
+        return s
+
+def toNumber0(s):
     if len(s) > 1 and s[0] == '0':
         return s
     try:
@@ -33,20 +51,6 @@ def ttoNumber(s):
             return float(s)
         except ValueError:
             return s
-
-
-def toNumber(s):
-    try:
-        v = float(s)
-        if s.find('.') == -1:
-            return int(s)
-        return v
-    except ValueError:
-        return s
-#        try:
-#            return int(s)
-#        except ValueError:
-#            return s
 
 def load_script(path):
     try:
@@ -115,20 +119,14 @@ def load_script(path):
                         keydata = ' '
                     object[segname][keyname] = keydata
                 else:
-                    if type(object[segname][keyname]) == str:
-                        object[segname][keyname] = [ object[segname][keyname] ]
-                    #object[segname][keyname] = str(object[segname][keyname]) + '\r\n' + str(keydata)
-                    object[segname][keyname].append(keydata)
+                    object[segname][keyname] = str(object[segname][keyname]) + '\r\n' + str(keydata)
             else:
                 if object[segname][-1][keyname] == '':
                     if keydata == '':
                         keydata = ' '
                     object[segname][-1][keyname] = keydata
                 else:
-                    if type(object[segname][-1][keyname]) == str:
-                        object[segname][-1][keyname] = [ object[segname][-1][keyname] ]
-                    #object[segname][-1][keyname] = str(object[segname][-1][keyname]) + '\r\n' + str(keydata)
-                    object[segname][-1][keyname].append(keydata)
+                    object[segname][-1][keyname] = str(object[segname][-1][keyname]) + '\r\n' + str(keydata)
         else:
             continue
             
@@ -142,6 +140,10 @@ def save_list(f, x, first = 0):
             for i in range(first):
                 f.write('\t')
         if type(l) == int:
+            f.write(str(l))
+        elif type(l) == long:
+            f.write(str(l))
+        elif type(l) == float:
             f.write(str(l))
         elif type(l) == str:
             f.write('\'' + str(l) + '\'')
@@ -171,7 +173,7 @@ def save_dict(f, x, first = 0):
 
         if type(key) == str and key[0] == '_':
             continue
-        if type(x[key]) == int or type(x[key]) == float:
+        if type(x[key]) == int or type(x[key]) == float or type(x[key]) == long:
             f.write(strk + ': ' + str(x[key]))
         elif type(x[key]) == str:
             """print (strk + ': \'' + str(x[key]) + '\'' + '\n')"""
@@ -221,10 +223,10 @@ def save_script(f, x):
                     for keyData in x[segName][keyName]:
                         f.write(':' + str(keyData) + '\n')
                 else:
-                    if type(x[segName][keyName]) == int:
+                    if type(x[segName][keyName]) == int or type(x[segName][keyName]) == long or type(x[segName][keyName]) == float:
                         f.write(':' + str(x[segName][keyName]) + '\n')
                     else:
-                        lines = x[segName][keyName].splitlines()
+                        lines = x[segName][keyName]
                         for line in lines:
                             #f.write(':' + str(x[segName][keyName]) + '\n')
                             f.write(':' + line + '\n')
@@ -253,7 +255,7 @@ def save_object(f, x):
         return False
     if type(f) is not file:
         return False
-    f.write('# -*- coding: utf-8 -*-\n\n')
+    f.write('# -*- coding: euc-kr -*-\n\n')
     f.write('obj = ')
     save_dict(f, x, 0)
 
@@ -262,13 +264,13 @@ def load_object(path):
     try:
         execfile(path)
     except:
-        print ('ERROR : execfile() in load_object(' + path + ')')
+        print 'ERROR : execfile() in load_object(' + path + ')'
         return None
 
     try:
         o = locals()['obj']
     except:
-        print ('ERROR : locals()[] in load_object(' + path + ')')
+        print 'ERROR : locals()[] in load_object(' + path + ')'
         return None
 
     return o
@@ -291,106 +293,3 @@ f.close()
 #f.close()
 #load_object('m.py')
 """
-
-def toUni(s):
-    return s
-#    return unicode(s.decode('euc-kr'))
-
-def toJson(x):
-    obj = {}
-    if type(x) is not dict:
-        return False
-        
-    for segName in x:
-        seg = toUni(segName)
-        if type(x[segName]) != list:
-            obj[seg] = {}
-            for keyName in x[segName]:
-                key = toUni(keyName)
-                
-                if type(x[segName][keyName]) == list:
-                    obj[seg][key] = []
-                    for keyData in x[segName][keyName]:
-                        data = toUni(keyData)
-                        obj[seg][key].append(data)
-                else:
-                    if type(x[segName][keyName]) == int or type(x[segName][keyName]) == float:
-                        obj[seg][key] = x[segName][keyName]
-                    else:
-                        obj[seg][key] = []
-                        lines = x[segName][keyName].splitlines()
-                        if len(lines) == 1:
-                             obj[seg][key] = toUni(x[segName][keyName])
-                        else:
-                            obj[seg][key] = []
-                            for line in lines:
-                                l = toUni(line)
-                                obj[seg][key].append(l)
-        else:
-            #print(segName)
-            seglist = x[segName]
-            #print(seglist)
-            for segment in seglist:
-                if type(segment) == dict:
-                    if segName not in obj:
-                        #print('dict')
-                        obj[segName] = []
-                    obj[segName].append(segment)
-                    #print('dict1')
-                else:
-                    obj[seg] = {}
-                    seg = toUni(segment)
-                    obj[seg] = {}
-                    for keyName in segment:
-                        key = toUni(keyName)
-                        if type(segment[keyName]) == list:
-                            obj[seg][key] = []
-                            for keyData in segment[keyName]:
-                                data = toUni(keyData)
-                                obj[seg][key].append(data)
-                        else:
-                            data = toUni(segment[keyName])
-                            obj[seg][key] = data
-    return obj
-
-
-def convert2(path, fil):
-    for f in fnmatch.filter(os.listdir(path), fil):
-        name = f[:-4]
-        #name = f
-        #print(path + name)
-        try:
-            obj = load_script(path + f);
-            o2 = toJson(obj)
-            print(path + name)
-
-            #print(o2)
-            #continue
-            with io.open(path + name + ".json", "w", encoding='utf8') as json_file:
-                data = json.dumps(o2, indent=4, sort_keys=True, ensure_ascii=False)
-                json_file.write(data)
-        except:
-            pass
-            #print("!!!!" + path + name)
-
-def convert(path, fil):
-    dirs = os.listdir(path)
-    for d in dirs:
-        if os.path.isdir(path + d) == False:
-            continue
-        for f in fnmatch.filter(os.listdir(path + d), fil):
-            name = f[:-4]
-            print(path + d + '/' + name)
-            obj = load_script(path + d + '/' + f);
-            o2 = toJson(obj)
-            #continue
-            with io.open(path + d + "/" + name + ".json", "w", encoding='utf8') as json_file:
-                data = json.dumps(o2, indent=4, sort_keys=True, ensure_ascii=False)
-                json_file.write(data)
-
-#convert('./data/map/', "*.map")
-#convert('./data/mob/', "*.mob")
-convert2('./data/box/', "*.box")
-#convert2('./data/config/', "*.cfg")
-#convert2('./data/item/', "*.itm")
-#convert2('./data/user/', "*")

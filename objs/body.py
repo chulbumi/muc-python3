@@ -399,14 +399,16 @@ class Body(Object):
     def loadSkillUp(self):
         self.skillMap = {}
         lines = self['무공숙련도']
+        if lines == '':
+            return
         for line in lines:
             words = line.split()
             self.skillMap[words[0]] = (int(words[1]), int(words[2]))
             
     def buildSkillUp(self):
-        msg = ''
+        msg = []
         for sup in self.skillMap:
-            msg += '%s %d %d\r' % (sup, self.skillMap[sup][0], self.skillMap[sup][1])
+            msg.append('%s %d %d' % (sup, self.skillMap[sup][0], self.skillMap[sup][1]))
         self['무공숙련도'] = msg
         
     def skillUp(self, s = None):
@@ -758,8 +760,15 @@ class Body(Object):
             break
             
     def loadSkills(self):
-        for line in self['방어무공시전']:
+        ss = self['방어무공시전']
+        if ss == '':
+            return
+
+        if type(ss) != list:
+            ss = [ss]
+        for line in ss:
             words = line.split()
+            print(line, line)
             s = MUGONG[words[0]]
             s = copy.copy(s)
             self.skills.append(s)
@@ -784,14 +793,14 @@ class Body(Object):
             self.itemSkillMap[words[0]] = int(words[1])
         
     def buildSkillList(self):
-        msg = ''
+        msg = []
         for s in self.skillList:
-            msg += s + '\r\n'
+            msg.append(s)
         self['무공이름'] = msg
         
-        msg = ''
+        msg = []
         for s in self.itemSkillMap:
-            msg += '%s %s\r\n' % (s, self.itemSkillMap[s])
+            msg.append('%s %s' % (s, self.itemSkillMap[s]))
         self['무공이름수련리스트'] = msg
 
     def unwearAll(self):
@@ -931,7 +940,10 @@ class Body(Object):
             arm = 1
             dmg -=dd2
             if dmg>0:
-                dd3 = int(dmg//dd2)
+                if dd2>0:
+                    dd3 = int(dmg//dd2)
+                else:
+                    dd3 = int(dmg)
                 arm += dd3
             self.addArm(arm)
 
@@ -989,18 +1001,29 @@ class Body(Object):
             self['비전수련'] = '%s %d' % (var[0], p) 
             return
         self.attr.__delitem__('비전수련')
-        if self['비전이름'] == '':
-            self['비전이름'] = var[0]
+        v = self['비전이름']
+        if v == '':
+            self['비전이름'] = [ var[0] ]
         else:
-            self['비전이름'] += '\r\n' + var[0]
+            if type(v) == str:
+                v = [v]
+            v.append(var[0])
+            self['비전이름'] = v
         self.sendLine('[1m당신이 『[32m%s[37m』의 무공 구결을 깨우치기 시작합니다. \'ΔΨΞλΟ~\'[0;37m\r\n' % var[0])
         self.sendRoom('[1m%s 『[32m%s[37m』의 무공 구결을 깨우치기 시작합니다. \'ΔΨΞλΟ~\'[0;37m' % (self.han_iga(), var[0]))
+
+    def getNextWords(self, line):
+        words = line.split(None, 1)
+        if len(words) != 2:
+            return ''
+        return words[1]
 
 
 for lv in Body.skillLvName:
     lvName = lv + '무공'
     skillList = MAIN_CONFIG[lvName]
-    for name in skillList.split('\n'):
+    #for name in skillList.split('\n'):
+    for name in skillList:
         if name == '':
             continue
         Body.skillLvMap[name.strip()] = Body.skillLv[lv]

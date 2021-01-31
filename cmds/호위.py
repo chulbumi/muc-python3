@@ -27,7 +27,7 @@ class CmdObj(Command):
                 c += 1
                 hp = (obj.hp * 100 )// getItem(obj.index)['체력']
                 
-                tmp += '[1;32m·[0;36m%2d.%s[0;37m ː %s (%d)\r\n' % (c, obj['이름'], ob.strBar[hp///10] , hp)
+                tmp += '[1;32m·[0;36m%2d.%s[0;37m ː %s (%d)\r\n' % (c, obj['이름'], ob.strBar[hp//10] , hp)
         
         if c == 0:
             if target == ob:
@@ -39,7 +39,14 @@ class CmdObj(Command):
         buf = '☞ %s의 호위 : %s, 호위수 : %d, 분노 : %d' % (name, guard['이름'], c, getInt(target['분노']))
         msg += '[1;44m%-56s[0;40m\r\n' % buf
         msg += '────────────────────────────\r\n'
-        msg += guard['설명2'] + '\r\n'
+
+        desc = guard['설명2']
+
+        if type(desc) == list:
+            msg += '\r\n'.join(desc) + '\r\n'
+        else:
+            msg += desc + '\r\n'
+
         msg += '────────────────────────────\r\n'
         msg += tmp
         msg += '━━━━━━━━━━━━━━━━━━━━━━━━━━━━'

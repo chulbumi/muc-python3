@@ -1,6 +1,6 @@
 # -*- coding: utf-8 -*-
 from lib.loader import load_script, save_script
-import cPickle
+import _pickle
 
 class Rank():
     attr = {}

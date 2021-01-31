@@ -24,7 +24,7 @@ class Box(Object):
     def create(self, index):
         #print(path)
         self.index = index
-        self.path = 'data/box/' + index + '.box.json'
+        self.path = 'data/box/' + index + '.json'
         scr = load_script(self.path)
         if scr == None:
             return False
@@ -101,14 +101,14 @@ class Box(Object):
         o['아이템'] = items
         
         try:
-            with open(self.path, 'w', encoding="utf-8") as fp:
+            with open(self.path + '.json', 'w', encoding="utf-8") as fp:
                 save_script(fp, o)
         except:
             return False
         return True
         
     def viewShort(self):
-        return '%s (%d/%d)' % (self['이름'], len(self.objs), int(self['보관수량']))
+        return '%s (%d/%d)' % (self['이름'], len(self.objs), getInt(self['보관수량']))
         
     def view(self, ob):
         p = int(self['보관수량'])

@@ -1,5 +1,18 @@
 # -*- coding: utf-8 -*-
 
+from lib.hangul import postPosition1, han_iga, han_obj
+from objs.rank import RANK
+from objs.oneitem import ONEITEM
+from objs.skill import MUGONG
+from objs.room import getRoom
+from lib.func import getStrCnt, getInt, stripANSI
+from lib.func import loadScriptFile
+from include.define import *
+import copy
+import time
+
+def doEvent(self, mob, key, words, lineNumber = None):
+    
     from lib.hangul import postPosition1, han_iga, han_obj
     from objs.rank import RANK
     from objs.oneitem import ONEITEM
@@ -7,12 +20,9 @@
     from objs.room import getRoom
     from lib.func import getStrCnt, getInt, stripANSI
     from lib.func import loadScriptFile
-    from include.define import *
     import copy
     import time
 
-def doEvent(self, mob, key, words, lineNumber = None):
-    
     lineNum = 0
     tab = 0
     rank1 = 0
@@ -222,7 +232,10 @@ def doEvent(self, mob, key, words, lineNumber = None):
                 if self.getTendency(sline[13:]) == False:
                     searchEnd = True
             elif func == '$위치이동':
-                roomName = sline[10:].strip()
+                roomName = self.getNextWords(sline)
+                if roomName == '':
+                    continue
+                #sline[6:].strip()
                 #try:
                 d = str( mob['난이도'] )
                 if d != '':
@@ -239,7 +252,7 @@ def doEvent(self, mob, key, words, lineNumber = None):
                 self.enterRoom(room, '소환', '소환')
                 self.lpPrompt()
             elif func == '$출력':
-                self.printScript(sline[6:])
+                self.printScript(sline[4:])
             elif func == '$무공리스트확인':
                 if self.checkMugongList(sline[16:]) == False:
                     searchEnd = True

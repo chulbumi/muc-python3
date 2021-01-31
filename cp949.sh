@@ -1,0 +1,1 @@
+convmv -f ko_KR.UTF-8 -t euc-kr -r --notest .

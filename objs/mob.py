@@ -94,8 +94,12 @@ class Mob(Body):
                 self.regen = 360
         self.setMove()
         
-        l = self.get('사용아이템')
-        for i in l:
+        use_item = self.get('사용아이템')
+        if type(use_item) == str:
+            use_item_list = [use_item, ] if use_item != "" else []
+        else:
+            use_item_list = use_item
+        for i in use_item_list:
             item = getItem(i.split()[0])
             if item == None:
                 continue
@@ -142,6 +146,7 @@ class Mob(Body):
         from objs.room import Room, is_room, getRoom
         keydata = self.getString('위치')
         lines = keydata
+        lines = keydata if type(keydata) == list else [keydata, ]
         for line in lines:
             for loc in line.split():
                 room = getRoom(self.get('존이름') + ':' + loc)
@@ -251,7 +256,11 @@ class Mob(Body):
         ob.sendLine('━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━')
         ob.sendLine('[0m[44m[1m[37m◆ 이름 ▷ %-49s[0m[37m[40m' % self.get('이름'))
         ob.sendLine('──────────────────────────────')
-        ob.sendLine(self.get('설명2'))
+        desc = self['설명2']
+        if type(desc) == list:
+            ob.sendLine('\r\n'.join(desc))
+        else:
+            ob.sendLine(desc)
         ob.sendLine('──────────────────────────────')
         
         l = self.get('사용아이템')
@@ -280,10 +289,11 @@ class Mob(Body):
         return ''
             
     def setMove(self):
-        rstr = str( self.get('이동') )
-        
+        rstr = self.get('이동')
         if rstr == '':
             return
+        if type(rstr) == list:
+            rstr = " ".join(rstr)
         self.moveTick = getInt(self.get('이동틱'))
         if self.moveTick == 0:
             self.moveTick = 30
@@ -403,6 +413,8 @@ class Mob(Body):
                 return True
         if self['몹종류'] == 6:
             r = self['아이템리젠']
+            if r == '':
+                r = 180
             if r < 180:
                 r = 180
             if curTime - self.timeofregen >= r:
@@ -718,7 +730,7 @@ class Mob(Body):
         noissue = ''
         for key in self.attr:
             if key.find('이벤트') == 0:
-                keywords = key[7:].split()
+                keywords = key[5:].split()
                 cmdList = []
                 issueList = []
                 for keyword in keywords:
@@ -802,7 +814,7 @@ class Mob(Body):
         #print dmg, c1, c2, c, len(s)
         i = len(s) - 1 - c
         if i < 0 or i > len(s) - 1:
-            print 'mob.getAttackScript'
+            print ('mob.getAttackScript')
             i = 0
         s = s[i]
         #s = s[randint(0, len(s) - 1)]
@@ -1121,7 +1133,6 @@ class Mob(Body):
         if s != None and s != '':
             self.skillList.append( ( s, 100, 100) )
 
-
 def is_mob(obj):
     return isinstance(obj, Mob)
 
@@ -1167,7 +1178,7 @@ def loadAllMob():
         #print files
         os.chdir(pwd)
         for file in files:
-            mob = getMob(dir + ':' + file[:-4])
+            mob = getMob(dir + ':' + file[:-5])
             if mob != None:
                 mob['존이름'] = dir
                 if dir[-1].isdigit():

@@ -51,14 +51,13 @@ class Skill(Object):
         
     def parse(self):
         self.getAttr()
-        
         if self['종류'] != '전투':
             return
         #{1: [{'초식': '~~~~'}, {'초식': '!!!!!!!!'}], 2: [], 3:[], ...}
         self.pattern = {}
+        self['공격'] = [self['공격'], ] if type(self['공격']) == str else self['공격']
         for line in self['공격']:
             words = line.split(None, 2)
-            #print line
             turn = int(words[0])
             mu_type = words[1]
             if mu_type != '대기':
@@ -87,6 +86,7 @@ class Skill(Object):
                 self.deny = config.split()[1]
                 #if len(attr) == 2:
                 #    self.deny = attr[1]
+        self['방어능력'] = [self['방어능력'], ] if type(self['방어능력']) == str else self['방어능력']
         
         for config in self['방어능력']:
             if config.find('힘') == 0:

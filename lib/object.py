@@ -1,7 +1,142 @@
 # -*- coding: utf-8 -*-
 
-import os
+from objs.object import Object
+from objs.world import World
+from include.path import *
+    
+def is_item(obj):
+    from objs.item import Item
+    return isinstance(obj, Item)
 
+def is_room(obj):
+    from objs.room import Room
+    return isinstance(obj, Room)
+    
+def is_player(obj):
+    from objs.player import Player
+    return isinstance(obj, Player)
+
+def is_mob(obj):
+    from objs.mob import Mob 
+    return isinstance(obj, Mob)
+
+def is_body(obj):
+    from objs.body import Body
+    return isinstance(obj, Body)
+    
+def create_object(path):
+    try:
+        exec(compile(open(path + '.py', "rb").read(), path + '.py', 'exec'))
+    except IOError:
+        print('create_object() IoError ' + path)
+        return None
+
+    try:
+        obj = locals()['Obj']
+    except KeyError:
+        print('create_object() KeyError')
+        return None
+
+    o = obj()
+    o.set('path', path)
+    #o.create()
+    #o.init()
+    return o
+
+# 낙양성/도구점
+def get_room(ZoneRoom):
+
+    i = ZoneRoom.find('/')
+    if i == -1:
+        return None
+
+    zone_name = ZoneRoom[:i]
+    room_name = ZoneRoom[i+1:]
+
+    try:
+        zone = World.zones[zone_name]
+    except KeyError:
+        zone = {}
+        World.zones[zone_name] = zone
+        
+    try:
+        room = zone[room_name]
+    except KeyError:
+        room = create_object(ZONE_PATH + ZoneRoom)
+        if room == None:
+            return None
+        import time
+        room.last_reset_time = time.time()
+        zone[room_name] = room
+
+    return room
+
+def find_obj(env, objName, cnt = 1):
+    count = 1
+    for obj in env.objs:
+        name = obj.get('이름')
+        if name == objName or (is_player(obj) == False and name.find(objName) == 0):
+            if cnt == count:
+                return obj
+            else:
+                count += 1
+
+    return None
+
+
+def find_objN(env, line):
+    objName = line.split(' ')[0]
+    n = 1
+    if len(line.split(' ')) >= 2:
+        n = int(line.split(' ')[-1])
+    return find_obj(env, objName, n)
+    
+
+def count_object(env, objName):
+    count = 0
+    for obj in env.objs:
+        if obj.get('이름') == objName:
+            count += 1
+    return count
+
+def item_count(objs):
+    lst = {}
+    for obj in objs:
+        if is_item(obj):
+            name = obj.get('이름')
+            if name in lst:
+                lst[name][1] += 1
+            else:
+                lst[name] = {}
+                lst[name][0] = obj.get('이름')
+                lst[name][1] = 1
+    return lst
+
+
+def item_countA(objs):
+    lst = {}
+    for obj in objs:
+        if is_item(obj):
+            name = obj.get('이름')
+            if name in lst:
+                lst[name][1] += 1
+            else:
+                lst[name] = {}
+                lst[name][0] = obj.getA('이름')
+                lst[name][1] = 1
+                lst[name][2] = obj.get('설명1')
+    return lst
+    
+def mob_count(objs):
+    lst = {}
+    for obj in objs:
+        if is_mob(obj):
+            name = obj.getA('이름')
+            if name in lst:
+                lst[name] += 1
+            else:
+                lst[name] = 1
+    return lst
 
 def find(line, word):
     i = 0
@@ -19,36 +154,10 @@ def find(line, word):
         i += 1
     return -1
 
-def ttoNumber(s):
-    if len(s) > 1 and s[0] == '0':
-        return s
-    try:
-        return int(s)
-    except ValueError:
-        try:
-            return float(s)
-        except ValueError:
-            return s
-
-
-def toNumber(s):
-    try:
-        v = float(s)
-        if s.find('.') == -1:
-            return int(s)
-        return v
-    except ValueError:
-        return s
-#        try:
-#            return int(s)
-#        except ValueError:
-#            return s
-
 def load_script(path):
     try:
-        f = open(path)
+        f = open(path, 'U')
     except IOError:
-        #print 'load_script(%s) IOError' % path
         return None
     object = {}
     """
@@ -71,7 +180,7 @@ def load_script(path):
         if comment == 0:
             continue
         elif comment != -1:
-            line = line[0:comment]
+            line = line[0:comment].strip()
         line = line.strip()
         
         if line[0] == '[':
@@ -93,32 +202,30 @@ def load_script(path):
 
         elif line[0] == '#':
             keyname = line[1:]
-
             if type(object[segname]) is dict:
-#if object[segname].has_key(keyname):
-#                    print '%s dup! %s' % (keyname, path)
                 object[segname][keyname] = ''
             else:
-#                if object[segname][-1].has_key(keyname):
-#                    print '%s dup!! %s' % (keyname, path)
                 object[segname][-1][keyname] = ''
         elif line[0] == ':':
             keydata = line[1:]
-            keydata = toNumber(keydata)
+            keydata = keydata.replace('\'', '\\\'')
+
             if type(object[segname]) is dict:
                 if object[segname][keyname] == '':
-                    if keydata == '':
-                        keydata = ' '
                     object[segname][keyname] = keydata
                 else:
-                    object[segname][keyname] = str(object[segname][keyname]) + '\r\n' + str(keydata)
+                    if type(object[segname][keyname]) is not list:
+                        keydatalist = [object[segname][keyname]]
+                        object[segname][keyname] = keydatalist
+                    object[segname][keyname].append(keydata)
             else:
                 if object[segname][-1][keyname] == '':
-                    if keydata == '':
-                        keydata = ' '
                     object[segname][-1][keyname] = keydata
                 else:
-                    object[segname][-1][keyname] = str(object[segname][-1][keyname]) + '\r\n' + str(keydata)
+                    if type(object[segname][-1][keyname]) is not list:
+                        keydatalist = [object[segname][-1][keyname]]
+                        object[segname][-1][keyname] = keydatalist
+                    object[segname][-1][keyname].append(keydata)
         else:
             continue
             
@@ -132,8 +239,6 @@ def save_list(f, x, first = 0):
             for i in range(first):
                 f.write('\t')
         if type(l) == int:
-            f.write(str(l))
-        elif type(l) == long:
             f.write(str(l))
         elif type(l) == str:
             f.write('\'' + str(l) + '\'')
@@ -163,7 +268,9 @@ def save_dict(f, x, first = 0):
 
         if type(key) == str and key[0] == '_':
             continue
-        if type(x[key]) == int or type(x[key]) == float or type(x[key]) == long:
+        if type(x[key]) == int:
+            f.write(strk + ': ' + str(x[key]))
+        if type(x[key]) == float:
             f.write(strk + ': ' + str(x[key]))
         elif type(x[key]) == str:
             """print (strk + ': \'' + str(x[key]) + '\'' + '\n')"""
@@ -175,7 +282,7 @@ def save_dict(f, x, first = 0):
             f.write(strk + ': ')
             save_dict(f, x[key], first + 1)
         
-        if key is not x.keys()[-1]:
+        if key is not list(x.keys())[-1]:
             if type(x[key]) == dict:
                 f.write(',\n\n')
             else:
@@ -213,16 +320,10 @@ def save_script(f, x):
                     for keyData in x[segName][keyName]:
                         f.write(':' + str(keyData) + '\n')
                 else:
-                    if type(x[segName][keyName]) == int or type(x[segName][keyName]) == long:
-                        f.write(':' + str(x[segName][keyName]) + '\n')
-                    else:
-                        lines = x[segName][keyName].splitlines()
-                        for line in lines:
-                            #f.write(':' + str(x[segName][keyName]) + '\n')
-                            f.write(':' + line + '\n')
+                    f.write(':' + str(x[segName][keyName]) + '\n')
                 f.write('\n')
             f.seek(-2, os.SEEK_CUR)
-            f.write('\n；\n')
+            #f.write('；──────────────────────────────────────\n')
         else:
             seglist = x[segName]
             for segment in seglist:
@@ -237,7 +338,7 @@ def save_script(f, x):
                         f.write(':' + str(segment[keyName]) + '\n')
                     f.write('\n')
                 f.seek(-2, os.SEEK_CUR)
-                f.write('\n；\n')
+                #f.write('；──────────────────────────────────────\n')
 
 
 def save_object(f, x):
@@ -245,14 +346,14 @@ def save_object(f, x):
         return False
     if type(f) is not file:
         return False
-    f.write('# -*- coding: utf-8 -*-\n\n')
+    f.write('# -*- coding: euc-kr -*-\n\n')
     f.write('obj = ')
     save_dict(f, x, 0)
 
 
 def load_object(path):
     try:
-        execfile(path)
+        exec(compile(open(path, "rb").read(), path, 'exec'))
     except:
         print('ERROR : execfile() in load_object(' + path + ')')
         return None
@@ -260,86 +361,19 @@ def load_object(path):
     try:
         o = locals()['obj']
     except:
-        print('ERROR : locals()[] in load_object(' + path + ')')
+        print('ERROR : locals()[] in load_object(' + path + ')')')'
         return None
 
     return o
+    
+def LoadObjectData(o, path):
 
-"""
-o = load_script('용파리')
-
-
-f = open('m.py', 'w')
-save_object(f, o)
-f.close()
-#print o
-f = open('z.py', 'w')
-save_script(f, o)
-f.close()
-
-#f = open('murim.cfg', 'U')
-#for line in f:
-#    print(line)
-#f.close()
-#load_object('m.py')
-"""
-
-def toUni(s):
-    return unicode(s.decode('euc-kr'))
-
-def toJson(x):
-    obj = {}
-    if type(x) is not dict:
+    attr = load_script(path)
+    if attr == None:
         return False
-        
-    for segName in x:
-        seg = toUni(segName)
-        obj[seg] = {}
-        if type(x[segName]) != list:
-            for keyName in x[segName]:
-                key = toUni(keyName)
-                
-                if type(x[segName][keyName]) == list:
-                    obj[seg][key] = []
-                    for keyData in x[segName][keyName]:
-                        data = toUni(keyData)
-                        obj[seg][key].append(data)
-                else:
-                    if type(x[segName][keyName]) == int or type(x[segName][keyName]) == long or type(x[segName][keyName]) == float:
-                        obj[seg][key] = x[segName][keyName]
-                    else:
-                        obj[seg][key] = []
-                        lines = x[segName][keyName].splitlines()
-                        if len(lines) == 1:
-                             obj[seg][key] = toUni(x[segName][keyName])
-                        else:
-                            obj[seg][key] = []
-                            for line in lines:
-                                l = toUni(line)
-                                obj[seg][key].append(l)
-        else:
-            seglist = x[segName]
-            for segment in seglist:
-                seg = toUni(segment)
-                obj[seg] = {}
-                for keyName in segment:
-                    key = toUni(keyName)
-                    if type(segment[keyName]) == list:
-                        obj[seg][key] = []
-                        for keyData in segment[keyName]:
-                            data = toUni(keyData)
-                            obj[seg][key].append(data)
-                    else:
-                        data = toUni(segment[keyName])
-                        obj[seg][key] = data
-    return obj
 
-import json
-import io
-obj = load_script("data/mob/낙양성/82.mob");
-o2 = toJson(obj)
-#print(o2)
-with io.open("murim.json", "w", encoding='utf8') as json_file:
-    data = json.dumps(o2, indent=4, sort_keys=True, ensure_ascii=False)
-    json_file.write(unicode(data))
+    o.attr = attr
+    o.path = path
+
+    return True
 

@@ -6,7 +6,7 @@ import time
 
 from objs.object import Object
 from objs.oneitem import Oneitem, ONEITEM
-from lib.hangul import *
+from lib.hangul import is_han, han_obj
 from lib.loader import load_script, save_script
 from lib.func import *
 
@@ -23,6 +23,14 @@ class Item(Object):
         pass
         #print 'Delete!!! ' + self.getName()
         
+    def han_obj(self):
+        if is_han(self['이름']) == False:
+            react = self['반응이름']
+            if type(react) == list:
+                react = react[0]
+            return self.getNameA() + han_obj(react)
+        return self.getNameA() + han_obj(self['이름'])
+
     def create(self, index):
         #print(path)
         self.index = index
@@ -57,12 +65,17 @@ class Item(Object):
         ob.sendLine('─────────────────────')
         #ob.sendLine(self.get('설명2'))
         desc = self['설명2']
-        d = desc
-        for l in d:
-            if l.find('방어력 - ') == 0:
-                ob.sendLine('방어력 - %d' % self['방어력'])
-            else:
-                ob.sendLine(l)
+        d =desc
+
+        if type(desc) == list:
+            for l in d:
+                if l.find('방어력 - ') == 0:
+                    ob.sendLine('방어력 - %d' % self['방어력'])
+                else:
+                    ob.sendLine(l)
+        else:
+            ob.sendLine(desc)
+
         s = self.getOptionStr()
         if s != '':
             ob.sendLine(s)
@@ -101,7 +114,10 @@ class Item(Object):
         return self.get('종류')
 
     def getUseScript(self):
-        return self.get('사용스크립').replace('$아이템$', self.get('이름'))
+        line = self['사용스크립']
+        if type(line) == list:
+            line = '\r\n'.join(line)
+        return line.replace('$아이템$', self.get('이름'))
         
     def isOneItem(self):
         if self.checkAttr('아이템속성', '단일아이템'):
@@ -122,16 +138,19 @@ class Item(Object):
         if s == '':
             return None
         option = {}
-        lines = s
-        for l in lines:
+        if type(s) == str:
+            s = [ s ]
+        for l in s:
             w = l.split()
+            if len(w) != 2:
+                continue
             option[w[0]] = int(w[1])
         return option
         
     def setOption(self, option):
-        s = ''
+        s = []
         for d in option:
-            s += d + ' ' + str(option[d]) + '\r\n'
+            s.append(d + ' ' + str(option[d]))
         self['옵션'] = s
 
     def getOptionStr(self):
@@ -171,7 +190,7 @@ def loadAllItem():
     files = glob.glob('*.json')
     os.chdir(pwd)
     for file in files:
-        item = getItem(file[:-9])
+        item = getItem(file[:-5])
         if item != None:
             c = c + 1
     

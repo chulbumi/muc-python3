@@ -193,7 +193,7 @@ class Player(Body):
 
     def load(self, path):
 
-        scr = load_script('data/user/' + path)
+        scr = load_script('data/user/' + path + '.json')
 
         if scr == None:
             return False
@@ -336,7 +336,7 @@ class Player(Body):
             o[memo] = self.memo[memo]
             
         try:
-            f = open('data/user/' + self.get('이름'), 'w')
+            f = open('data/user/' + self.get('이름') + '.json', 'w')
         except:
             return False
         save_script(f, o)
@@ -469,7 +469,12 @@ class Player(Body):
         # room Desc
         if not self.checkConfig('간략설명'):
             self.sendLine( '' )
-            self.sendLine(room.get('설명'))
+            desc = room['설명']
+            if type(desc) == list:
+                self.sendLine('\r\n'.join(room.get('설명')))
+            else:
+                self.sendLine(desc)
+
 
         # room Exit ↕↑↓
         if not self.checkConfig('나침반제거'):
@@ -1120,16 +1125,16 @@ class Player(Body):
             #    return
             self.input_to(self.doNothing)
             self.state = sDOUMI
-            from objs.doumi import DOUMI, autoScript
-            self.autoscript = autoScript()
+            from objs.doumi import DOUMI, AutoScript
+            self.autoscript = AutoScript()
             self.autoscript.start(DOUMI['초기도우미'], self)
             return
         if name == '나만바라바':
             # if self.checkMulti():
             #    return
             self.input_to(self.doNothing)
-            from objs.doumi import DOUMI, autoScript
-            self.autoscript = autoScript()
+            from objs.doumi import DOUMI, AutoScript
+            self.autoscript = AutoScript()
             self.autoscript.start(DOUMI['빠른도우미'], self)
             return
 
@@ -1487,7 +1492,7 @@ class Player(Body):
                 #    self.sendLine('중첩된 줄임말은 사용할 수 없습니다.')
                 #    return
                 msg += w + '\r\n'
-            self.channel._buffer = msg + self.channel._buffer
+            self.channel._buffer = msg.encode('utf-8') + self.channel._buffer
 
         try:
             if self.checkMobEvent(line) == True:
@@ -1563,7 +1568,7 @@ class Player(Body):
         if self.env != None:
             obj = self.env['오브젝트:'+cmd]
         if obj != '':
-            self.sendLine(obj)
+            self.sendLine('\r\n'.join(obj))
             return
         self.sendLine('☞ 무슨 말인지 모르겠어요. *^_^*')
 

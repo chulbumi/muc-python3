@@ -1,6 +1,6 @@
 # -*- coding: utf-8 -*-
 
-from twisted.internet import protocol
+from twisted.internet import protocol, reactor
 from twisted.application import service, internet
 import gc
 

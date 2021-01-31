@@ -12,6 +12,12 @@ class CmdObj(Command):
         if mob['물건판매스크립'] == '':
             ob.sendLine('☞ 품목을 보여줄 상인이 없어요. ^^')
             return
-        ob.sendLine(mob['물건판매스크립'])
+        desc = mob['물건판매스크립']
+
+        if type(desc) == list:
+            for l in desc:
+                ob.sendLine(l)
+        else:
+            ob.sendLine(desc)
 
 
