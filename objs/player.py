@@ -846,12 +846,18 @@ class Player(Body):
         return False
 
     def checkEvent(self, e):
+        if e == '':
+            return False
         return self.checkAttr('이벤트설정리스트', e)
 
     def setEvent(self, e):
+        if e == '':
+            return False
         self.setAttr('이벤트설정리스트', e)
 
     def delEvent(self, e):
+        if e == '':
+            return False
         self.delAttr('이벤트설정리스트', e)
         
     def checkArmed(self, level):
@@ -1012,6 +1018,9 @@ class Player(Body):
                     break
 
     def getTendency(self, line):
+        if line == '':
+            return False
+
         type = line.strip()
         p1 = self['0 성격플킬']
         p2 = self['1 성격플킬']
@@ -1055,6 +1064,8 @@ class Player(Body):
         return False
 
     def checkMugongList(self, line):
+        if line == '':
+            return False
         m = line.split()
         for n in m:
             if n not in self.skillList:

@@ -66,10 +66,12 @@ def doEvent(self, mob, key, words, lineNumber = None):
                 sline = sline.replace('$변수:1', words[1])
 
             func = line.split()[0]
+            nextWords = self.getNextWords(sline).strip()
+
             #self.sendLine( line )
             if func == '$엔터$':
                 self._eventTemp = (mob, key, words, lineNum)
-                self.sendLine(sline[6:].strip())
+                self.sendLine(nextWords)
                 self.input_to(self.pressEnter2)
                 self.INTERACTIVE = 0
                 return
@@ -77,15 +79,15 @@ def doEvent(self, mob, key, words, lineNumber = None):
                 self.input_to(self.parse_command)
                 self.INTERACTIVE = 1
             elif func == '$이벤트확인!':
-                if self.checkEvent(sline[13:].strip()) == True:
+                if self.checkEvent(nextWords) == True:
                     searchEnd = True
             elif func == '$이벤트확인':
-                if self.checkEvent(sline[12:].strip()) == False:
+                if self.checkEvent(nextWords) == False:
                     searchEnd = True
             elif func == '$이벤트설정':
-                self.setEvent(sline[12:].strip())
+                self.setEvent(nextWords)
             elif func == '$이벤트삭제':
-                self.delEvent(sline[12:].strip())
+                self.delEvent(nextWords)
             elif func == '$착용확인!':
                 index, cnt = getStrCnt(sline)
                 if '$변수:' in line:
@@ -137,7 +139,8 @@ def doEvent(self, mob, key, words, lineNumber = None):
                     if self.checkItemIndex(index, cnt, True) == True:
                         searchEnd = True
             elif func == '$속성설정':
-                self[sline[10:].strip()] = 1
+                if nextWords != '':
+                    self[nextWords] = 1
             elif func == '$아이템옵션삭제':
                 index, cnt = getStrCnt(sline)
                 if '$변수:' in line:
@@ -229,10 +232,10 @@ def doEvent(self, mob, key, words, lineNumber = None):
                 else:
                     searchEnd = True
             elif func == '$무림별호조건':
-                if self.getTendency(sline[13:]) == False:
+                if self.getTendency(nextWords) == False:
                     searchEnd = True
             elif func == '$위치이동':
-                roomName = self.getNextWords(sline)
+                roomName = nextWords
                 if roomName == '':
                     continue
                 #sline[6:].strip()
@@ -252,12 +255,12 @@ def doEvent(self, mob, key, words, lineNumber = None):
                 self.enterRoom(room, '소환', '소환')
                 self.lpPrompt()
             elif func == '$출력':
-                self.printScript(sline[4:])
+                self.printScript(nextWords)
             elif func == '$무공리스트확인':
-                if self.checkMugongList(sline[16:]) == False:
+                if self.checkMugongList(nextWords) == False:
                     searchEnd = True
             elif func == '$무공리스트확인!':
-                if self.checkMugongList(sline[17:]) == True:
+                if self.checkMugongList(nextWords) == True:
                     searchEnd = True
             elif func == '$무공리스트삭제':
                 var = sline.split()
@@ -265,18 +268,18 @@ def doEvent(self, mob, key, words, lineNumber = None):
                     if m in self.skillList:
                         self.skillList.remove(m)
             elif func == '$무공개수확인':
-                if len(self.skillList) < getInt(sline[14:]):
+                if len(self.skillList) < getInt(nextWords):
                     searchEnd = True                        
             elif func == '$무공확인':
-                if self.checkMugong(sline[10:]) == False:
+                if self.checkMugong(nextWords) == False:
                     searchEnd = True
             elif func == '$무공확인!':
-                if self.checkMugong(sline[11:]) == True:
+                if self.checkMugong(nextWords) == True:
                     searchEnd = True
             elif func == '$무공전수':
-                self.addMugong(sline[10:])
+                self.addMugong(nextWords)
             elif func == '$무공회수':
-                self.delMugong(sline[10:])
+                self.delMugong(nextWords)
             elif func == '$무공시전':
                 skill_found = False
                 for s in self.skills:
@@ -342,19 +345,19 @@ def doEvent(self, mob, key, words, lineNumber = None):
                     self.setFight(mob, True)
                     searchEnd = False
             elif func == '$몹상태확인!':
-                if mob.getAct() == sline[13:].strip():
+                if mob.getAct() == nextWords:
                     searchEnd = True
             elif func == '$몹상태확인':
-                if mob.getAct() != sline[12:].strip():
+                if mob.getAct() != nextWords:
                     searchEnd = True
             elif func == '$몹상태설정':
-                mob.setAct(sline[12:].strip())
+                mob.setAct(nextWords)
             elif func == '$체력소모':
-                self.minusHP( getInt(sline[10:].strip()) )
+                self.minusHP( getInt(nextWords) )
             elif func == '$체력감소':
-                self.minusHP( getInt(sline[10:].strip()) )
+                self.minusHP( getInt(nextWords) )
             elif func == '$내공감소':
-                self.minusMP( getInt(sline[10:].strip()) )
+                self.minusMP( getInt(nextWords) )
             elif func == '$변수확인':
                 var = sline.split()
                 c = getInt(var[1])
@@ -424,19 +427,19 @@ def doEvent(self, mob, key, words, lineNumber = None):
                 self['무림별호'] = words[1]
                 self.do_command('귀환')
             elif func == '$기연존재확인':
-                bRet, owner = ONEITEM.checkOneItemName(sline[14:].strip())
+                bRet, owner = ONEITEM.checkOneItemName(nextWords)
                 if bRet:
                     sub['[기연소지자]'] = owner
                 else:
                     searchEnd = True
             elif func == '$기연확인':
-                bRet, owner = ONEITEM.checkOneItemIndex(sline[10:].strip())
+                bRet, owner = ONEITEM.checkOneItemIndex(nextWords)
                 if bRet:
                     sub['[기연소지자]'] = owner
                 else:
                     searchEnd = True
             elif func == '$기연확인!':
-                bRet, owner = ONEITEM.checkOneItemIndex(sline[11:].strip())
+                bRet, owner = ONEITEM.checkOneItemIndex(nextWords)
                 if bRet:
                     sub['[기연소지자]'] = owner
                     searchEnd = True
@@ -526,10 +529,10 @@ def doEvent(self, mob, key, words, lineNumber = None):
                 if rank1 != 0:
                     searchEnd = True
             elif func == '$레벨상위확인':
-                if int(sline[13:]) > self['레벨']:
+                if getInt(nextWords) > self['레벨']:
                     searchEnd = True
             elif func == '$레벨상위확인!':
-                if int(sline[14:]) <= self['레벨']:
+                if getInt(nextWords) <= self['레벨']:
                     searchEnd = True
             elif func == '$비전설정':
                 self.setAttr('비전이름', sline.split()[1])
@@ -593,7 +596,7 @@ def doEvent(self, mob, key, words, lineNumber = None):
                     searchEnd = True
 
             elif func == '$스크립트호출':
-                scr = sline[13:].strip()
+                scr = nextWords
                 self.INTERACTIVE = 0
                 # from objs.autoscript import autoScript
                 self.autoscript = self.AutoScript()
