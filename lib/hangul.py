@@ -13,30 +13,36 @@ def is_han(word):
 
 
 def han_iga(word):
-    return tossi.pick(word, '이(가)')
+    obj = tossi.parse('이(가)')
+    return obj[word]
 
 def han_ira(word):
-    return tossi.pick(word, '이라')
+    obj = tossi.parse('이라')
+    return obj[word]
 
 def han_obj(word):
-    return tossi.pick(word, '을(를)')
+    obj = tossi.parse('을(를)')
+    return obj[word]
 
 def han_un(word):
-    return tossi.pick(word, '은(는)')
+    obj = tossi.parse('은')
+    return obj[word]
 
 def han_wa(word):
-    return tossi.pick(word, '과(와)')
+    obj = tossi.parse('과(와)')
+    return obj[word]
 
 def han_uro(word):
-    return tossi.pick(word, '(으)로')
-
+    obj = tossi.parse('(으)로')
+    return obj[word]
 
 def han_i(word):
-    return tossi.pick(word, '이')
-
+    obj = tossi.parse('이')
+    return obj[word]
 
 def han_aya(word):
-    return tossi.pick(word, '야')
+    obj = tossi.parse('야')
+    return obj[word]
 
 
 def postPosition(line, name):
