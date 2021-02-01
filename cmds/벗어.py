@@ -44,7 +44,7 @@ class CmdObj(Command):
                                 ob._magicChance -= option[op]
                     if obj['종류'] == '무기':
                         ob.weaponItem = None
-                    ob.sendLine('당신이 [36m' + obj.get.han_obj() + '[37m 착용해제 합니다.')
+                    ob.sendLine('당신이 [36m' + obj.han_obj() + '[37m 착용해제 합니다.')
                     #ob.sendRoom('%s %s 착용해제 합니다.' % (ob.han_iga(), obj.han_obj()))
                     msg += '%s %s 착용해제 합니다.\r\n' % (ob.han_iga(), obj.han_obj())
                     cnt = cnt + 1
