@@ -1,6 +1,5 @@
-import pickle
+import _pickle as cPickle
 from objs.object import Object
-from lib.loader import load_script, save_script
 import json
 
 
@@ -14,7 +13,7 @@ class Guild(Object):
     def load(self):
         try:
             f = open(self.path, "rb")
-            self.attr = pickle.load(f, encoding="euc-kr")
+            self.attr = cPickle.load(f, encoding="euc-kr")
         except IOError:
             print('%s IOError' % self.path)
             return
@@ -28,8 +27,8 @@ class Guild(Object):
     
     def save(self):
         try:
-            f = open(self.path, 'w')
-            cPickle.dump(self.attr, f, encoding="euc-kr")
+            f = open(self.path, 'wb')
+            cPickle.dump(self.attr, f)
         except IOError:
             print('%s IOError' % self.path)
             return
