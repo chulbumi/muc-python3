@@ -34,11 +34,12 @@ class CmdObj(Command):
                 if item.isOneItem():
                     ONEITEM.have(item.index, ob['이름'])
                 nc = 0
+                post = item.han_obj()
                 try:
-                    nc = nCnt[item['이름']]
+                    nc, post = nCnt[item['이름']]
                 except:
-                    nCnt[item['이름']] = 0
-                nCnt[item['이름']] = nc + 1
+                    nCnt[item['이름']] = (0, post)
+                nCnt[item['이름']] = (nc + 1, post)
                 c += 1
             if c == 0:
                 ob.sendLine('☞ 더 이상 꺼낼 물건이 없어요. ^^')
@@ -46,10 +47,11 @@ class CmdObj(Command):
             else:
                 msg = ''
                 for name in nCnt:
-                    nc = nCnt[name]
+                    nc = nCnt[name][0]
+                    post = nCnt[name][1]
                     if nc == 1:
-                        ob.sendLine('당신이 %s에서 [36m%s[37m%s 꺼냅니다.' % (box.getNameA(), name, han_obj(name)))
-                        msg += '%s %s에서 [36m%s[37m%s 꺼냅니다.\r\n' % (ob.han_iga(), box.getNameA(), name, han_obj(name))
+                        ob.sendLine('당신이 %s에서 [36m%s[37m 꺼냅니다.' % (box.getNameA(), post))
+                        msg += '%s %s에서 [36m%s[37m 꺼냅니다.\r\n' % (ob.han_iga(), box.getNameA(), post)
                     else:
                         ob.sendLine('당신이 %s에서 [36m%s[37m %d개를 꺼냅니다.' % (box.getNameA(), name, nc))
                         msg += '%s %s에서 [36m%s[37m %d개를 꺼냅니다.\r\n' % (ob.han_iga(), box.getNameA(), name, nc)
@@ -78,11 +80,12 @@ class CmdObj(Command):
                 if item.isOneItem():
                     ONEITEM.have(item.index, ob['이름'])
                 nc = 0
+                post = item.han_obj()
                 try:
-                    nc = nCnt[item['이름']]
+                    nc, post = nCnt[item['이름']]
                 except:
-                    nCnt[item['이름']] = 0
-                nCnt[item['이름']] = nc + 1
+                    nCnt[item['이름']] = (0, post)
+                nCnt[item['이름']] = (nc + 1, post)
                 c += 1
             if c == 0:
                 ob.sendLine('☞ 더 이상 꺼낼 물건이 없어요. ^^')
@@ -90,10 +93,11 @@ class CmdObj(Command):
             else:
                 msg = ''
                 for name in nCnt:
-                    nc = nCnt[name]
+                    nc = nCnt[name][0]
+                    post = nCnt[name][1]
                     if nc == 1:
-                        ob.sendLine('당신이 %s에서 [36m%s[37m%s 꺼냅니다.' % (box.getNameA(), name, han_obj(name)))
-                        msg += '%s %s에서 [36m%s[37m%s 꺼냅니다.\r\n' % (ob.han_iga(), box.getNameA(), name, han_obj(name))
+                        ob.sendLine('당신이 %s에서 [36m%s[37m 꺼냅니다.' % (box.getNameA(), post))
+                        msg += '%s %s에서 [36m%s[37m 꺼냅니다.\r\n' % (ob.han_iga(), box.getNameA(), post)
                     else:
                         ob.sendLine('당신이 %s에서 [36m%s[37m %d개를 꺼냅니다.' % (box.getNameA(), name, nc))
                         msg += '%s %s에서 [36m%s[37m %d개를 꺼냅니다.\r\n' % (ob.han_iga(), box.getNameA(), name, nc)
@@ -124,11 +128,12 @@ class CmdObj(Command):
                 if item.isOneItem():
                     ONEITEM.have(item.index, ob['이름'])
                 nc = 0
+                post = item.han_obj()
                 try:
-                    nc = nCnt[item['이름']]
+                    nc, post = nCnt[item['이름']]
                 except:
-                    nCnt[item['이름']] = 0
-                nCnt[item['이름']] = nc + 1
+                    nCnt[item['이름']] = (0, post)
+                nCnt[item['이름']] = (nc + 1, post)
                 c += 1
             if c == 0:
                 ob.sendLine('☞ 더 이상 꺼낼 물건이 없어요. ^^')
@@ -136,10 +141,11 @@ class CmdObj(Command):
             else:
                 msg = ''
                 for name in nCnt:
-                    nc = nCnt[name]
+                    nc = nCnt[name][0]
+                    post = nCnt[name][1]
                     if nc == 1:
-                        ob.sendLine('당신이 %s에서 [36m%s[37m%s 꺼냅니다.' % (box.getNameA(), name, han_obj(name)))
-                        msg += '%s %s에서 [36m%s[37m%s 꺼냅니다.\r\n' % (ob.han_iga(), box.getNameA(), name, han_obj(name))
+                        ob.sendLine('당신이 %s에서 [36m%s[37m 꺼냅니다.' % (box.getNameA(), post))
+                        msg += '%s %s에서 [36m%s[37m 꺼냅니다.\r\n' % (ob.han_iga(), box.getNameA(), post)
                     else:
                         ob.sendLine('당신이 %s에서 [36m%s[37m %d개를 꺼냅니다.' % (box.getNameA(), name, nc))
                         msg += '%s %s에서 [36m%s[37m %d개를 꺼냅니다.\r\n' % (ob.han_iga(), box.getNameA(), name, nc)
@@ -170,11 +176,12 @@ class CmdObj(Command):
                 if item.isOneItem():
                     ONEITEM.have(item.index, ob['이름'])
                 nc = 0
+                post = item.han_obj()
                 try:
-                    nc = nCnt[item['이름']]
+                    nc, post = nCnt[item['이름']]
                 except:
-                    nCnt[item['이름']] = 0
-                nCnt[item['이름']] = nc + 1
+                    nCnt[item['이름']] = (0, post)
+                nCnt[item['이름']] = (nc + 1, post)
                 c += 1
             if c == 0:
                 ob.sendLine('☞ 더 이상 꺼낼 물건이 없어요. ^^')
@@ -182,10 +189,11 @@ class CmdObj(Command):
             else:
                 msg = ''
                 for name in nCnt:
-                    nc = nCnt[name]
+                    nc = nCnt[name][0]
+                    post = nCnt[name][1]
                     if nc == 1:
-                        ob.sendLine('당신이 %s에서 [36m%s[37m%s 꺼냅니다.' % (box.getNameA(), name, han_obj(name)))
-                        msg += '%s %s에서 [36m%s[37m%s 꺼냅니다.\r\n' % (ob.han_iga(), box.getNameA(), name, han_obj(name))
+                        ob.sendLine('당신이 %s에서 [36m%s[37m 꺼냅니다.' % (box.getNameA(), post))
+                        msg += '%s %s에서 [36m%s[37m 꺼냅니다.\r\n' % (ob.han_iga(), box.getNameA(), post)
                     else:
                         ob.sendLine('당신이 %s에서 [36m%s[37m %d개를 꺼냅니다.' % (box.getNameA(), name, nc))
                         msg += '%s %s에서 [36m%s[37m %d개를 꺼냅니다.\r\n' % (ob.han_iga(), box.getNameA(), name, nc)
@@ -225,8 +233,8 @@ class CmdObj(Command):
             ob.insert(item)
             if item.isOneItem():
                 ONEITEM.have(item.index, ob['이름'])
-            ob.sendLine('당신이 %s에서 [36m%s[37m%s 꺼냅니다.' % (box.getNameA(), item['이름'], han_obj(name)))
-            msg = '%s %s에서 [36m%s[37m%s 꺼냅니다.\r\n' % (ob.han_iga(), box.getNameA(), item['이름'], han_obj(name))
+            ob.sendLine('당신이 %s에서 [36m%s[37m 꺼냅니다.' % (box.getNameA(), item.han_obj()))
+            msg = '%s %s에서 [36m%s[37m 꺼냅니다.\r\n' % (ob.han_iga(), box.getNameA(), item.han_obj())
             ob.sendRoom(msg[:-2])
             box.save()
             return
@@ -252,11 +260,12 @@ class CmdObj(Command):
             if item.isOneItem():
                 ONEITEM.have(item.index, ob['이름'])
             nc = 0
+            post = item.han_obj()
             try:
-                nc = nCnt[item['이름']]
+                nc, post = nCnt[item['이름']]
             except:
-                nCnt[item['이름']] = 0
-            nCnt[item['이름']] = nc + 1
+                nCnt[item['이름']] = (0, post)
+            nCnt[item['이름']] = (nc + 1, post)
             c += 1
             if c == count:
                 break
@@ -266,10 +275,11 @@ class CmdObj(Command):
         else:
             msg = ''
             for name in nCnt:
-                nc = nCnt[name]
+                nc = nCnt[name][0]
+                post = nCnt[name][1]
                 if nc == 1:
-                    ob.sendLine('당신이 %s에서 [36m%s[37m%s 꺼냅니다.' % (box.getNameA(), name, han_obj(name)))
-                    msg += '%s %s에서 [36m%s[37m%s 꺼냅니다.\r\n' % (ob.han_iga(), box.getNameA(), name, han_obj(name))
+                    ob.sendLine('당신이 %s에서 [36m%s[37m 꺼냅니다.' % (box.getNameA(), post))
+                    msg += '%s %s에서 [36m%s[37m 꺼냅니다.\r\n' % (ob.han_iga(), box.getNameA(), post)
                 else:
                     ob.sendLine('당신이 %s에서 [36m%s[37m %d개를 꺼냅니다.' % (box.getNameA(), name, nc))
                     msg += '%s %s에서 [36m%s[37m %d개를 꺼냅니다.\r\n' % (ob.han_iga(), box.getNameA(), name, nc)

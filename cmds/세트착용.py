@@ -63,7 +63,7 @@ class CmdObj(Command):
                 ob.weaponItem = obj
             s = obj.getUseScript()
             if s == '':
-                ob.sendLine('당신이 [36m' + obj.get('이름') + '[37m' + han_obj(obj.get('이름')) + ' 착용합니다.')
+                ob.sendLine('당신이 [36m' + obj.han_obj() + '[37m' + ' 착용합니다.')
                 #ob.sendRoom('%s %s 착용합니다.' % (ob.han_iga(), obj.han_obj()))
                 msg += '%s %s 착용합니다.\r\n' % (ob.han_iga(), obj.han_obj())
             else:

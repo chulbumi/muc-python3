@@ -39,20 +39,22 @@ class CmdObj(Command):
                         if obj.isOneItem():
                             ONEITEM.drop(obj.index, ob['이름'])
                         nc = 0
+                        post = obj.han_obj()
                         try:
-                            nc = nCnt[obj.get('이름')]
+                            nc, post = nCnt[obj.get('이름')]
                         except:
-                            nCnt[obj.get('이름')] = 0
-                        nCnt[obj.get('이름')] = nc + 1
+                            nCnt[obj.get('이름')] = (0, post)
+                        nCnt[obj.get('이름')] = (nc + 1, post)
                     else:
                         if obj.isOneItem():
                             ONEITEM.destroy(obj.index)
                         nc = 0
+                        post = obj.han_obj()
                         try:
-                            nc = nFail[obj.get('이름')]
+                            nc, post = nFail[obj.get('이름')]
                         except:
-                            nFail[obj.get('이름')] = 0
-                        nFail[obj.get('이름')] = nc + 1
+                            nFail[obj.get('이름')] = (0, post)
+                        nFail[obj.get('이름')] = (nc + 1, post)
                         obj.env = None
                         del obj
             if cnt == 0:
@@ -60,18 +62,20 @@ class CmdObj(Command):
             else:
                 msg = ''
                 for name in nCnt:
-                    nc = nCnt[name]
+                    nc = nCnt[name][0]
+                    post = nCnt[name][1]
                     if nc == 1:
-                        ob.sendLine('당신이 [36m' + name + '[37m' + han_obj(name) + ' 버립니다.')
-                        msg += '%s [36m%s[37m%s 버립니다.\r\n' % (ob.han_iga(), name, han_obj(name))
+                        ob.sendLine('당신이 [36m' + post + '[37m 버립니다.')
+                        msg += '%s [36m%s[37m 버립니다.\r\n' % (ob.han_iga(), post)
                     else:
                         ob.sendLine('당신이 [36m' + name + '[37m %d개를 버립니다.' % nc)
                         msg += '%s [36m%s[37m %d개를 버립니다.\r\n' % (ob.han_iga(), name, nc)
                 for name in nFail:
-                    nc = nFail[name]
+                    nc = nFail[name][0]
+                    post = nFail[name][1]
                     if nc == 1:
-                        ob.sendLine('당신이 [36m' + name + '[37m' + han_obj(name) + ' 버리자 바로 부서집니다.')
-                        msg += '%s [36m%s[37m%s 버리자 바로 부서집니다.\r\n' % (ob.han_iga(), name, han_obj(name))
+                        ob.sendLine('당신이 [36m' + post + '[37m  버리자 바로 부서집니다.')
+                        msg += '%s [36m%s[37m 버리자 바로 부서집니다.\r\n' % (ob.han_iga(), post)
                     else:
                         ob.sendLine('당신이 [36m' + name + '[37m %d개를 버리자 바로 부서집니다.' % nc)
                         msg += '%s [36m%s[37m %d개를 버리자 바로 부서집니다.\r\n' % (ob.han_iga(), name, nc)
@@ -127,39 +131,42 @@ class CmdObj(Command):
                     if obj.isOneItem():
                         ONEITEM.drop(obj.index, ob['이름'])
                     nc = 0
+                    post = obj.han_obj()
                     try:
-                        nc = nCnt[obj.get('이름')]
+                        nc, post = nCnt[obj.get('이름')]
                     except:
-                        nCnt[obj.get('이름')] = 0
-                    nCnt[obj.get('이름')] = nc + 1
+                        nCnt[obj.get('이름')] = (0, post)
+                    nCnt[obj.get('이름')] = (nc + 1, post)
                 else:
                     if obj.isOneItem():
                         ONEITEM.destroy(obj.index)
                     nc = 0
+                    post = obj.han_obj()
                     try:
-                        nc = nFail[obj.get('이름')]
+                        nc, post = nFail[obj.get('이름')]
                     except:
-                        nFail[obj.get('이름')] = 0
-                    nFail[obj.get('이름')] = nc + 1
-                
+                        nFail[obj.get('이름')] = (0, post)
+                        nFail[obj.get('이름')] = (nc + 1, post)
                 #ob.sendLine('당신이 ' + obj.get('이름') + han_obj(obj.get('이름')) + ' 버립니다.')
             if c == 0:
                 ob.sendLine('☞ 그런 아이템이 소지품에 없어요.')
             else:
                 msg = ''
                 for name in nCnt:
-                    nc = nCnt[name]
+                    nc = nCnt[name][0]
+                    post = nCnt[name][1]
                     if nc == 1:
-                        ob.sendLine('당신이 [36m' + name + '[37m' + han_obj(name) + ' 버립니다.')
-                        msg += '%s [36m%s[37m%s 버립니다.\r\n' % (ob.han_iga(), name, han_obj(name))
+                        ob.sendLine('당신이 [36m' + post + '[37m 버립니다.')
+                        msg += '%s [36m%s[37m 버립니다.\r\n' % (ob.han_iga(), post)
                     else:
                         ob.sendLine('당신이 [36m' + name + '[37m %d개를 버립니다.' % nc)
                         msg += '%s [36m%s[37m %d개를 버립니다.\r\n' % (ob.han_iga(), name, nc)
                 for name in nFail:
-                    nc = nFail[name]
+                    nc = nFail[name][0]
+                    post = nFail[name][1]
                     if nc == 1:
-                        ob.sendLine('당신이 [36m' + name + '[37m' + han_obj(name) + ' 버리자 바로 부서집니다.')
-                        msg += '%s [36m%s[37m%s 버리자 바로 부서집니다.\r\n' % (ob.han_iga(), name, han_obj(name))
+                        ob.sendLine('당신이 [36m' + post + '[37m 버리자 바로 부서집니다.')
+                        msg += '%s [36m%s[37m 버리자 바로 부서집니다.\r\n' % (ob.han_iga(), post)
                     else:
                         ob.sendLine('당신이 [36m' + name + '[37m %d개를 버리자 바로 부서집니다.' % nc)
                         msg += '%s [36m%s[37m %d개를 버리자 바로 부서집니다.\r\n' % (ob.han_iga(), name, nc)

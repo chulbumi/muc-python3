@@ -25,11 +25,12 @@ class CmdObj(Command):
                     ONEITEM.have(obj.index, ob['이름'])
                 ob.insert(obj)
                 nc = 0
+                post = obj.han_obj()
                 try:
-                    nc = nCnt[obj.get('이름')]
+                    nc, post = nCnt[obj.get('이름')]
                 except:
-                    nCnt[obj.get('이름')] = 0
-                nCnt[obj.get('이름')] = nc + 1
+                    nCnt[obj.get('이름')] = (0, post)
+                nCnt[obj.get('이름')] = (nc + 1, post)
                 cnt = cnt + 1
             if cnt == 0:
                 ob.sendLine('☞ 더이상 가질 물건이 없다네')
@@ -37,10 +38,11 @@ class CmdObj(Command):
             else:
                 msg = ''
                 for name in nCnt:
-                    nc = nCnt[name]
+                    nc = nCnt[name][0]
+                    post = nCnt[name][1]
                     if nc == 1:
-                        ob.sendLine('당신이 [36m' + name + '[37m' + han_obj(name) + ' 집어서 품속에 갈무리 합니다.')
-                        msg += '%s [36m%s[37m%s 집어서 품속에 갈무리 합니다.\r\n' % (ob.han_iga(), name, han_obj(name))
+                        ob.sendLine('당신이 [36m' + post + '[37m 집어서 품속에 갈무리 합니다.')
+                        msg += '%s [36m%s[37m 집어서 품속에 갈무리 합니다.\r\n' % (ob.han_iga(), post)
                     else:
                         ob.sendLine('당신이 [36m' + name + '[37m %d개를 집어서 품속에 갈무리 합니다.' % nc)
                         msg += '%s [36m%s[37m %d개를 집어서 품속에 갈무리 합니다.\r\n' % (ob.han_iga(), name, nc)
@@ -79,11 +81,12 @@ class CmdObj(Command):
                     ONEITEM.have(obj.index, ob['이름'])
                 ob.insert(obj)
                 nc = 0
+                post = obj.han_obj()
                 try:
-                    nc = nCnt[obj.get('이름')]
+                    nc, post = nCnt[obj.get('이름')]
                 except:
-                    nCnt[obj.get('이름')] = 0
-                nCnt[obj.get('이름')] = nc + 1
+                    nCnt[obj.get('이름')] = (0, post)
+                nCnt[obj.get('이름')] = (nc + 1, post)
                 #ob.sendLine('당신이 [36m' + obj.get('이름') + '[37m' + han_obj(obj.get('이름')) + ' 집어서 품속에 갈무리 합니다.')
             if c == 0:
                 ob.sendLine('☞ 강호에 그런 물건은 존재하지 않는다네')
@@ -91,10 +94,11 @@ class CmdObj(Command):
             else:
                 msg = ''
                 for name in nCnt:
-                    nc = nCnt[name]
+                    nc = nCnt[name][0]
+                    post = nCnt[name][1]
                     if nc == 1:
-                        ob.sendLine('당신이 [36m' + name + '[37m' + han_obj(name) + ' 집어서 품속에 갈무리 합니다.')
-                        msg += '%s [36m%s[37m%s 집어서 품속에 갈무리 합니다.\r\n' % (ob.han_iga(), name, han_obj(name))
+                        ob.sendLine('당신이 [36m' + post + '[37m 집어서 품속에 갈무리 합니다.')
+                        msg += '%s [36m%s[37m 집어서 품속에 갈무리 합니다.\r\n' % (ob.han_iga(), post)
                     else:
                         ob.sendLine('당신이 [36m' + name + '[37m %d개를 집어서 품속에 갈무리 합니다.' % nc)
                         msg += '%s [36m%s[37m %d개를 집어서 품속에 갈무리 합니다.\r\n' % (ob.han_iga(), name, nc)
