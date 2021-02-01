@@ -5,7 +5,7 @@ def fillSpace(ref, out, front = False):
         l = ref
     else:
         l = len(ref.encode('euc-kr'))
-    s = len(out.encode('euc-kr'))
+    s = len(stripANSI(out).encode('euc-kr'))
     if s < l:
         if front == False:
             return out + ' ' * (l - s)
