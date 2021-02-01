@@ -22,6 +22,9 @@ from objs.item import loadAllItem
 #from twitterThread import PostThread, GetTwitterThread
 #from objs.room import loadAllMap
 
+print('\r\n=============================================================')
+print('          ☞ 무크 파이썬3 버전 서버를 실행 합니다.')
+print('=============================================================')
 gc.enable()
 init_commands()
 Emotion()
@@ -29,7 +32,9 @@ Emotion()
 #loadAllMap()
 loadAllMob()
 loadAllItem()
-
+print('=============================================================')
+print('          ☞ OBJ 로딩이 완료 되었습니다.')
+print('=============================================================')
 Loop()
 """
 t = PostThread(queue)
