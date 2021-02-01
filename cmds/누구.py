@@ -1,6 +1,7 @@
 # -*- coding: utf-8 -*-
 
 from objs.cmd import Command
+from lib.func import fillSpace
 
 class CmdObj(Command):
 
@@ -38,7 +39,8 @@ class CmdObj(Command):
                     else:
                         buf = '<[%d;31m%s[0;37m>' % (bright, nick)
                     
-                msg += '  %-26s %-10s' % (buf, c['이름'])
+                #msg += '  %-26s %-10s' % (buf, c['이름'])
+                msg += '  %s %s' % (fillSpace(12, buf), fillSpace(10, c['이름'] ))
                 cnt += 1
                 if cnt % 3 == 0:
                     msg += '\r\n'
