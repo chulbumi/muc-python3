@@ -416,14 +416,23 @@ class Player(Body):
         c = self.get('성격')
         if c == '':
             c = '없음'
-        s = '『%s』 %s' % (m, self.get('이름'))
-        ob.sendLine('[0m[44m[1m[37m◆ 이  름 ▷ %-24s ◆ 성격 ▷ 『%s』   [0m[37m[40m' % (s, c))
+        s = '◆ 이  름 ▷ 『%s』 %s' % (m, self.get('이름'))
+        ref = '━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━'
+        lref = len(ref.encode('euc-kr')) // 2
+        s = fillSpace(lref + 11, s)
+        c = '◆ 성격 ▷ 『%s』' % c
+        c = fillSpace(lref - 11, c)
+        #ob.sendLine('[0m[44m[1m[37m◆ 이  름 ▷ %s ◆ 성격 ▷ 『%s』   [0m[37m[40m' % (s, c))
+        ob.sendLine('[0m[44m[1m[37m%s%s[0m[37m[40m' % (s, c))
         m = self.get('배우자')
         if m == '':
             m = '미혼'
-        s = '『%s』' % m
-        s1 = '%d살(%s)' % (self.get('나이'), self.get('성별'))
-        ob.sendLine('[0m[44m[1m[37m◆ 배우자 ▷ %-24s ◆ 나이 ▷ %-9s  [0m[37m[40m' % (s, s1))
+        s = '◆ 배우자 ▷ 『%s』' % m
+        s1 = '◆ 나이 ▷ %d살(%s)' % (self.get('나이'), self.get('성별'))
+        s = fillSpace(lref + 11, s)
+        s1 = fillSpace(lref - 11, s1)
+
+        ob.sendLine('[0m[44m[1m[37m%s%s[0m[37m[40m' % (s, s1))
         m = self['소속']
         if m != '':
             s = '■ 소  속 ▷ 『%s』' % m

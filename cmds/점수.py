@@ -1,6 +1,7 @@
 # -*- coding: utf-8 -*-
 
 from objs.cmd import Command
+from lib.func import fillSpace
 from include.ansi import *
 
 class CmdObj(Command):
@@ -17,14 +18,14 @@ class CmdObj(Command):
         tmp = get('성격')
         if tmp == '':
             tmp = '----------'
-        write('│ [체  력] %15s │ [성  격]      %10s │' % (temp, tmp))
+        write('│ [체  력] %15s │ [성  격] %s │' % (temp, fillSpace(15, tmp, True)))
         temp = 0
         
-        write('│ [  힘  ]  %5d + %6d │ [성  별]              %2s │' % (ob.getAttPower(), ob.getStr(), get('성별')) )
+        write('│ [  힘  ]  %5d + %6d │ [성  별] %s │' % (ob.getAttPower(), ob.getStr(), fillSpace(15, get('성별'), True)) )
         tmp = get('소속')
         if tmp == '':
             tmp = '----------'
-        write('│ [맷  집] %6d + %6d │ [소  속]      %10s │' % (ob.getArmor(), ob.getArm(), tmp) )
+        write('│ [맷  집] %6d + %6d │ [소  속] %s │' % (ob.getArmor(), ob.getArm(), fillSpace(15, tmp, True)) )
         tmp = get('직위')
         if tmp == '':
             tmp = '----------'
@@ -34,7 +35,7 @@ class CmdObj(Command):
                 tmp = g['%s명칭' % ob['직위']]
             else:
                 tmp = ob['직위']
-        write('│ [민  첩] %15d │ [직  위]      %10s │' % (ob.getDex(), tmp) )
+        write('│ [민  첩] %15d │ [직  위] %s │' % (ob.getDex(), fillSpace(15, tmp, True)) )
         write('│ [命  中] %15d │ [回  避] %15d │' % (ob.getHit(), ob.getMiss()))
         write('│ [必  殺] %15d │ [  運  ] %15d │' % (ob.getCritical(), ob.getCriticalChance()))
         tmp = get('배우자')
@@ -42,7 +43,7 @@ class CmdObj(Command):
             tmp = '----------'
         temp = '%d/%d' % (ob.getMp(), ob.getMaxMp())
         #write('│ [내  공] %15d │ [배우자]      %10s │' % (ob.getMp(), tmp) )
-        write('│ [내  공] %15s │ [배우자]      %10s │' % (temp, tmp) )
+        write('│ [내  공] %15s │ [배우자] %s │' % (temp, fillSpace(15, tmp, True)) )
 
         temp = '%d/%d' % (ob.getItemWeight(), ob.getStr() * 10)
         write('│ [현  경] %15d │ [소지품] %15s │' % (ob['현재경험치'], temp) )

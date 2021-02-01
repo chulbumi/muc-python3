@@ -1,10 +1,16 @@
 # -*- coding: utf-8 -*-
 
-def fillSpace(ref, out):
-    l = len(ref.encode('euc-kr'))
+def fillSpace(ref, out, front = False):
+    if type(ref) == int:
+        l = ref
+    else:
+        l = len(ref.encode('euc-kr'))
     s = len(out.encode('euc-kr'))
     if s < l:
-        return out + ' ' * (l - s)
+        if front == False:
+            return out + ' ' * (l - s)
+        else:
+            return ' ' * (l - s) + out
     return out 
 
 def log(line):
