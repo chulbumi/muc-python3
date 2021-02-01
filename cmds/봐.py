@@ -28,12 +28,12 @@ class CmdObj(Command):
                 s = item['이름'] + ' ' + item.getOptionStr()
             s = '[%4d] %s' % (c, s)
             s1 = stripANSI(s)
-            space = ' ' * (38 - len(s1))
-            m = '%-38s' % (s + space)
-            if cnt == 1 and len(stripANSI(m)) > 38:
+            #m = '%-38s' % (s + space)
+            m = '%s' % fillSpace(38, s)
+            if cnt == 1 and len(stripANSI(m).encode('euc-kr')) > 38:
                 msg += '\r\n'
             msg += m
-            if len(stripANSI(s)) > 38:
+            if len(stripANSI(s).encode('euc-kr')) > 38:
                 msg += '\r\n'
                 cnt = 0 
             else:
@@ -100,13 +100,12 @@ class CmdObj(Command):
                     buf = '[1;36m·[0;36m%s %s%d개[0;37m' % (name, a, nc)
                 c += 1
                 #보관함 정렬 수정
-                buf1=stripANSI(buf)
-                space= ' ' * (22 - len(buf1))
-                m = '%-22s' % (buf + space)
-                if cnt == 1 and len(stripANSI(m)) > 22:
+                #m = '%-22s' % (buf + space)
+                m = '%s' % fillSpace(22, buf)
+                if cnt == 1 and len(stripANSI(m).encode('euc-kr')) > 22:
                     msg += '\r\n'
                 msg += m
-                if len(stripANSI(buf)) > 22:
+                if len(stripANSI(buf).encode('euc-kr')) > 22:
                     msg += '\r\n'
                     cnt = 0 
                 else:
