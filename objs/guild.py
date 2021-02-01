@@ -13,8 +13,8 @@ class Guild(Object):
         
     def load(self):
         try:
-            f = open(self.path,)
-            self.attr = pickle.load(f)
+            f = open(self.path, "rb")
+            self.attr = pickle.load(f, encoding="euc-kr")
         except IOError:
             print('%s IOError' % self.path)
             return
@@ -28,8 +28,8 @@ class Guild(Object):
     
     def save(self):
         try:
-            with open(self.path, 'w') as fp:
-                json.dump(fp)
+            f = open(self.path, 'w')
+            cPickle.dump(self.attr, f, encoding="euc-kr")
         except IOError:
             print('%s IOError' % self.path)
             return
