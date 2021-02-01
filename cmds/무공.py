@@ -18,7 +18,7 @@ class CmdObj(Command):
             buf = '◁ 당신의 무공 ▷'
         else:
             buf = '◁ %s의 무공 ▷' % target['이름']
-        ob.sendLine('[0m[47m[30m%-78s[0m[40m[37m' % buf)
+        ob.sendLine('[0m[47m[30m%-71s[0m[40m[37m' % buf)
         ob.sendLine('───────────────────────────────────────')
         #ob.sendLine('[1m[40m[32m▷ 일반무공[0m[40m[37m')
         msg = ''
