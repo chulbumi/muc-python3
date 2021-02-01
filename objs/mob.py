@@ -730,7 +730,7 @@ class Mob(Body):
         noissue = ''
         for key in self.attr:
             if key.find('이벤트') == 0:
-                keywords = key[5:].split()
+                keywords = key[4:].split()
                 cmdList = []
                 issueList = []
                 for keyword in keywords:
