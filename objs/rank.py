@@ -1,14 +1,13 @@
 # -*- coding: utf-8 -*-
-from lib.loader import load_script, save_script
-import _pickle
+import _pickle as cPickle
 
 class Rank():
     attr = {}
     path = 'data/config/rank.dat'
     def load(self):
         try:
-            with open(self.path) as fp:
-                self.attr = load_script(fp)
+            with open(self.path, 'rb') as fp:
+                self.attr = cPickle.load(fp, encoding="euc-kr")
         except IOError:
             print('%s IOError' % self.path)
             return
@@ -21,8 +20,8 @@ class Rank():
 
     def save(self):
         try:
-            with open(self.path, 'w', encoding="utf-8") as fp:
-                save_script(fp, self.attr)
+            f = open(self.path, 'wb')
+            cPickle.dump(self.attr, f)
 
         except IOError:
             print('%s IOError' % self.path)
