@@ -6,8 +6,8 @@ class Rank():
     path = 'data/config/rank.dat'
     def load(self):
         try:
-            with open(self.path, 'rb') as fp:
-                self.attr = cPickle.load(fp, encoding="euc-kr")
+            f = open(self.path, "rb")
+            self.attr = cPickle.load(f, encoding="euc-kr")
         except IOError:
             print('%s IOError' % self.path)
             return
@@ -17,7 +17,7 @@ class Rank():
         except:
             print('Error %s' % self.path)
             return
-
+        f.close()
     def save(self):
         try:
             f = open(self.path, 'wb')

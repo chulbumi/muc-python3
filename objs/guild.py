@@ -38,6 +38,7 @@ class Guild(Object):
         except:
             print('Error %s' % self.path)
             return
+        f.close()
 
 GUILD = Guild()
 

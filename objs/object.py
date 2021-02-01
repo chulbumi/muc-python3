@@ -2,7 +2,7 @@
 
 import copy
 from lib.func import getInt, stripANSI
-from lib.hangul import han_iga, han_obj, han_un
+from lib.hangul import is_han, han_iga, han_obj, han_un
 
 class Object:
 
@@ -103,13 +103,25 @@ class Object:
         pass
         
     def han_iga(self):
-        return self.getNameA() + han_iga(self['이름'])
+        if is_han(self['이름']) == False:
+            react = self['반응이름']
+            if type(react) == list:
+                react = react[0]
+            return self.getNameA() + han_iga(react)
         
     def han_obj(self):
-        return self.getNameA() + han_obj(self['이름'])
+        if is_han(self['이름']) == False:
+            react = self['반응이름']
+            if type(react) == list:
+                react = react[0]
+            return self.getNameA() + han_obj(react)
         
     def han_un(self):
-        return self.getNameA() + han_un(self['이름'])
+        if is_han(self['이름']) == False:
+            react = self['반응이름']
+            if type(react) == list:
+                react = react[0]
+            return self.getNameA() + han_un(react)
         
     def findObjName(self, name, order = 1):
         n = 0
