@@ -254,7 +254,7 @@ class Mob(Body):
             return
             
         ob.sendLine('━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━')
-        ob.sendLine('[0m[44m[1m[37m◆ 이름 ▷ %-49s[0m[37m[40m' % self.get('이름'))
+        ob.sendLine('[0m[44m[1m[37m◆ 이름 ▷ %-47s[0m[37m[40m' % self.get('이름'))
         ob.sendLine('──────────────────────────────')
         desc = self['설명2']
         if type(desc) == list:

@@ -1,5 +1,12 @@
 # -*- coding: utf-8 -*-
 
+def fillSpace(ref, out):
+    l = len(ref.encode('euc-kr'))
+    s = len(out.encode('euc-kr'))
+    if s < l:
+        return out + ' ' * (l - s)
+    return out 
+
 def log(line):
     import time
     print(time.strftime('[%Y-%m-%d %H:%M:%S] ', time.localtime()) + line)

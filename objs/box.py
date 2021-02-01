@@ -115,9 +115,11 @@ class Box(Object):
         pm = self['보관증가은전']
         pp = self['보관최대수량']
         
+        ref = '━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━'
         ob.sendLine('━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━')
         buf = '◁ %s의 %s ▷' % (self['주인'], self['이름'])
-        ob.sendLine('[1m[44m[37m%-78s[0m[40m[37m' % buf)
+        buf = fillSpace(ref, buf)
+        ob.sendLine('[1m[44m[37m%s[0m[40m[37m' % buf)
         ob.sendLine('───────────────────────────────────────')
         c = 0
         nCnt = {}
@@ -153,7 +155,9 @@ class Box(Object):
             buf = '◆ 수량 (%d/%d)  ◆ 최대수량 (%d)  ◆ 확장에 필요한 은전 (%d/%d)' % ( len(self.objs), self['보관수량'], \
             self['보관최대수량'], getInt(self['은전']), self['보관증가은전'])
         ob.sendLine('───────────────────────────────────────')
-        ob.sendLine('[0m[47m[30m%-78s[0m[40m[37m' % buf)
+
+        buf = fillSpace(ref, buf)
+        ob.sendLine('[0m[47m[30m%s[0m[40m[37m' % buf)
         ob.sendLine('━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━')
 
         

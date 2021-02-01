@@ -2,6 +2,7 @@
 
 from objs.cmd import Command
 from lib.hangul import *
+from lib.func import *
 
 class CmdObj(Command):
 
@@ -10,9 +11,11 @@ class CmdObj(Command):
         pm = obj['보관증가은전']
         pp = obj['보관최대수량']
         
+        ref = '━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━'
         ob.sendLine('━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━')
         buf = '◁ %s의 %s ▷' % (obj['주인'], obj['이름'])
-        ob.sendLine('[1m[44m[37m%-69s[0m[40m[37m' % buf)
+        buf = fillSpace(ref, buf)
+        ob.sendLine('[1m[44m[37m%s[0m[40m[37m' % buf)
         ob.sendLine('───────────────────────────────────────')
         c = 0
         cnt = 0
@@ -54,7 +57,8 @@ class CmdObj(Command):
             buf = '◆ 수량 (%d/%d)  ◆ 최대수량 (%d)  ◆ 확장에 필요한 은전 (%d/%d)' % ( len(obj.objs), obj['보관수량'], \
             obj['보관최대수량'], getInt(obj['은전']), obj['보관증가은전'])
         ob.sendLine('───────────────────────────────────────')
-        ob.sendLine('[0m[47m[30m%-75s[0m[40m[37m' % buf)
+        buf = fillSpace(ref, buf)
+        ob.sendLine('[0m[47m[30m%s[0m[40m[37m' % buf)
         ob.sendLine('━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━')
 #보관함 정렬 수정
     def viewBox(self, obj, ob):
@@ -62,9 +66,11 @@ class CmdObj(Command):
         pm = obj['보관증가은전']
         pp = obj['보관최대수량']
         
+        ref = '━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━'
         ob.sendLine('━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━')
         buf = '◁ %s의 %s ▷' % (obj['주인'], obj['이름'])
-        ob.sendLine('[1m[44m[37m%-78s[0m[40m[37m' % buf)
+        buf = fillSpace(ref, buf)
+        ob.sendLine('[1m[44m[37m%s[0m[40m[37m' % buf)
         ob.sendLine('───────────────────────────────────────')
         c = 0
         nCnt = {}
@@ -121,7 +127,8 @@ class CmdObj(Command):
             buf = '◆ 수량 (%d/%d)  ◆ 최대수량 (%d)  ◆ 확장에 필요한 은전 (%d/%d)' % ( len(obj.objs), obj['보관수량'], \
             obj['보관최대수량'], getInt(obj['은전']), obj['보관증가은전'])
         ob.sendLine('───────────────────────────────────────')
-        ob.sendLine('[0m[47m[30m%-78s[0m[40m[37m' % buf)
+        buf = fillSpace(ref, buf)
+        ob.sendLine('[0m[47m[30m%s[0m[40m[37m' % buf)
         ob.sendLine('━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━')
 
 #관리자용 정보 추가

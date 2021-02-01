@@ -57,18 +57,26 @@ class Item(Object):
         save_script(f, o)
         f.close()
         return True
-        
+
     def view(self, ob):
+        ref = '━━━━━━━━━━━━━━━━━━━━━'
+
         ob.sendLine('━━━━━━━━━━━━━━━━━━━━━')
-        ob.sendLine('[0m[44m[1m[37m◆ 이름 ▷ %-31s[0m[37m[40m' % self.get('이름'))
-        ob.sendLine('[0m[44m[1m[37m◆ 종류 ▷ %-31s[0m[37m[40m' % self.get('종류'))
+
+        out = '◆ 이름 ▷ %s' % self.get('이름')
+        out = fillSpace(ref, out)
+        ob.sendLine('[0m[44m[1m[37m%s[0m[37m[40m' % out)
+
+        out = '◆ 종류 ▷ %s' % self.get('종류')
+        out = fillSpace(ref, out)
+        ob.sendLine('[0m[44m[1m[37m%s[0m[37m[40m' % out)
         ob.sendLine('─────────────────────')
+
         #ob.sendLine(self.get('설명2'))
         desc = self['설명2']
-        d =desc
 
         if type(desc) == list:
-            for l in d:
+            for l in desc:
                 if l.find('방어력 - ') == 0:
                     ob.sendLine('방어력 - %d' % self['방어력'])
                 else:
