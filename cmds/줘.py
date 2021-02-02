@@ -77,12 +77,13 @@ class CmdObj(Command):
             ob.sendLine('☞ 그런 아이템이 소지품에 없어요.')
             return
         name = obj['이름']
+        post = obj.han_obj()
         target = ob.env.findObjName(words[0])
         if target == None or not is_player(target):
             ob.sendLine('☞ 물품을 건내줄 무림인을 찾을 수 없어요. ^^')
             return
         if target == ob:
-            ob.sendLine('당신이 [36m' + obj['이름'] + '[37m' + han_obj(obj['이름']) + ' 가지고 장난합니다. \'@_@\'')
+            ob.sendLine('당신이 [36m' + post + '[37m 가지고 장난합니다. \'@_@\'')
             return
         i = 1
         c = 0
@@ -118,7 +119,7 @@ class CmdObj(Command):
                     ob.sendLine('[1m' + target['이름'] + '[0;37m' + han_iga(target['이름']) + \
                         ' 무거워서 받지 못합니다.')
                     target.sendLine('\r\n[1m' + ob['이름'] + '[0;37m' + han_iga(ob['이름']) + ' 줄려는 ' + 
-                        '[36m' + obj['이름'] + '[37m' + han_obj(obj['이름']) + ' 무거워서 받지 못합니다.')
+                        '[36m' + obj.han_obj() + '[37m 무거워서 받지 못합니다.')
                     target.lpPrompt()
                     return
                 break
@@ -127,7 +128,7 @@ class CmdObj(Command):
                     ob.sendLine('[1m' + target['이름'] + '[0;37m' + han_iga(target['이름']) + \
                         ' 수량 한계로 받지 못합니다.')
                     target.sendLine('\r\n[1m' + ob['이름'] + '[0;37m' + han_iga(ob['이름']) + ' 줄려는 ' + \
-                        '[36m' + obj['이름'] + '[37m' + han_obj(obj['이름']) + ' 수량 한계로 받지 못합니다.')
+                        '[36m' + obj.han_obj() + '[37m 수량 한계로 받지 못합니다.')
                     target.lpPrompt()
                     return
                 break
@@ -140,9 +141,9 @@ class CmdObj(Command):
         if c == 0:
             ob.sendLine('☞ 그런 아이템이 소지품에 없어요.')
         elif c == 1:
-            ob.sendLine('당신이 [1m' + target['이름'] + '[0;37m에게 [36m' + name + '[37m' + han_obj(name) + ' 줍니다.')
-            target.sendLine('\r\n[1m' + ob['이름'] + '[0;37m' + han_iga(ob['이름']) + ' 당신에게 [36m' + name + '[37m' + han_obj(name) + ' 줍니다.')
-            ob.sendRoom('%s %s에게 [36m%s[37m%s 줍니다.' % ( ob.han_iga(), target.getNameA(), name, han_obj(name)), ex = target)
+            ob.sendLine('당신이 [1m' + target['이름'] + '[0;37m에게 [36m' + post + '[37m 줍니다.')
+            target.sendLine('\r\n[1m' + ob['이름'] + '[0;37m' + han_iga(ob['이름']) + ' 당신에게 [36m' + post + '[37m 줍니다.')
+            ob.sendRoom('%s %s에게 [36m%s[37m 줍니다.' % ( ob.han_iga(), target.getNameA(), post), ex = target)
             target.lpPrompt()
         else:
             ob.sendLine('당신이 [1m' + target['이름'] + '[0;37m에게 [36m' + name + '[37m' + ' %d개를 줍니다.' % c)

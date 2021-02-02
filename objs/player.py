@@ -2379,7 +2379,7 @@ class Player(Body):
         return False
         
     def setConfig(self, config):
-        c = ''
+        c = []
         find = False
         kl = self['설정상태']
         for k in kl:
