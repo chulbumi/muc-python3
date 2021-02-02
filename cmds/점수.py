@@ -85,3 +85,4 @@ class CmdObj(Command):
         p = getInt(ob['특성치'])
         if p != 0:
             ob.sendLine('★ 당신은 %d개의 여유 특성치를 보유하고 있습니다.' % p)
+

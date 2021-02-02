@@ -59,6 +59,14 @@ class Mob(Body):
         
         
         Body.__init__(self)
+
+    def han_iga(self):
+        if is_han(self['이름']) == False:
+            react = self['반응이름']
+            if type(react) == list:
+                react = react[0]
+            return self.getNameA() + han_obj(react)
+        return self.getNameA() + han_iga(self['이름'])
         
     def create(self, index):
         #print(path)
