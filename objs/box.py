@@ -143,7 +143,8 @@ class Box(Object):
                 else:
                     buf = '%s %d개' % (name, nc)
                 c += 1
-                msg += '[1;36m·[0;36m%-20s[0;37m  ' % buf
+                #msg += '[1;36m·[0;36m%-20s[0;37m  ' % buf
+                msg += '[1;36m·[0;36m%s[0;37m  ' % fillSpace(20, buf)
                 if c % 3 == 0:
                     msg += '\r\n'
             if c % 3 == 0:

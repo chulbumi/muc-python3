@@ -1,6 +1,7 @@
 # -*- coding: utf-8 -*-
 
 from objs.cmd import Command
+from lib.func import fillSpace
 
 class CmdObj(Command):
 
@@ -46,7 +47,7 @@ class CmdObj(Command):
                     else:
                         s = target.skillMap[m][0]
                     buf = '%s(%d성)' % (m, s)
-                    msg += ' ◇ %-20s ' % buf
+                    msg += ' ◇ %s ' % fillSpace(20, buf)
                     c += 1
                     if c % 3 == 0:
                         msg += '\r\n'
@@ -70,7 +71,8 @@ class CmdObj(Command):
                 msg = ''
             c = 0
             for m in lines:
-                msg += ' ◇ %-20s ' % m
+                #msg += ' ◇ %-20s ' % m
+                msg += ' ◇ %s ' % fillSpace(20, m)
                 c += 1
                 if c % 3 == 0:
                     msg += '\r\n'
