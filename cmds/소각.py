@@ -49,14 +49,15 @@ class CmdObj(Command):
 
             c += 1
             name = obj['이름']
+            post = obj.han_obj()
             ob.remove(obj)
             if obj.isOneItem():
                 ONEITEM.destroy(obj.index)
         if c == 0:
             ob.sendLine('☞ 그런 아이템이 소지품에 없어요.')
         elif c == 1:
-            ob.sendLine('당신이 [36m%s[37m%s 소각해버립니다.' % (name, han_obj(name)))
-            ob.sendRoom('%s [36m%s[37m%s 소각해버립니다.' % (ob.han_iga(), name, han_obj(name)))
+            ob.sendLine('당신이 [36m%s[37m 소각해버립니다.' % (post))
+            ob.sendRoom('%s [36m%s[37m 소각해버립니다.' % (ob.han_iga(), post))
         else:
             ob.sendLine('당신이 [36m%s[37m %d개를 소각해버립니다.' % (name, c))
             ob.sendRoom('%s [36m%s[37m %d개를 소각해버립니다.' % (ob.han_iga(), name, c))

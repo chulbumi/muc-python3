@@ -851,11 +851,12 @@ class Body(Object):
                 self.env.insert(item)
                 item.drop()
                 nc = 0
+                post = item.han_obj()
                 try:
-                    nc = nCnt[item['이름']]
+                    nc, post = nCnt[item['이름']]
                 except:
-                    nCnt[item.get('이름')] = 0
-                nCnt[item.get('이름')] = nc + 1
+                    nCnt[item['이름']] = (0, post)
+                nCnt[item['이름']] = (nc + 1, post)
             else:
                 nc = 0
                 try:
@@ -869,15 +870,16 @@ class Body(Object):
             return
             
         for name in nCnt:
-            nc = nCnt[name]
+            nc = nCnt[name][0]
+            post = nCnt[name][1]
             if nc == 1:
-                self.sendLine('당신이 [36m' + name + '[37m' + han_obj(name) + ' 떨어뜨립니다.')
+                self.sendLine('당신이 [36m' + post + '[37m 떨어뜨립니다.')
             else:
                 self.sendLine('당신이 [36m' + name + '[37m %d개를 떨어뜨립니다..' % nc)
         for name in nFail:
             nc = nFail[name]
             if nc == 1:
-                self.sendLine('당신이 [36m' + name + '[37m' + han_obj(name) + ' 떨어뜨리자 바로 부서집니다.')
+                self.sendLine('당신이 [36m' + post + '[37m 떨어뜨리자 바로 부서집니다.')
             else:
                 self.sendLine('당신이 [36m' + name + '[37m %d개를 떨어뜨리자 바로 부서집니다.' % nc)
         
