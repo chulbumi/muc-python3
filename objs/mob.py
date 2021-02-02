@@ -75,6 +75,10 @@ class Mob(Body):
         except:
             return False
             
+        react = self['반응이름']
+        if type(react) == str:
+            self['반응이름'] = [ react ]
+
         self.init()
         
     def init(self):
