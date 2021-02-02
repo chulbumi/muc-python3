@@ -1,6 +1,7 @@
 # -*- coding: utf-8 -*-
 
 from objs.cmd import Command
+from lib.func import fillSpace
 
 class CmdObj(Command):
 
@@ -9,7 +10,7 @@ class CmdObj(Command):
         i = 0
         if line ==  '':
             for cfg in ob.CFG:
-                msg += '[1m[40m[32m·[0m[40m[37m %-17s' % cfg
+                msg += '[1m[40m[32m·[0m[40m[37m %s' % fillSpace(17, cfg)
                 if ob.checkConfig(cfg):
                     msg += '[[1m설  정[0;37m]    '
                 else:
