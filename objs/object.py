@@ -103,25 +103,13 @@ class Object:
         pass
         
     def han_iga(self):
-        if is_han(self['이름']) == False:
-            react = self['반응이름']
-            if type(react) == list:
-                react = react[0]
-            return self.getNameA() + han_iga(react)
+        return self.getNameA() + han_iga(self['이름'])
         
     def han_obj(self):
-        if is_han(self['이름']) == False:
-            react = self['반응이름']
-            if type(react) == list:
-                react = react[0]
-            return self.getNameA() + han_obj(react)
+        return self.getNameA() + han_obj(self['이름'])
         
     def han_un(self):
-        if is_han(self['이름']) == False:
-            react = self['반응이름']
-            if type(react) == list:
-                react = react[0]
-            return self.getNameA() + han_un(react)
+        return self.getNameA() + han_un(self['이름'])
         
     def findObjName(self, name, order = 1):
         n = 0
