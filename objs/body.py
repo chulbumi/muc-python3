@@ -423,7 +423,9 @@ class Body(Object):
         s2 += 1
         
         up = False
-        lv1 = self.skillLvMap[s.name]
+        lv1 = 1
+        if s.name in Body.skillLvMap:
+            lv1 = self.skillLvMap[s.name]
         
         # test only!!!
         
@@ -1027,3 +1029,4 @@ for lv in Body.skillLvName:
         if name == '':
             continue
         Body.skillLvMap[name.strip()] = Body.skillLv[lv]
+

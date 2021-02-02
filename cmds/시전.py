@@ -220,7 +220,7 @@ class CmdObj(Command):
             plus = 0
             for at in attr:
                 if at.find('상대무공') == 0:
-                    aName = at[9:]
+                    aName = at[5:]
                     against = MUGONG[aName].clone()
                     break
             
