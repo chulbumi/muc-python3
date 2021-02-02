@@ -1,6 +1,6 @@
 # -*- coding: utf-8 -*-
 
-from lib.func import getInt, stripANSI
+from lib.func import getInt, stripANSI, getNextWords
 from lib.hangul import is_han
 
 class AutoScript:
@@ -37,6 +37,7 @@ class AutoScript:
                 continue
             elif line[0] == '$':
                 l = line.strip()
+                nw = getNextWords(l)
                 if l == '$출력시작':
                     printLine = True
                 elif l == '$출력끝':
@@ -47,7 +48,7 @@ class AutoScript:
                     self.player.stopAutoScript()
                     return
                 elif l.startswith('$틱'):
-                    tick = getInt(l[4:])
+                    tick = getInt(nw)
                     if tick != 0:
                         self.tick = tick * 0.1 * 1.5
                     self.lineNum += 1
@@ -62,15 +63,15 @@ class AutoScript:
                     return
                 elif l.startswith('$한글확인'):
                     if not is_han(stripANSI(self.player.temp_input)):
-                        self.lineNum -= int(l[6:])
+                        self.lineNum -= getInt(nw)
                         self.player.sendLine('한글만 입력 가능합니다. 다시 입력하세요.')
                         continue
                 elif l.startswith('$단어입력'):
-                    words = l[6:].split()
+                    words = nw
                     limit = 10
                     keywords = []
                     if len(words) > 0:
-                        limit = int(words[0])
+                        limit = getInt(words[0])
                         if len(words) == 2:
                             keywords = words[1].split(',')
                     self.lineNum += 1
@@ -78,13 +79,13 @@ class AutoScript:
                     return
                 elif l.startswith('$한줄입력'):
                     self.lineNum += 1
-                    self.player.input_to(self.player.getLine, l[6:])
+                    self.player.input_to(self.player.getLine, nw)
                     return
                 elif l.startswith('$라인입력'):
                     self.lineNum += 1
                     self.player.temp_input = []
                     self.player.sendLine('입력을 마치시려면 \'.\' 를 입력하세요.')
-                    self.player.input_to(self.player.getLines, l[6:])
+                    self.player.input_to(self.player.getLines, nw)
                     return
                 elif l.startswith('$입력확인'):
                     self.lineNum += 1
@@ -100,7 +101,7 @@ class AutoScript:
                     for index in Item.Items:
                         item = Item.Items[index]
                         if item['이름'] == stripANSI(self.player.temp_input):
-                            self.lineNum -= int(l[6:])
+                            self.lineNum -= getInt(nw)
                             self.player.sendLine('중복된 이름이 있습니다. 다시 입력하세요.')
                             find = True
                             break
@@ -110,7 +111,7 @@ class AutoScript:
                     self.player.temp_item = getItem('올숙무기').deepclone()
                     self.player.temp_item.index = self.player['이름'] + '_올숙무기'
                     self.player.temp_item.path = 'data/item/' + self.player.temp_item.index + '.itm'
-                    weapon_type = int(self.player.temp_input)
+                    weapon_type = getInt(self.player.temp_input)
                     self.player.temp_item['무기종류'] = weapon_type
                     if weapon_type == 1:
                         msg = '검'
@@ -126,7 +127,7 @@ class AutoScript:
                     self.player.temp_item['사용자'] = self.player['이름']
                 elif l.startswith('$무기속성'):
                     if l.startswith('이름'):
-                        self.player.temp_item[l[6:]] = self.player.temp_input
+                        self.player.temp_item[nw] = self.player.temp_input
                         self.player.temp_item['반응이름'] = stripANSI(self.player.temp_input)
                     elif l.startswith('설명2'):
                         self.player.temp_item['설명2'] = ''
@@ -152,7 +153,7 @@ class AutoScript:
 
                         self.player.temp_item['무공이름'] = '%s %s 1000000 10000000 10' % (mugong, weapon_type)
                     else:
-                        self.player.temp_item[l[6:]] = self.player.temp_input
+                        self.player.temp_item[nw] = self.player.temp_input
                 elif l.startswith('$숙련도선택'):
                     if self.player.temp_input == '1':
                         self.player.temp_move = 1

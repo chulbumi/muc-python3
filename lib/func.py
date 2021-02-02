@@ -1,5 +1,11 @@
 # -*- coding: utf-8 -*-
 
+def getNextWords(line):
+    words = line.split(None, 1)
+    if len(words) != 2:
+        return ''
+    return words[1]
+
 def fillSpace(ref, out, front = False):
     if type(ref) == int:
         l = ref

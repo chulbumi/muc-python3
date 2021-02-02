@@ -397,11 +397,12 @@ class Room(Object):
             attrs = [attrs, ]
         for attr in attrs:
             self.mapAttr.append(attr)
+            nw = getNextWords(attr)
             if attr.find('인원제한') == 0:
-                self.limitNum = getInt(attr[8:].strip())
+                self.limitNum = getInt(nw)
                 continue
             if attr.find('명령금지') == 0:
-                self.limitCmds = attr[8:].split()
+                self.limitCmds = nw
                 continue
             
     def checkAttr(self, attr):

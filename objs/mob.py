@@ -734,7 +734,8 @@ class Mob(Body):
         noissue = ''
         for key in self.attr:
             if key.find('이벤트') == 0:
-                keywords = key[4:].split()
+                nw = getNextWords(key)
+                keywords = nw.split()
                 cmdList = []
                 issueList = []
                 for keyword in keywords:
@@ -925,7 +926,7 @@ class Mob(Body):
             plus = 0
             for at in attr:
                 if at.find('상대무공') == 0:
-                    aName = at[9:]
+                    aName = getNextWords(at)
                     against = MUGONG[aName].clone()
                     break
             if against != '':

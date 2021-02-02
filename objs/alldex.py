@@ -4,7 +4,7 @@ from twisted.internet import reactor
 from objs.object import Object
 
 from lib.loader import load_script, save_script
-from lib.func import getInt
+from lib.func import getInt, getNextWords
 from lib.hangul import postPosition1
 from objs.skill import MUGONG
 
@@ -45,19 +45,22 @@ class autoScript():
                 self.player.sendLine('')
             elif line[0] == '$':
                 l = line.strip()
+                nw = getNextWords(l)
+                func = l.split()[0]
+
                 if  l == '$출력시작':
                     printLine = True
                 elif l == '$출력끝':
                     printLine = False
                     self.lineNum += 1
                     continue
-                elif l[:3] == '$틱':
-                    tick = getInt(l[4:])
+                elif func == '$틱':
+                    tick = getInt(nw)
                     if tick != 0:
                         self.tick = tick * 0.1 * 1.5
                     self.lineNum += 1
                     continue
-                elif l[:7] == '$키입력':
+                elif func == '$키입력':
                     key = l.find(':')
                     if key == -1:
                         self.player.input_to(self.player.pressEnter1)
@@ -65,17 +68,17 @@ class autoScript():
                         self.player.input_to(self.player.getKeyInput, l[key + 1:])
                     self.lineNum += 1
                     return
-                elif l[:9] == '$이름획득':
+                elif func == '$이름획득':
                     self.lineNum += 1
                     self.player.write('무림존함ː')
                     self.player.input_to(self.player.getNewname)
                     return
-                elif l[:9] == '$암호획득':
+                elif func == '$암호획득':
                     self.lineNum += 1
                     self.player.write('존함암호ː')
                     self.player.input_to(self.player.getNewpass)
                     return
-                elif l[:9] == '$성별획득':
+                elif func == '$성별획득':
                     self.lineNum += 1
                     self.player.write('성별(남/여)ː')
                     self.player.input_to(self.player.getSex)

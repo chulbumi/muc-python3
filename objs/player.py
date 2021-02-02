@@ -1954,7 +1954,7 @@ class Player(Body):
                                 vision = self['비전설정']
                                 if vision != '':
                                     if mob.skill.name == vision.replace('비전', '') or \
-                                            (mob.skill.name[:2] == '독' and mob.skill.name[2:].isdigit()):
+                                            (mob.skill.name[:1] == '독' and mob.skill.name[1:].isdigit()):
                                         dmg = int(dmg//2)
                                    
                                 tdmg += dmg
