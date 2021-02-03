@@ -39,6 +39,8 @@ def toNumber(s):
     try:
         v = float(s)
         if s.find('.') == -1:
+            if s.startswith('0') and len(s) != 1:
+                return s
             return int(s)
         return v
     except ValueError:
@@ -118,7 +120,10 @@ def load_script(path):
                     if type(object[segname][keyname]) == str:
                         object[segname][keyname] = [ object[segname][keyname] ]
                     #object[segname][keyname] = str(object[segname][keyname]) + '\r\n' + str(keydata)
-                    object[segname][keyname].append(keydata)
+                    elif type(object[segname][keyname]) == int:
+                        object[segname][keyname] = [ str(object[segname][keyname]) ]
+                        
+                    object[segname][keyname].append(str(keydata))
             else:
                 if object[segname][-1][keyname] == '':
                     if keydata == '':
@@ -389,8 +394,8 @@ def convert(path, fil):
                 json_file.write(data)
 
 #convert('./data/map/', "*.map")
-#convert('./data/mob/', "*.mob")
-convert2('./data/box/', "*.box")
+convert('./data/mob/', "*.mob")
+#convert2('./data/box/', "*.box")
 #convert2('./data/config/', "*.cfg")
 #convert2('./data/item/', "*.itm")
 #convert2('./data/user/', "*")

@@ -46,6 +46,7 @@ class Item(Object):
         self.inUse = False
         react = self['반응이름']
         if type(react) == str:
+            print('react')
             self['반응이름'] = [ react ]
         #print '%s 생성!!!' % str(index)
 

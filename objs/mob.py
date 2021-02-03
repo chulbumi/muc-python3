@@ -64,7 +64,6 @@ class Mob(Body):
         #print(path)
         self.index = index
         self.path = 'data/mob/' + index.replace(':', '/') + '.json'
-        #print(self.path)
         scr = load_script(self.path)
         
         if scr == None:
@@ -74,12 +73,54 @@ class Mob(Body):
             self.attr = scr['몹정보']
         except:
             return False
-            
+        """    
         react = self['반응이름']
         if type(react) == str:
             self['반응이름'] = [ react ]
 
+        react = self['물건판매']
+        if react != '':
+            if type(react) == str:
+                self['물건판매'] = [ react ]
+
+        react = self['설명2']
+        if type(react) == str:
+            self['설명2'] = [ react ]
+
+        react = self['아이템']
+        if react != '':
+            if type(react) == str:
+                self['아이템'] = [ react ]
+
+        react = self['위치']
+        if type(react) == str:
+            self['위치'] = react.split()
+        elif type(react) == int:
+            self['위치'] = [str(react)]
+        else:
+            print(self.path)
+
+            p = []
+            for l in react:
+                p += l.split()
+
+            self['위치'] = p
+
+        self.save()
+        """
         self.init()
+
+    def save(self, mode = True):
+        o = {}
+        o['몹정보'] = self.attr
+
+        try:
+            f = open(self.path, 'w')
+        except:
+            return False
+        save_script(f, o)
+        f.close()
+        return True
         
     def init(self):
         self.corpse = getInt(self.get('시체'))
@@ -148,9 +189,19 @@ class Mob(Body):
         
     def place(self):
         from objs.room import Room, is_room, getRoom
-        keydata = self.getString('위치')
-        lines = keydata
-        lines = keydata if type(keydata) == list else [keydata, ]
+        for loc in self['위치']:
+            room = getRoom(self.get('존이름') + ':' + loc)
+            if room != None:
+                mob = self.clone()
+                mob.reset()
+                mob.origin = self.get('존이름') + ':' + loc
+                room.insert(mob)
+                if len(mob.moveList) != 0:
+                    self.movingMobs.append(mob)
+        """
+        lines = self.getString('위치')
+        #lines = keydata
+        #lines = keydata if type(keydata) == list else [keydata, ]
         for line in lines:
             for loc in line.split():
                 room = getRoom(self.get('존이름') + ':' + loc)
@@ -161,6 +212,7 @@ class Mob(Body):
                     room.insert(mob)
                     if len(mob.moveList) != 0:
                         self.movingMobs.append(mob)
+        """
     
     def getMp(self):
         if self._mp != 0:

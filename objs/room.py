@@ -58,6 +58,24 @@ class Room(Object):
                     box.create('%s_%s' % (self['주인'], boxName))
                 self.insert(box)
         self.init()
+
+        """
+        a = self['맵속성']
+        if type(a) == str:
+            a = [ a]
+            self['맵속성'] = a
+
+        a = self['설명']
+        if type(a) == str:
+            a = [ a]
+            self['설명'] = a
+
+        a = self['출구']
+        if type(a) == str:
+            a = [ a]
+            self['출구'] = a
+        self.save()
+        """
         
     def init(self):
         self.loadAttr()
@@ -460,6 +478,7 @@ def loadAllMap():
         try:
             os.chdir('data/map/' + dir)
         except:
+            print('error in chdir ' + dir)
             os.chdir(pwd)
             continue
         files = glob.glob('*.json')

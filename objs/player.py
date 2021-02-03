@@ -229,7 +229,10 @@ class Player(Body):
                 if '이름' in item:
                     obj['이름'] = item['이름']
                 if '반응이름' in item:
-                    obj['반응이름'] = item['반응이름']
+                    react = item['반응이름']
+                    if type(react) == str:
+                        react = [ react ]
+                    obj['반응이름'] = react
                 if '고유번호' in item:
                     obj['고유번호'] = item['고유번호']
                 if '공격력' in item:

@@ -627,6 +627,8 @@ class Body(Object):
         return getItem('주먹')
         
     def makeFightScript(self, line, mob, weapon = None):
+        if type(line) == list:
+            line = '\r\n'.join(line)
         if mob == None:
             mName = ''
         else:
