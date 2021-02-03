@@ -192,25 +192,13 @@ def doEvent(self, mob, key, words, lineNumber = None):
                 if item != None and len(words) == 4:
                     item.set('확장 이름', words[2])
                     item.setAttr('아이템속성', '팔지못함')
-                    ac = item['반응이름']
-                    aclist = ac
-                    aclist.append(words[2])
-                    acline = ''
-                    for a in aclist:
-                        acline += a + '\r\n'
-                    item['반응이름'] = acline[:-2]
+                    item['반응이름'].append(words[2])
                         
             elif func == '$아이템확장설정지움':  # 낙양성:이름맨 (크래프트)
                 item = self.getItemName(words[1])
                 if item != None and len(words) == 3:
                     acname = item['확장 이름']
-                    ac = item['반응이름']
-                    aclist = ac
-                    aclist.remove(acname)
-                    acline = ''
-                    for a in aclist:
-                        acline += a + '\r\n'
-                    item['반응이름'] = acline[:-2]
+                    item['반응이름'].remove(acname)
                     item.set('확장 이름', '')
             elif func == '$아이템삭제':
                 index, cnt = getStrCnt(sline)

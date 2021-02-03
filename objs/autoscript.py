@@ -128,7 +128,7 @@ class AutoScript:
                 elif l.startswith('$무기속성'):
                     if l.startswith('이름'):
                         self.player.temp_item[nw] = self.player.temp_input
-                        self.player.temp_item['반응이름'] = stripANSI(self.player.temp_input)
+                        self.player.temp_item['반응이름'] = [ stripANSI(self.player.temp_input) ]
                     elif l.startswith('설명2'):
                         self.player.temp_item['설명2'] = ''
                         for li in self.player.temp_input:
