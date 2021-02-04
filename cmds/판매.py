@@ -71,7 +71,7 @@ class CmdObj(Command):
                     continue
                 if item['종류'] != '방어구' and item['종류'] != '무기':
                     continue
-                if item['옵션'] != None and len(item['옵션'].split('\n')) > 2:
+                if item['옵션'] != None and len(item['옵션']) > 2:
                     continue
  
                 p = (getInt(item['판매가격']) * percent) // 100
@@ -102,7 +102,7 @@ class CmdObj(Command):
                     continue
                 if item['종류'] != '방어구' and item['종류'] != '무기':
                     continue
-                if item['옵션'] != None and len(item['옵션'].split('\n')) > 3:
+                if item['옵션'] != None and len(item['옵션']) > 3:
                     continue
  
                 p = (getInt(item['판매가격']) * percent) // 100
@@ -133,7 +133,7 @@ class CmdObj(Command):
                     continue
                 if item['종류'] != '방어구' and item['종류'] != '무기':
                     continue
-                if item['옵션'] != None and len(item['옵션'].split('\n')) > 4:
+                if item['옵션'] != None and len(item['옵션']) > 4:
                     continue
  
                 p = (getInt(item['판매가격']) * percent) // 100

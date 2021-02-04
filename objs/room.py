@@ -132,7 +132,7 @@ class Room(Object):
         if c == 0:
             exit_str = '없음'
                 
-        self.shortExitStr = '\n[출구] : ' + exit_str
+        self.shortExitStr = '\r\n[출구] : ' + exit_str
 
         c = 0
         str1 = ''
@@ -144,7 +144,7 @@ class Room(Object):
             str1 = str1 + '[32m' + exitName +  '[37mː'
         str1 = str1[:-1]
         if c == 0:
-            exit_str = '\n  ○  어느 쪽으로도 이동할 수 없습니다.\n'
+            exit_str = '\r\n  ○  어느 쪽으로도 이동할 수 없습니다.\r\n'
         else:
             if '북서' in self.exitList:
                 exit_str = '[32m↖[37m'
@@ -155,9 +155,9 @@ class Room(Object):
             else:
                 exit_str = exit_str + '  '
             if '북동' in self.exitList:
-                exit_str = exit_str + '[32m↗[37m\n'
+                exit_str = exit_str + '[32m↗[37m\r\n'
             else:
-                exit_str = exit_str + '\n'
+                exit_str = exit_str + '\r\n'
  
             if '서' in self.exitList:
                 exit_str = exit_str + '[32m◁[37m'
@@ -168,7 +168,7 @@ class Room(Object):
                 exit_str = exit_str + '[32m▷[37m'
             else:
                 exit_str = exit_str + '  '
-            exit_str += ' 〔' + str1 + '〕쪽으로 이동할 수 있습니다.\n'
+            exit_str += ' 〔' + str1 + '〕쪽으로 이동할 수 있습니다.\r\n'
 
             if '남서' in self.exitList:
                 exit_str = exit_str + '[32m↙[37m'
@@ -388,10 +388,10 @@ class Room(Object):
             for item in itemMap:
                 cnt = itemMap[item]
                 if cnt == 1:
-                    itemMsg += '%s 먼지가 되어 사라집니다.\n' % item
+                    itemMsg += '%s 먼지가 되어 사라집니다.\r\n' % item
                 else:
-                    itemMsg += '%s %d개가 먼지가 되어 사라집니다.\n' % (item[:-2], cnt)
-            self.writeRoom('\n' + itemMsg[:-2])
+                    itemMsg += '%s %d개가 먼지가 되어 사라집니다.\r\n' % (item[:-2], cnt)
+            self.writeRoom('\r\n' + itemMsg[:-2])
             updated = True 
         if updated:
             self.printPrompt()

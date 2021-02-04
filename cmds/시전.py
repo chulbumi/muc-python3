@@ -8,14 +8,14 @@ class CmdObj(Command):
         ob.cooltime[name] = 2
         if name == '능파미보':
             if ob.act != ACT_DEATH:
-                ob.sendLine('\n당신이 펼쳐놓은 [1;36m凌波微步[;37m의 신법을 멈춥니다.')
+                ob.sendLine('\r\n당신이 펼쳐놓은 [1;36m凌波微步[;37m의 신법을 멈춥니다.')
             ob._miss -= 350
         elif name == '역근경':
             if ob.act != ACT_DEATH:
                 ob._str -= 500
                 ob._arm -= 500
                 ob._maxhp -= 50
-                ob.sendLine('\n당신이 펼쳐낸 [1;33m易筋經[0;37m의 모든 [1;32m運氣行功[0;37m [1;31m要訣[0;37m을 거두어 들입니다.')
+                ob.sendLine('\r\n당신이 펼쳐낸 [1;33m易筋經[0;37m의 모든 [1;32m運氣行功[0;37m [1;31m要訣[0;37m을 거두어 들입니다.')
             if ob['체력'] > ob.getMaxHp():
                 ob['체력'] = ob.getMaxHp()
 

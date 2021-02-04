@@ -43,6 +43,8 @@ class CmdObj(Command):
         msg += '현재까지 수령한 기부금 총액은 은전 [1m%d[0;37m개 입니다.' %(ob['수령액'])
         ob.sendLine(msg)
 
+        mob.save()
+        """
         msg = '[몹정보]\n\n'
         l = list(mob.attr.keys())
         l.sort()
@@ -58,3 +60,4 @@ class CmdObj(Command):
             return False
         f.write(msg)
         f.close()
+        """
