@@ -340,7 +340,7 @@ class Body(Object):
         if self['맷집경험치'] >= c:
             self['맷집경험치'] = 0
             self['맷집'] += 1
-            self.sendLine(MAIN_CONFIG['맷집증가스크립'])    
+            self.sendLine('\r\n'.join(MAIN_CONFIG['맷집증가스크립']))
 
     def addExp(self, exp):
         self['현재경험치'] += exp
@@ -357,7 +357,7 @@ class Body(Object):
         if check and self['힘경험치'] >= c:
             self['힘경험치'] = 0
             self['힘'] += 1
-            self.sendLine(MAIN_CONFIG['힘증가스크립'])
+            self.sendLine('\r\n'.join(MAIN_CONFIG['힘증가스크립']))
     
     def addDex(self, dex):
         self['민첩성경험치'] += dex
@@ -366,7 +366,7 @@ class Body(Object):
             self['민첩성경험치'] = 0
             if self['민첩성'] < MAIN_CONFIG['민첩성최고수치']:
                 self['민첩성'] += 1
-                self.sendLine(MAIN_CONFIG['민첩성증가스크립'])
+                self.sendLine('\r\n'.join(MAIN_CONFIG['민첩성증가스크립']))
 
     def addAnger(self):
         anger = getInt(self['분노'])
@@ -380,7 +380,7 @@ class Body(Object):
         self['분노'] = anger
         
     def levelUp(self):
-        self.sendLine(MAIN_CONFIG['레벨증가스크립'])
+        self.sendLine('\r\n'.join(MAIN_CONFIG['레벨증가스크립']))
         hpUp = randint(0, 9) + 25;
         self['최고체력'] += hpUp
         self['맷집'] += 1
@@ -483,7 +483,7 @@ class Body(Object):
         if cc >= c:
             self[buf1] += 1
             self[buf2] = 0
-            self.sendLine(MAIN_CONFIG['숙련도증가스크립'])
+            self.sendLine('\r\n'.join(MAIN_CONFIG['숙련도증가스크립']))
             
     def getAttackFailScript(self, mob):
         s = SCRIPT[self.getWeaponFightType() + '전투실패스크립']
