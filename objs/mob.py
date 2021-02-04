@@ -856,8 +856,9 @@ class Mob(Body):
             buf = self.weapon
             
         s = SCRIPT[buf + '전투실패스크립']
+        if type(s) == str:
+            s = [ s ]
         s = s[randint(0, len(s) - 1)]
-        
         
         return self.makeFightScript(s, mob)
         
@@ -867,6 +868,8 @@ class Mob(Body):
         else:
             buf = self.weapon
         s = SCRIPT[buf + '전투스크립']
+        if type(s) == str:
+            s = [s]
         c = ((dmg - c1) * (len(s) - 1))//(c2-c1)
         #print dmg, c1, c2, c, len(s)
         i = len(s) - 1 - c

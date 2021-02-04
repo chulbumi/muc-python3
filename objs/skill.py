@@ -71,6 +71,8 @@ class Skill(Object):
         self.maxturn = len(self.pattern)
 
     def getAttr(self):
+        if type(self['속성']) == 'str':
+            self['속성'] = [ self['속성'] ]
         for config in self['속성']:
             if config.find('힘경험치증가') == 0:
                 self.bonus = getInt(config.split()[1])

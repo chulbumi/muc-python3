@@ -487,11 +487,16 @@ class Body(Object):
             
     def getAttackFailScript(self, mob):
         s = SCRIPT[self.getWeaponFightType() + '전투실패스크립']
+        if type(s) == str:
+            s = [ s ]
         s = s[randint(0, len(s) - 1)]
         return self.makeFightScript(s, mob)
         
     def getAttackScript(self, mob, dmg, c1, c2):
         s = SCRIPT[self.getWeaponFightType() + '전투스크립']
+        if type(s) == str:
+            s = [ s ]
+
         if len(s) == 0:
             return '버그버그버그버그버그버그버그버그버그버그신고하셈신고하셈'
         s = s[randint(0, len(s) - 1)]
