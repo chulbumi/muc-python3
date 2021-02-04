@@ -22,6 +22,9 @@ def doEvent(self, mob, key, words, lineNumber = None):
     from lib.func import loadScriptFile
     import copy
     import time
+    import re
+
+    regex = re.compile("\[.*\]\(.*\/.*\)")
 
     lineNum = 0
     tab = 0
@@ -700,7 +703,11 @@ def doEvent(self, mob, key, words, lineNumber = None):
 
             for su in sub:
                 line = line.replace(su, sub[su])
-            self.sendLine(postPosition1(line))
+
+            if regex.search(line) != None:
+                self.sendLine(postPosition1(line))
+            else:
+                self.sendLine(line)
     if broadcast:
         self.channel.sendToAll1('', ex = self)
     return True
