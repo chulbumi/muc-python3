@@ -44,16 +44,7 @@ class Item(Object):
             return False
             
         self.inUse = False
-
         """
-        n = self['이름']
-        s = stripANSI(n)
-        if n != s:
-            self['이름'] = s
-            self['안시'] = n[:n.find(s)]
-
-            self.save()
-
         react = self['반응이름']
         if type(react) == str:
             print('react')
