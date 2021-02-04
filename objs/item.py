@@ -44,7 +44,16 @@ class Item(Object):
             return False
             
         self.inUse = False
+
         """
+        n = self['이름']
+        s = stripANSI(n)
+        if n != s:
+            self['이름'] = s
+            self['안시'] = n[:n.find(s)]
+
+            self.save()
+
         react = self['반응이름']
         if type(react) == str:
             print('react')
@@ -119,7 +128,9 @@ class Item(Object):
         del self
         
     def getNameA(self):
-        return '[36m' + self.get('이름') + '[37m'
+        if self['안시'] != '':
+            return self['안시'] + self.get('이름') + '[0;37m'
+        return '[0;36m' + self.get('이름') + '[37m'
         
     def getDesc1(self):
         return self.get('설명1').replace('$아이템$', '[36m' + self.get('이름') + '[37m')
