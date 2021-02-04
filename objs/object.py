@@ -179,7 +179,7 @@ class Object:
         if attrs == '':
             self[key] = []
         if type(attrs) == str:
-            atttrs = [attrs]
+            attrs = [attrs]
             self[key] = attrs
 
         if attr in attrs:

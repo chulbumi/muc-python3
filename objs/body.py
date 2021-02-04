@@ -335,6 +335,9 @@ class Body(Object):
         return c
 
     def addArm(self, arm):
+        if self['맷집경험치'] == '':
+            self['맷집경험치'] = 0
+
         self['맷집경험치'] += arm
         c = (self['맷집'] - 10) * 20
         if self['맷집경험치'] >= c:
