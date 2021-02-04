@@ -715,6 +715,12 @@ class Body(Object):
         if m == getItem('주먹'):
             return
         mlist = m['무공이름']
+        if mlist == '':
+            return
+
+        if type(mlist) == str:
+            mlist = [ mlist ]
+
         if len(mlist) == 0:
             return
         mName = m['이름']
@@ -728,9 +734,9 @@ class Body(Object):
             sName = words[0]
             if sName in self.skillList:
                 continue
-            type = words[1]
-            if type != '정사':
-                if self['성격'] != type and self['성격'] != '기인' and self['성격'] != '선인':
+            typ = words[1]
+            if typ != '정사':
+                if self['성격'] != typ and self['성격'] != '기인' and self['성격'] != '선인':
                     continue
             n1 = int(words[2])
             count = self.itemSkillMap[mName]
