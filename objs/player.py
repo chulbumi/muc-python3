@@ -1792,7 +1792,7 @@ class Player(Body):
             self.lpPrompt()
         if self.tick % 60 == 0:
             if self['무림별호'] == '' and self['0 성격플킬'] + self['1 성격플킬'] + self['2 성격플킬'] >= MAIN_CONFIG['무림별호이벤트킬수']:
-                self.sendLine('\r\n' + MAIN_CONFIG['무림별호이벤트호출'])
+                self.sendLine('\r\n' + '\r\n'.join(MAIN_CONFIG['무림별호이벤트호출']))
                 self.lpPrompt()
         if self.tick % 600 == 0:
             self.save()
