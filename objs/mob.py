@@ -854,7 +854,7 @@ class Mob(Body):
             mode == '사람'
         mode += '스크립'
         scripts = SCRIPT[mode]
-        if type(scripts) == 'str':
+        if type(scripts) == str:
             scripts = [ scripts ]
         cnt = len(scripts)
         if cnt == 0:

@@ -705,7 +705,7 @@ def doEvent(self, mob, key, words, lineNumber = None):
             for su in sub:
                 line = line.replace(su, sub[su])
 
-            if regex.search(line) != None:
+            if regex.search(line) != None or len(sub) != 0:
                 self.sendLine(postPosition1(line))
             else:
                 self.sendLine(line)
