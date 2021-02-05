@@ -2394,6 +2394,8 @@ class Player(Body):
                         c.append(ks[0] + ' 0')
                     else:
                         c.append(ks[0] + ' 1')
+            else:
+                c.append(k)
                 continue
         if not find:
             c.append(config + ' 1')

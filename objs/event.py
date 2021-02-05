@@ -20,6 +20,7 @@ def doEvent(self, mob, key, words, lineNumber = None):
     from objs.room import getRoom
     from lib.func import getStrCnt, getInt, stripANSI
     from lib.func import loadScriptFile
+    from include.define import ACT_DEATH, ACT_FIGHT
     import copy
     import time
     import re

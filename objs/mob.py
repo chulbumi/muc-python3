@@ -75,6 +75,7 @@ class Mob(Body):
             return False
             
         
+        """
         if type(self['설명1']) == list:
             print('설명1')
         if type(self['설명3']) == list:
@@ -92,7 +93,6 @@ class Mob(Body):
             if type(react) == str:
                 self['사용아이템'] = [ react ]
         #self.save()
-        """
         react = self['자동스크립']
         if type(react) == str and react != '':
             self['자동스크립'] = [ react ]
