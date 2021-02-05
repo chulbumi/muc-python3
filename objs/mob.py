@@ -73,10 +73,32 @@ class Mob(Body):
             self.attr = scr['몹정보']
         except:
             return False
-        """    
-        react = self['반응이름']
-        if type(react) == str:
-            self['반응이름'] = [ react ]
+            
+        
+        if type(self['설명1']) == list:
+            print('설명1')
+        if type(self['설명3']) == list:
+            print('설명3')
+        if type(self['소멸스크립']) == list:
+            print(self.path)
+            print('소멸스크립')
+            self['소멸스크립'] = '\r\n'.join(self['소멸스크립'])
+        if type(self['전투시작']) == list:
+            print(self.path)
+            print('전투시작')
+            self['전투시작'] = '\r\n'.join(self['전투시작'])
+        react = self['사용아이템']
+        if react != '':
+            if type(react) == str:
+                self['사용아이템'] = [ react ]
+        #self.save()
+        """
+        react = self['자동스크립']
+        if type(react) == str and react != '':
+            self['자동스크립'] = [ react ]
+        elif type(react) == list and len(react) == 1 and react[0] == '':
+            del self.attr['자동스크립']
+            
 
         react = self['물건판매']
         if react != '':

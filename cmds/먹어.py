@@ -44,7 +44,11 @@ class CmdObj(Command):
                     ob['최고내공'] += maxmp
             else:
                 ob['최고내공'] += maxmp
-        msg = item['사용스크립']
+        msg = ''
+        if type(item['사용스크립']) == list: 
+            msg = '\r\n'.join(item['사용스크립'])
+        else:
+            msg = item['사용스크립']
         itemName = item['이름']
         msg = msg.replace('$아이템$', item.getNameA())
         ob.remove(item)
