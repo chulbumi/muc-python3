@@ -437,7 +437,7 @@ class Body(Object):
         if s['종류'] != '공격':
             div = 10
 
-        if (s1 == 10 and s2 > exp1 // div) or (s1 == 11 and s2 > exp * 2 // div):
+        if (s1 == 10 and s2 > exp1 // div) or (s1 == 11 and s2 > exp1 * 2 // div):
             sLv = self['무공달성레벨']
             if sLv == '':
                 sLv = self.skillLvName[0]
