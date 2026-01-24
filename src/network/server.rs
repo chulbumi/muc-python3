@@ -85,7 +85,7 @@ pub async fn run_server(config: ServerConfig) -> Result<(), Box<dyn std::error::
     let script_storage = Arc::new(tokio::sync::RwLock::new(ScriptStorage::new(ScriptConfig::default())));
     let mut registry = CommandRegistry::new();
     register_basic_commands(&mut registry);
-    register_script_commands(&mut registry, script_storage, Some(get_other_players_desc), Some(get_other_players_map)).await;
+    register_script_commands(&mut registry, script_storage, Some(get_other_players_desc), Some(get_other_players_map), None).await;
     let command_registry = Arc::new(registry);
     let room_cache = Arc::new(Mutex::new(RoomCache::new()));
 
@@ -139,7 +139,7 @@ pub async fn run_server_with_broadcaster(
     let script_storage = Arc::new(tokio::sync::RwLock::new(ScriptStorage::new(ScriptConfig::default())));
     let mut registry = CommandRegistry::new();
     register_basic_commands(&mut registry);
-    register_script_commands(&mut registry, script_storage, Some(get_other_players_desc), Some(get_other_players_map)).await;
+    register_script_commands(&mut registry, script_storage, Some(get_other_players_desc), Some(get_other_players_map), None).await;
     let command_registry = Arc::new(registry);
     let room_cache = Arc::new(Mutex::new(RoomCache::new()));
 
@@ -192,7 +192,7 @@ pub async fn run_echo_server(port: u16) -> Result<(), Box<dyn std::error::Error>
     let script_storage = Arc::new(tokio::sync::RwLock::new(ScriptStorage::new(ScriptConfig::default())));
     let mut registry = CommandRegistry::new();
     register_basic_commands(&mut registry);
-    register_script_commands(&mut registry, script_storage, Some(get_other_players_desc), Some(get_other_players_map)).await;
+    register_script_commands(&mut registry, script_storage, Some(get_other_players_desc), Some(get_other_players_map), None).await;
     let command_registry = Arc::new(registry);
     let room_cache = Arc::new(Mutex::new(RoomCache::new()));
 

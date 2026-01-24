@@ -9,5 +9,5 @@
 pub mod call_out;
 pub mod heart_beat;
 
-pub use call_out::{CallOutScheduler, CallOutTask, CallOutRegistry};
+pub use call_out::{CallOutScheduler, CallOutTask, CallOutRegistry, ScriptRunnerFn};
 pub use heart_beat::{HeartBeatRegistry, HeartBeatConfig};

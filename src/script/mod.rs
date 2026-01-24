@@ -11,8 +11,11 @@ use std::sync::{Arc, Mutex};
 use tokio::sync::RwLock;
 use tracing::{debug, info};
 
+use crate::network::Broadcaster;
 use crate::player::Body;
 use crate::object::{Object, Value};
+use crate::scheduler::CallOutScheduler;
+use std::time::Duration;
 use crate::data::{GlobalData, SharedGlobalData};
 use crate::command::parser::CommandParser;
 use crate::command::CommandResult;
@@ -1768,6 +1771,8 @@ pub fn create_engine_with_body_and_output(
     get_other_players_desc: Option<Arc<dyn Fn(&str) -> Vec<String> + Send + Sync>>,
     get_other_players_map: Option<Arc<dyn Fn() -> HashMap<String, String> + Send + Sync>>,
     special_collector: Arc<Mutex<Option<CommandResult>>>,
+    call_out_scheduler: Option<Arc<CallOutScheduler>>,
+    script_name: Option<&str>,
 ) -> Engine {
     let oc = output_collector.clone();
     let mut engine = create_engine_with_output(output_collector);
@@ -2908,6 +2913,26 @@ pub fn create_engine_with_body_and_output(
         save_body_to_json(body, &path)
     });
 
+    // call_out / call_later / remove_call_out — 점프 2초 후 착지 등. script_name이 있을 때만 등록(지연 시 스크립트 함수 실행).
+    if let (Some(sched), Some(sn)) = (call_out_scheduler, script_name) {
+        let s = sched.clone();
+        let script_owned = sn.to_string();
+        engine.register_fn("call_out", move |target: &str, function: &str, delay: i64| {
+            let d = Duration::from_secs(delay.max(0) as u64);
+            s.call_out(target, function, d, vec![], Some(script_owned.clone()));
+        });
+        let s2 = sched.clone();
+        let script_owned2 = sn.to_string();
+        engine.register_fn("call_later", move |target: &str, function: &str, delay: i64| {
+            let d = Duration::from_secs(delay.max(0) as u64);
+            s2.call_out(target, function, d, vec![], Some(script_owned2.clone()));
+        });
+        let s3 = sched.clone();
+        engine.register_fn("remove_call_out", move |target: &str, function: &str| -> bool {
+            s3.remove_call_out_by_name(target, function)
+        });
+    }
+
     engine
 }
 
@@ -3180,6 +3205,7 @@ impl ScriptStorage {
 
     /// get_other_players_desc: 봐 시 같은 방 다른 유저 getDesc. None이면 빈 목록.
     /// get_other_players_map: 봐 find_target에서 (이름→getDesc). None이면 빈 맵.
+    /// call_out_scheduler: Some이면 call_out/call_later 사용 가능(지연 시 스크립트 함수 실행).
     /// Returns (outputs, special). special=Some(CommandResult)이면 Shout/Tell/EmotionToRoom/GiveToPlayer 등.
     pub fn execute(
         &self,
@@ -3188,6 +3214,7 @@ impl ScriptStorage {
         line: &str,
         get_other_players_desc: Option<Arc<dyn Fn(&str) -> Vec<String> + Send + Sync>>,
         get_other_players_map: Option<Arc<dyn Fn() -> HashMap<String, String> + Send + Sync>>,
+        call_out_scheduler: Option<Arc<CallOutScheduler>>,
     ) -> Result<(Vec<String>, Option<CommandResult>), Box<dyn std::error::Error>> {
         let script = self.scripts.get(name)
             .ok_or_else(|| format!("Script not found: {}", name))?;
@@ -3202,35 +3229,12 @@ impl ScriptStorage {
             get_other_players_desc,
             get_other_players_map,
             special_collector.clone(),
+            call_out_scheduler,
+            Some(name),
         );
         let mut scope = Scope::new();
 
-        let mut player_data = rhai::Map::new();
-        player_data.insert("name".into(), player.get_name().into());
-        player_data.insert("hp".into(), player.get_hp().into());
-        player_data.insert("max_hp".into(), player.get_max_hp().into());
-        player_data.insert("mp".into(), player.get_mp().into());
-        player_data.insert("max_mp".into(), player.get_max_mp().into());
-        player_data.insert("level".into(), player.get_int("레벨").into());
-        player_data.insert("레벨".into(), player.get_int("레벨").into());
-        player_data.insert("나이".into(), player.get_int("나이").into());
-        player_data.insert("맷집".into(), player.get_int("맷집").into());
-        player_data.insert("현재경험치".into(), player.get_int("현재경험치").into());
-        player_data.insert("money".into(), player.get_int("은전").into());
-        player_data.insert("은전".into(), player.get_int("은전").into());
-        player_data.insert("금전".into(), player.get_int("금전").into());
-        player_data.insert("str".into(), player.get_str().into());
-        player_data.insert("dex".into(), player.get_dex().into());
-        player_data.insert("이름".into(), player.get_name().into());
-        player_data.insert("관리자등급".into(), player.get_int("관리자등급").into());
-        player_data.insert("act".into(), (player.act.to_i32() as i64).into());
-        player_data.insert("성격".into(), player.get_string("성격").into());
-        player_data.insert("소속".into(), player.get_string("소속").into());
-        player_data.insert("env".into(), "".into());
-
-        let objs_array = rhai::Array::new();
-        player_data.insert("objs".into(), rhai::Dynamic::from(objs_array));
-
+        let mut player_data = build_ob_from_body(player);
         scope.push("player", player_data.clone());
         scope.push("me", player_data.clone());
         scope.push("ob", player_data);
@@ -3268,6 +3272,95 @@ impl ScriptStorage {
     pub fn script_names(&self) -> Vec<String> {
         self.scripts.keys().cloned().collect()
     }
+
+    /// Get script source by name. For call_out script_runner to run a function from the script.
+    pub fn get_script_source(&self, name: &str) -> Option<String> {
+        self.scripts.get(name).map(|s| s.source.clone())
+    }
+}
+
+/// Body로부터 Rhai ob(Map) 생성. execute 및 call_out 콜백에서 사용.
+fn build_ob_from_body(body: &Body) -> rhai::Map {
+    let mut m = rhai::Map::new();
+    m.insert("name".into(), body.get_name().into());
+    m.insert("hp".into(), body.get_hp().into());
+    m.insert("max_hp".into(), body.get_max_hp().into());
+    m.insert("mp".into(), body.get_mp().into());
+    m.insert("max_mp".into(), body.get_max_mp().into());
+    m.insert("level".into(), body.get_int("레벨").into());
+    m.insert("레벨".into(), body.get_int("레벨").into());
+    m.insert("나이".into(), body.get_int("나이").into());
+    m.insert("맷집".into(), body.get_int("맷집").into());
+    m.insert("현재경험치".into(), body.get_int("현재경험치").into());
+    m.insert("money".into(), body.get_int("은전").into());
+    m.insert("은전".into(), body.get_int("은전").into());
+    m.insert("금전".into(), body.get_int("금전").into());
+    m.insert("str".into(), body.get_str().into());
+    m.insert("dex".into(), body.get_dex().into());
+    m.insert("이름".into(), body.get_name().into());
+    m.insert("관리자등급".into(), body.get_int("관리자등급").into());
+    m.insert("act".into(), (body.act.to_i32() as i64).into());
+    m.insert("성격".into(), body.get_string("성격").into());
+    m.insert("소속".into(), body.get_string("소속").into());
+    m.insert("env".into(), "".into());
+    m.insert("objs".into(), rhai::Dynamic::from(rhai::Array::new()));
+    m
+}
+
+/// call_out 만료 시 Rhai 스크립트 함수를 실행하는 runner 생성.
+/// (target, script, function, args) -> Result. process_due에서 호출.
+pub fn create_call_out_script_runner(
+    script_storage: Arc<tokio::sync::RwLock<ScriptStorage>>,
+    broadcaster: Arc<Broadcaster>,
+) -> Arc<dyn Fn(&str, Option<&str>, &str, Vec<serde_json::Value>) -> Result<(), String> + Send + Sync> {
+    Arc::new(move |target: &str, script: Option<&str>, function: &str, _args: Vec<serde_json::Value>| {
+        let script = script.ok_or_else(|| "call_out: script name required".to_string())?;
+        // process_due는 tokio 워커에서 호출되므로 blocking_read 전에 block_in_place로 블로킹 허용
+        let source = tokio::task::block_in_place(|| {
+            script_storage.blocking_read().get_script_source(script)
+        });
+        let source = source.ok_or_else(|| format!("script not found: {}", script))?;
+
+        // 클로저 안에서는 clients 락이 잡혀 있으므로 send_to_by_player_name(→clients.lock()) 호출 금지.
+        // 메시지만 수집하고, 락 해제 후 밖에서 전송.
+        let to_send = broadcaster
+            .with_player_body_by_name(target, |body| {
+                let output_collector = Arc::new(Mutex::new(Vec::new()));
+                let special_collector = Arc::new(Mutex::new(None));
+                let engine = create_engine_with_body_and_output(
+                    body,
+                    output_collector.clone(),
+                    None,
+                    None,
+                    special_collector,
+                    None,
+                    None,
+                );
+                let ast = engine.compile(&source).map_err(|e| format!("compile: {}", e))?;
+                let mut scope = Scope::new();
+                let ob = Dynamic::from(build_ob_from_body(body));
+                engine
+                    .call_fn::<Dynamic>(&mut scope, &ast, function, (ob,))
+                    .map_err(|e| format!("call_fn {}: {}", function, e))?;
+
+                let outputs = output_collector.lock().unwrap().clone();
+                let messages: Vec<String> = outputs
+                    .iter()
+                    .map(|line| {
+                        let expanded = expand_abbreviated_ansi(line);
+                        format!("{}\r\n", expanded)
+                    })
+                    .collect();
+                Ok::<_, String>(messages)
+            })
+            .ok_or_else(|| format!("player not found: {}", target))?;
+
+        let messages = to_send?;
+        for msg in messages {
+            let _ = broadcaster.send_to_by_player_name(target, &msg);
+        }
+        Ok(())
+    })
 }
 
 pub struct SharedScriptStorage {
@@ -3285,9 +3378,9 @@ impl SharedScriptStorage {
         Self::new(ScriptConfig::default())
     }
 
-    pub async fn execute(&self, name: &str, player: &mut Body, line: &str, get_other_players_desc: Option<Arc<dyn Fn(&str) -> Vec<String> + Send + Sync>>, get_other_players_map: Option<Arc<dyn Fn() -> HashMap<String, String> + Send + Sync>>) -> Result<(Vec<String>, Option<CommandResult>), Box<dyn std::error::Error>> {
+    pub async fn execute(&self, name: &str, player: &mut Body, line: &str, get_other_players_desc: Option<Arc<dyn Fn(&str) -> Vec<String> + Send + Sync>>, get_other_players_map: Option<Arc<dyn Fn() -> HashMap<String, String> + Send + Sync>>, call_out_scheduler: Option<Arc<CallOutScheduler>>) -> Result<(Vec<String>, Option<CommandResult>), Box<dyn std::error::Error>> {
         let storage = self.inner.read().await;
-        storage.execute(name, player, line, get_other_players_desc, get_other_players_map)
+        storage.execute(name, player, line, get_other_players_desc, get_other_players_map, call_out_scheduler)
     }
 
     pub async fn reload_all(&self) -> Result<usize, Box<dyn std::error::Error>> {
@@ -3382,14 +3475,14 @@ mod tests {
         }
 
         // 1) 생성 289 (data/item/289.json = 철퇴)
-        let res = storage.execute("생성", &mut body, "289", None, None);
+        let res = storage.execute("생성", &mut body, "289", None, None, None);
         assert!(res.is_ok(), "생성 실패: {:?}", res.err());
         let (out, _) = res.as_ref().unwrap();
         assert_eq!(body.object.objs.len(), 1, "생성 후 인벤 1개 (outputs: {:?})", out);
         assert_eq!(body.object.objs[0].lock().unwrap().getName(), "철퇴");
 
         // 2) 버리기 철퇴
-        let res = storage.execute("버려", &mut body, "철퇴", None, None);
+        let res = storage.execute("버려", &mut body, "철퇴", None, None, None);
         assert!(res.is_ok(), "버리기 실패: {:?}", res.err());
         assert_eq!(body.object.objs.len(), 0, "버린 후 인벤 비어있음");
         {
@@ -3400,7 +3493,7 @@ mod tests {
         }
 
         // 3) 가져오기 철퇴
-        let res = storage.execute("가져", &mut body, "철퇴", None, None);
+        let res = storage.execute("가져", &mut body, "철퇴", None, None, None);
         assert!(res.is_ok(), "가져오기 실패: {:?}", res.err());
         assert_eq!(body.object.objs.len(), 1, "가져온 후 인벤 1개");
         {
@@ -3410,14 +3503,14 @@ mod tests {
         }
 
         // 4) 소각 철퇴
-        let res = storage.execute("소각", &mut body, "철퇴", None, None);
+        let res = storage.execute("소각", &mut body, "철퇴", None, None, None);
         assert!(res.is_ok(), "소각 실패: {:?}", res.err());
         assert_eq!(body.object.objs.len(), 0, "소각 후 인벤 비어있음");
 
         // 5) 생성 → 부셔
-        let _ = storage.execute("생성", &mut body, "289", None, None);
+        let _ = storage.execute("생성", &mut body, "289", None, None, None);
         assert_eq!(body.object.objs.len(), 1);
-        let res = storage.execute("부셔", &mut body, "철퇴", None, None);
+        let res = storage.execute("부셔", &mut body, "철퇴", None, None, None);
         assert!(res.is_ok(), "부셔 실패: {:?}", res.err());
         assert_eq!(body.object.objs.len(), 0, "부신 후 인벤 비어있음");
     }

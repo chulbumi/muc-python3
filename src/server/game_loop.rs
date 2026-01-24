@@ -15,6 +15,7 @@ use tracing::debug;
 
 use crate::network::Broadcaster;
 use crate::player::Player;
+use crate::scheduler::CallOutScheduler;
 
 /// Game loop configuration
 #[derive(Debug, Clone)]
@@ -158,11 +159,13 @@ impl GameLoop {
     }
 }
 
-/// Run the game loop asynchronously
+/// Run the game loop asynchronously.
+/// call_out_scheduler: Some이면 매 틱 process_due() 호출 (지연 스크립트 함수 실행).
 pub async fn run_game_loop(
     _broadcaster: Arc<Broadcaster>,
     players: Arc<AsyncMutex<Vec<Arc<AsyncMutex<Player>>>>>,
     config: GameLoopConfig,
+    call_out_scheduler: Option<Arc<CallOutScheduler>>,
 ) {
     let mut timer = interval(config.tick_interval);
     timer.tick().await; // Skip first immediate tick
@@ -171,6 +174,10 @@ pub async fn run_game_loop(
 
     loop {
         timer.tick().await;
+
+        if let Some(s) = &call_out_scheduler {
+            let _ = s.process_due();
+        }
 
         let mut players_guard = players.lock().await;
         game_loop.tick(&mut *players_guard);

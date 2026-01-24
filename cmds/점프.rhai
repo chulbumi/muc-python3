@@ -1,6 +1,12 @@
 // 점프.rhai - 점프 (관리자 1000, 쿨타임)
 // Python: cmds/점프.py
 
+// Rhai 식별자는 ASCII만 허용 → jump_land (점프_착지)
+fn jump_land(ob) {
+    set_value(ob, "cooltime", 0);
+    send_line(ob, "당신은 안전하게 착지합니다. ^^v");
+}
+
 fn cmd(ob, line) {
     if !require_admin(ob, 1000) { return; }
     let ct = get_body_int(ob, "cooltime");
@@ -10,7 +16,7 @@ fn cmd(ob, line) {
     }
     set_value(ob, "cooltime", 1);
     send_line(ob, "당신이 부웅~~ 날아 오릅니다");
-    // 파이썬: 2초 후 cooltime=0 및 "착지" 메시지 — call_out 연동 시 구현
+    call_out(ob["이름"], "jump_land", 2);
 }
 
 fn main(ob, line) {

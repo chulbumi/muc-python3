@@ -9,7 +9,7 @@ pub mod registry;
 pub mod commands;
 
 pub use parser::{CommandParser, ParsedCommand};
-pub use handler::{CommandHandler, CommandResult, CommandContext};
+pub use handler::{CommandHandler, CommandResult, CommandContext, PendingInput};
 pub use registry::{CommandRegistry, CommandInfo, CommandFn};
 pub use commands::{register_basic_commands};
 

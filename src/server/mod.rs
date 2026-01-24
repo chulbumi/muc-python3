@@ -11,6 +11,7 @@ pub use game_loop::{GameLoop, GameLoopConfig, run_game_loop};
 
 use std::sync::Arc;
 use std::sync::Mutex;
+use std::time::Duration;
 use tokio::net::TcpListener;
 use tokio::sync::Mutex as AsyncMutex;
 use tokio::sync::Notify;
@@ -19,9 +20,11 @@ use tracing::{error, info};
 use crate::command::commands::register_basic_commands;
 use crate::command::commands::script::register_script_commands;
 use crate::command::CommandRegistry;
+use crate::hotreload::{HotReloadManager, ReloadConfig};
 use crate::network::broadcaster::Broadcaster;
 use crate::network::client::{get_other_players_desc_in_room, get_other_players_map_for_look};
-use crate::script::{ScriptConfig, ScriptStorage};
+use crate::scheduler::CallOutScheduler;
+use crate::script::{create_call_out_script_runner, ScriptConfig, ScriptStorage};
 use crate::world::{get_world_state, RoomCache};
 
 /// Server configuration
@@ -125,15 +128,7 @@ impl MudServer {
         info!("          ☞ 무크 Rust 버전 서버를 실행 합니다.");
         info!("=============================================================");
 
-        // Spawn game loop
-        let broadcaster = self.broadcaster.clone();
-        let players = Arc::new(AsyncMutex::new(Vec::new()));
-        let game_loop_config = self.config.game_loop.clone();
-        tokio::spawn(async move {
-            run_game_loop(broadcaster, players, game_loop_config).await;
-        });
-
-        // command_registry, script_storage, room_cache를 한 번만 생성 (접속마다 ScriptStorage 로딩 시 블로킹 방지)
+        // command_registry, script_storage, room_cache, call_out_scheduler를 한 번만 생성
         let get_other_players_desc: Arc<dyn Fn(&str) -> Vec<String> + Send + Sync> = Arc::new({
             let bc = self.broadcaster.clone();
             move |exclude: &str| {
@@ -148,11 +143,37 @@ impl MudServer {
         let get_other_players_map: Arc<dyn Fn() -> std::collections::HashMap<String, String> + Send + Sync> =
             Arc::new(get_other_players_map_for_look);
         let script_storage = Arc::new(tokio::sync::RwLock::new(ScriptStorage::new(ScriptConfig::default())));
+        let script_runner = create_call_out_script_runner(script_storage.clone(), self.broadcaster.clone());
+        let call_out_scheduler = Arc::new(CallOutScheduler::new(
+            self.broadcaster.clone(),
+            Duration::from_millis(100),
+            Some(script_runner),
+        ));
+
+        // cmds/*.rhai Hot Reload: 1초마다 변경된 스크립트만 다시 로드
+        HotReloadManager::new(script_storage.clone(), ReloadConfig::default()).start_watcher();
+
         let mut registry = CommandRegistry::new();
         register_basic_commands(&mut registry);
-        register_script_commands(&mut registry, script_storage, Some(get_other_players_desc), Some(get_other_players_map)).await;
+        register_script_commands(
+            &mut registry,
+            script_storage,
+            Some(get_other_players_desc),
+            Some(get_other_players_map),
+            Some(call_out_scheduler.clone()),
+        )
+        .await;
         let command_registry = Arc::new(registry);
         let room_cache = Arc::new(Mutex::new(RoomCache::new()));
+
+        // Spawn game loop (process_due에서 call_out 만료 시 스크립트 함수 실행)
+        let broadcaster = self.broadcaster.clone();
+        let players = Arc::new(AsyncMutex::new(Vec::new()));
+        let game_loop_config = self.config.game_loop.clone();
+        let call_out_for_loop = call_out_scheduler.clone();
+        tokio::spawn(async move {
+            run_game_loop(broadcaster, players, game_loop_config, Some(call_out_for_loop)).await;
+        });
 
         // 셧다운/CTRL+C/kill(SIGTERM) 시 서버 종료 시퀀스 트리거
         let shutdown_notify = Arc::new(Notify::new());

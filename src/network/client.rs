@@ -21,7 +21,7 @@ use rhai::{Array, Dynamic, Map};
 use crate::emotion::{self, EmotionTarget};
 use crate::network::DelimiterCodec;
 use crate::player::{Player, STATE_ACTIVE};
-use crate::command::{CommandParser, CommandRegistry, CommandResult};
+use crate::command::{CommandParser, CommandRegistry, CommandResult, PendingInput};
 use crate::command::commands::try_move_by_exit_name;
 use crate::world::item::{get_item_display_name, get_item_weight_by_key};
 use crate::world::{get_world_state, RoomCache};
@@ -134,6 +134,8 @@ pub struct Client {
     login_session: Option<LoginSession>,
     /// Player data (Some after login complete)
     pub player: Option<Player>,
+    /// 대기 중인 다단계 입력 (암호변경: 이전→새→확인). None이면 일반 명령.
+    pub pending_input: Option<PendingInput>,
 }
 
 impl Client {
@@ -147,6 +149,7 @@ impl Client {
             sender,
             login_session: Some(LoginSession::new()),
             player: None,
+            pending_input: None,
         }
     }
 
@@ -393,7 +396,15 @@ async fn process_login_state(
     // Lock is released here
 
     if is_logged_in {
-        // Already logged in, handle as game command
+        // 다단계 입력 대기 중이면 (암호변경 등) 해당 플로우 처리
+        let has_pending = {
+            let clients = broadcaster.clients.lock();
+            clients.get(&addr).and_then(|c| c.pending_input.as_ref()).is_some()
+        };
+        if has_pending {
+            handle_pending_change_password(broadcaster, addr, input).await?;
+            return Ok(false);
+        }
         handle_game_command(broadcaster, addr, input, command_registry, room_cache, shutdown_notify).await?;
         return Ok(false);
     }
@@ -1886,6 +1897,85 @@ fn show_room_to_player_with_world(
     Ok(())
 }
 
+/// 암호변경 다단계 입력: 이전암호 → 새암호 → 확인. (명령줄에 암호 넣지 않음)
+async fn handle_pending_change_password(
+    broadcaster: &Arc<crate::network::Broadcaster>,
+    addr: SocketAddr,
+    input: &str,
+) -> Result<(), Box<dyn std::error::Error>> {
+    let input = input.trim();
+    let (next_state, msg, done) = {
+        let mut clients = broadcaster.clients.lock();
+        let client = match clients.get_mut(&addr) {
+            Some(c) => c,
+            None => return Ok(()),
+        };
+        let pending = match client.pending_input.take() {
+            Some(p) => p,
+            None => return Ok(()),
+        };
+        let player = match client.player.as_mut() {
+            Some(p) => p,
+            None => {
+                let _ = broadcaster.send_to(addr, "\x1b[1;31m☞ 오류가 발생했어요.\x1b[0;37m\r\n");
+                return Ok(());
+            }
+        };
+        let body = &mut player.body;
+        let stored = body.get_string("암호");
+        match pending {
+            PendingInput::ChangePasswordOld => {
+                if !password_verify(&stored, input) {
+                    (None, "☞ 현재의 암호가 맞지 않아요. ^^\r\n".to_string(), true)
+                } else {
+                    (
+                        Some(PendingInput::ChangePasswordNew),
+                        "☞ 변경 하실 암호를 입력해주세요. \r\n존함암호ː ".to_string(),
+                        false,
+                    )
+                }
+            }
+            PendingInput::ChangePasswordNew => {
+                if input.len() < 3 {
+                    (None, "☞ 3자 이상 입력하세요.\r\n".to_string(), true)
+                } else {
+                    (
+                        Some(PendingInput::ChangePasswordConfirm { new_password: input.to_string() }),
+                        "☞ 한번 더 암호를 입력해주세요. \r\n암호확인ː ".to_string(),
+                        false,
+                    )
+                }
+            }
+            PendingInput::ChangePasswordConfirm { new_password } => {
+                if input != new_password {
+                    (None, "☞ 이전 입력과 다릅니다. 암호변경을 취소합니다.\r\n".to_string(), true)
+                } else {
+                    body.set("암호", password_hash(input));
+                    let path = format!("data/user/{}.json", body.get_name());
+                    let ok = save_body_to_json(body, &path);
+                    let msg = if ok {
+                        "☞ 암호가 변경되었습니다.\r\n".to_string()
+                    } else {
+                        "☞ 암호 변경 후 저장에 실패했습니다.\r\n".to_string()
+                    };
+                    (None, msg, true)
+                }
+            }
+        }
+    };
+    if let Some(s) = next_state {
+        let mut clients = broadcaster.clients.lock();
+        if let Some(c) = clients.get_mut(&addr) {
+            c.pending_input = Some(s);
+        }
+    }
+    broadcaster.send_to(addr, &msg)?;
+    if done {
+        send_game_prompt(broadcaster, addr).await?;
+    }
+    Ok(())
+}
+
 /// Handle game command after login
 async fn handle_game_command(
     broadcaster: &Arc<crate::network::Broadcaster>,
@@ -1963,6 +2053,8 @@ async fn handle_game_command(
     )> = None; // (giver_addr, zone, room, target_name, giver_name, give_silver, give_gold, give_item, give_item_stack)
     let mut shout_to_broadcast: Option<String> = None;
     let mut tell_pending: Option<(String, String, String)> = None; // (target, message, sender_name)
+    let mut set_pending: Option<PendingInput> = None;
+    let mut skip_normal_prompt = false;
     {
         let mut clients = broadcaster.clients.lock();
         let world = get_world_state().read().unwrap();
@@ -2071,6 +2163,11 @@ async fn handle_game_command(
                     }
                     Some(CommandResult::Usage(msg)) => {
                         format!("\x1b[1;33m{}\x1b[0;37m\r\n", msg)
+                    }
+                    Some(CommandResult::RequestInput { prompt, state }) => {
+                        set_pending = Some(state);
+                        skip_normal_prompt = true;
+                        format!("{}\r\n", prompt)
                     }
                     Some(CommandResult::Move(_direction)) => {
                         String::new()  // Movement is handled elsewhere
@@ -2557,7 +2654,15 @@ async fn handle_game_command(
     }
 
     broadcaster.send_to(addr, &response)?;
-    send_game_prompt(broadcaster, addr).await?;
+    if let Some(s) = set_pending.take() {
+        let mut clients = broadcaster.clients.lock();
+        if let Some(c) = clients.get_mut(&addr) {
+            c.pending_input = Some(s);
+        }
+    }
+    if !skip_normal_prompt {
+        send_game_prompt(broadcaster, addr).await?;
+    }
 
     Ok(())
 }

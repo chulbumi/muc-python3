@@ -190,6 +190,27 @@ impl Broadcaster {
         None
     }
 
+    /// Send a message to a player by name. call_out 점프_착지 등에서 사용.
+    pub fn send_to_by_player_name(&self, player_name: &str, message: &str) -> Result<(), String> {
+        if let Some(addr) = self.find_addr_by_player_name(player_name) {
+            self.send_to(addr, message)
+        } else {
+            Err(format!("Player '{}' not found", player_name))
+        }
+    }
+
+    /// Run a closure on a player's Body by name. call_out 점프_착지에서 cooltime 해제 등.
+    pub fn with_player_body_by_name<F, R>(&self, player_name: &str, f: F) -> Option<R>
+    where
+        F: FnOnce(&mut crate::player::Body) -> R,
+    {
+        let addr = self.find_addr_by_player_name(player_name)?;
+        let mut clients = self.clients.lock();
+        let client = clients.get_mut(&addr)?;
+        let player = client.player.as_mut()?;
+        Some(f(&mut player.body))
+    }
+
     /// Request a client to disconnect (sends sentinel to their channel; e.g. kick on duplicate login).
     /// Caller should also send an informative message to the user before calling this.
     pub fn request_disconnect(&self, addr: SocketAddr) -> Result<(), String> {

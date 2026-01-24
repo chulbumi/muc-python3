@@ -6,6 +6,14 @@ use std::sync::Arc;
 use crate::player::Body;
 use crate::command::registry::CommandRegistry;
 
+/// Multi-step input state (e.g. 암호변경: 이전암호 → 새암호 → 확인)
+#[derive(Debug, Clone, PartialEq)]
+pub enum PendingInput {
+    ChangePasswordOld,
+    ChangePasswordNew,
+    ChangePasswordConfirm { new_password: String },
+}
+
 /// Result type for command execution
 #[derive(Debug, Clone, PartialEq)]
 pub enum CommandResult {
@@ -33,6 +41,8 @@ pub enum CommandResult {
     Shutdown,
     /// 감정표현: (to_self, to_room, to_target). to_target=(대상이름, buf2)이면 방 전송 시 대상 제외 후 대상에게 buf2 전송.
     EmotionToRoom(String, String, Option<(String, String)>),
+    /// 다음 입력 대기 (암호변경 등). prompt 전송 후 pending_input 설정.
+    RequestInput { prompt: String, state: PendingInput },
     /// 주다: 플레이어에게 은전/금전/아이템 전달. handle에서 대상 조회·이전·메시지 전송.
     GiveToPlayer {
         target_name: String,
@@ -47,7 +57,7 @@ pub enum CommandResult {
 impl CommandResult {
     /// Returns true if the command succeeded
     pub fn is_ok(&self) -> bool {
-        matches!(self, CommandResult::Ok | CommandResult::Output(_) | CommandResult::Move(_) | CommandResult::Combat | CommandResult::NoPrompt | CommandResult::SayToRoom(_, _) | CommandResult::Shout(_) | CommandResult::Tell(_, _) | CommandResult::Shutdown | CommandResult::EmotionToRoom(_, _, _) | CommandResult::GiveToPlayer { .. })
+        matches!(self, CommandResult::Ok | CommandResult::Output(_) | CommandResult::Move(_) | CommandResult::Combat | CommandResult::NoPrompt | CommandResult::SayToRoom(_, _) | CommandResult::Shout(_) | CommandResult::Tell(_, _) | CommandResult::Shutdown | CommandResult::EmotionToRoom(_, _, _) | CommandResult::RequestInput { .. } | CommandResult::GiveToPlayer { .. })
     }
 
     /// Returns true if the command should skip the prompt

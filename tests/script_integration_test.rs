@@ -29,7 +29,7 @@ fn test_script_execution() {
     // Try to execute a script if it exists
     let names = storage.script_names();
     if let Some(name) = names.first() {
-        let result = storage.execute(name, &mut body, "");
+        let result = storage.execute(name, &mut body, "", None, None, None);
         // Script might fail due to API mismatches, but it should at least compile
         println!("Script {:?} execution result: {:?}", name, result);
     }

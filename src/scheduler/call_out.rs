@@ -10,12 +10,10 @@
 use std::collections::HashMap;
 use std::time::{Duration, Instant};
 use std::sync::Arc;
-use tokio::sync::RwLock;
-use rhai::Dynamic;
+use parking_lot::RwLock;
 use tracing::{debug, warn};
 
-use crate::script::ScriptStorage;
-use crate::player::Body;
+use crate::network::Broadcaster;
 
 /// Unique identifier for a call_out task
 pub type CallOutId = String;
@@ -25,12 +23,14 @@ pub type CallOutId = String;
 pub struct CallOutTask {
     /// Unique task ID
     pub id: CallOutId,
-    /// Target object path
+    /// Target object path (e.g. player name)
     pub target: String,
     /// Function name to call
     pub function: String,
-    /// Arguments to pass
-    pub args: Vec<Dynamic>,
+    /// Arguments to pass (serde_json::Value for Send+Sync; Rhai Dynamic is !Send)
+    pub args: Vec<serde_json::Value>,
+    /// Script name (e.g. "점프") where the function is defined. None = built-in only.
+    pub script: Option<String>,
     /// When this task should execute
     pub scheduled_at: Instant,
     /// Delay duration
@@ -45,7 +45,8 @@ impl CallOutTask {
         target: String,
         function: String,
         delay: Duration,
-        args: Vec<Dynamic>,
+        args: Vec<serde_json::Value>,
+        script: Option<String>,
     ) -> Self {
         let id = uuid::Uuid::new_v4().to_string();
         let scheduled_at = Instant::now() + delay;
@@ -55,6 +56,7 @@ impl CallOutTask {
             target,
             function,
             args,
+            script,
             scheduled_at,
             delay,
             repeating: false,
@@ -66,9 +68,10 @@ impl CallOutTask {
         target: String,
         function: String,
         delay: Duration,
-        args: Vec<Dynamic>,
+        args: Vec<serde_json::Value>,
+        script: Option<String>,
     ) -> Self {
-        let mut task = Self::new(target, function, delay, args);
+        let mut task = Self::new(target, function, delay, args, script);
         task.repeating = true;
         task
     }
@@ -194,53 +197,62 @@ impl CallOutRegistry {
     }
 }
 
+/// Script runner for call_out: (target, script, function, args) -> Result.
+pub type ScriptRunnerFn = dyn Fn(&str, Option<&str>, &str, Vec<serde_json::Value>) -> Result<(), String> + Send + Sync;
+
 /// Call Out Scheduler - Manages and executes delayed function calls
 pub struct CallOutScheduler {
     /// Registry of all tasks
     registry: Arc<RwLock<CallOutRegistry>>,
-    /// Script storage for executing functions
-    script_storage: Arc<RwLock<ScriptStorage>>,
+    /// Broadcaster for sending messages and mutating player body (점프_착지 등)
+    broadcaster: Arc<Broadcaster>,
     /// Resolution for checking due tasks
     resolution: Duration,
+    /// Optional runner to execute Rhai script functions when task.script is Some
+    script_runner: Option<Arc<ScriptRunnerFn>>,
 }
 
 impl CallOutScheduler {
     /// Create a new call_out scheduler
     pub fn new(
-        script_storage: Arc<RwLock<ScriptStorage>>,
+        broadcaster: Arc<Broadcaster>,
         resolution: Duration,
+        script_runner: Option<Arc<ScriptRunnerFn>>,
     ) -> Self {
         Self {
             registry: Arc::new(RwLock::new(CallOutRegistry::new())),
-            script_storage,
+            broadcaster,
             resolution,
+            script_runner,
         }
     }
 
-    /// Create with default resolution (100ms)
-    pub fn default_storage(script_storage: Arc<RwLock<ScriptStorage>>) -> Self {
-        Self::new(script_storage, Duration::from_millis(100))
+    /// Create with default resolution (100ms), no script runner
+    pub fn default_resolution(broadcaster: Arc<Broadcaster>) -> Self {
+        Self::new(broadcaster, Duration::from_millis(100), None)
     }
 
     /// Schedule a call_out
     ///
-    /// Returns the task ID
+    /// Returns the task ID. `script`: Rhai script name (e.g. "점프") where the function is defined; None = built-in only.
     pub fn call_out(
         &self,
         target: &str,
         function: &str,
         delay: Duration,
-        args: Vec<Dynamic>,
+        args: Vec<serde_json::Value>,
+        script: Option<String>,
     ) -> CallOutId {
         let task = CallOutTask::new(
             target.to_string(),
             function.to_string(),
             delay,
             args,
+            script,
         );
 
         let id = task.id.clone();
-        let mut registry = self.registry.blocking_write();
+        let mut registry = self.registry.write();
         registry.add(task);
 
         debug!("call_out scheduled: {}::{} in {:?}", target, function, delay);
@@ -253,17 +265,19 @@ impl CallOutScheduler {
         target: &str,
         function: &str,
         delay: Duration,
-        args: Vec<Dynamic>,
+        args: Vec<serde_json::Value>,
+        script: Option<String>,
     ) -> CallOutId {
         let task = CallOutTask::repeating(
             target.to_string(),
             function.to_string(),
             delay,
             args,
+            script,
         );
 
         let id = task.id.clone();
-        let mut registry = self.registry.blocking_write();
+        let mut registry = self.registry.write();
         registry.add(task);
 
         debug!("repeating call_out scheduled: {}::{} every {:?}", target, function, delay);
@@ -272,13 +286,13 @@ impl CallOutScheduler {
 
     /// Remove a call_out by ID
     pub fn remove_call_out(&self, id: &CallOutId) -> bool {
-        let mut registry = self.registry.blocking_write();
+        let mut registry = self.registry.write();
         registry.remove(id).is_some()
     }
 
     /// Remove all call_outs for a target
     pub fn remove_all_for_target(&self, target: &str) -> usize {
-        let mut registry = self.registry.blocking_write();
+        let mut registry = self.registry.write();
         let tasks: Vec<CallOutId> = registry
             .get_by_target(target)
             .iter()
@@ -294,7 +308,7 @@ impl CallOutScheduler {
 
     /// Remove all call_outs for a function name
     pub fn remove_call_out_by_name(&self, target: &str, function: &str) -> bool {
-        let mut registry = self.registry.blocking_write();
+        let mut registry = self.registry.write();
 
         // Find tasks matching both target and function
         let ids: Vec<CallOutId> = registry
@@ -316,7 +330,7 @@ impl CallOutScheduler {
 
     /// Find a call_out for a specific function
     pub fn find_call_out(&self, target: &str, function: &str) -> Option<CallOutId> {
-        let registry = self.registry.try_read().ok()?;
+        let registry = self.registry.try_read()?;
         registry
             .get_by_target(target)
             .iter()
@@ -335,8 +349,8 @@ impl CallOutScheduler {
     pub fn process_due(&self) -> Vec<CallOutResult> {
         let mut due_tasks = {
             let mut registry = match self.registry.try_write() {
-                Ok(r) => r,
-                Err(_) => return Vec::new(),
+                Some(r) => r,
+                None => return Vec::new(),
             };
             registry.get_all_due()
         };
@@ -355,8 +369,14 @@ impl CallOutScheduler {
 
             // Reschedule if repeating
             if repeating {
-                let new_task = CallOutTask::repeating(target, function, delay, task.args);
-                if let Ok(mut registry) = self.registry.try_write() {
+                let new_task = CallOutTask::repeating(
+                    target,
+                    function,
+                    delay,
+                    task.args,
+                    task.script,
+                );
+                if let Some(mut registry) = self.registry.try_write() {
                     registry.add(new_task);
                 }
             }
@@ -369,15 +389,36 @@ impl CallOutScheduler {
     fn execute_task(&self, task: &CallOutTask) -> CallOutResult {
         debug!("Executing call_out: {}::{}", task.target, task.function);
 
-        // Try to execute the function from the script
-        let _storage = self.script_storage.try_read();
+        // Rhai 스크립트 함수: script_runner로 호출 (점프_착지 등 스크립트에 정의된 함수)
+        if let (Some(ref run), Some(ref script)) = (&self.script_runner, &task.script) {
+            match run(
+                &task.target,
+                Some(script.as_str()),
+                &task.function,
+                task.args.clone(),
+            ) {
+                Ok(()) => {
+                    return CallOutResult {
+                        task_id: task.id.clone(),
+                        success: true,
+                        error: None,
+                        should_reschedule: false,
+                    };
+                }
+                Err(e) => {
+                    warn!("call_out script_runner failed {}::{}: {}", task.target, task.function, e);
+                    return CallOutResult {
+                        task_id: task.id.clone(),
+                        success: false,
+                        error: Some(e),
+                        should_reschedule: false,
+                    };
+                }
+            }
+        }
 
-        // In a full implementation, we would:
-        // 1. Load the target script
-        // 2. Call the function with the args
-        // 3. Handle any errors
-
-        // For now, just log and return success
+        // 알 수 없는 function 또는 script 없음: 로그만
+        warn!("call_out unknown or no script: {}::{}", task.target, task.function);
         CallOutResult {
             task_id: task.id.clone(),
             success: true,
@@ -387,14 +428,20 @@ impl CallOutScheduler {
     }
 }
 
-/// Create a Rhai engine with call_out functions registered
+/// Create a Rhai engine with call_out functions registered (script=None, for standalone use)
 pub fn create_call_out_engine(scheduler: Arc<CallOutScheduler>) -> rhai::Engine {
     let mut engine = rhai::Engine::new();
     let scheduler_clone = scheduler.clone();
 
-    // call_out(target, function, delay, args...)
+    // call_out(target, function, delay) — script=None
     engine.register_fn("call_out", move |target: &str, function: &str, delay: i64| {
-        scheduler_clone.call_out(target, function, Duration::from_secs(delay as u64), vec![]);
+        scheduler_clone.call_out(
+            target,
+            function,
+            Duration::from_secs(delay.max(0) as u64),
+            vec![],
+            None,
+        );
     });
 
     // remove_call_out(target, function)
@@ -415,7 +462,7 @@ pub fn create_call_out_engine(scheduler: Arc<CallOutScheduler>) -> rhai::Engine 
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::script::ScriptConfig;
+    use crate::network::Broadcaster;
 
     #[test]
     fn test_call_out_task_new() {
@@ -424,6 +471,7 @@ mod tests {
             "func".to_string(),
             Duration::from_secs(10),
             vec![],
+            None,
         );
 
         assert_eq!(task.target, "test");
@@ -440,6 +488,7 @@ mod tests {
             "func".to_string(),
             Duration::from_secs(10),
             vec![],
+            None,
         );
 
         assert!(task.repeating);
@@ -452,6 +501,7 @@ mod tests {
             "func".to_string(),
             Duration::from_millis(10),
             vec![],
+            None,
         );
 
         assert!(!task.is_due());
@@ -474,6 +524,7 @@ mod tests {
             "func".to_string(),
             Duration::from_secs(10),
             vec![],
+            None,
         );
 
         registry.add(task);
@@ -488,6 +539,7 @@ mod tests {
             "func".to_string(),
             Duration::from_secs(10),
             vec![],
+            None,
         );
 
         let id = task.id.clone();
@@ -508,18 +560,21 @@ mod tests {
             "func1".to_string(),
             Duration::from_secs(10),
             vec![],
+            None,
         ));
         registry.add(CallOutTask::new(
             "test".to_string(),
             "func2".to_string(),
             Duration::from_secs(10),
             vec![],
+            None,
         ));
         registry.add(CallOutTask::new(
             "other".to_string(),
             "func3".to_string(),
             Duration::from_secs(10),
             vec![],
+            None,
         ));
 
         let test_tasks = registry.get_by_target("test");
@@ -531,17 +586,17 @@ mod tests {
 
     #[test]
     fn test_call_out_scheduler_new() {
-        let storage = Arc::new(RwLock::new(ScriptStorage::new(ScriptConfig::default())));
-        let scheduler = CallOutScheduler::default_storage(storage);
+        let broadcaster = Arc::new(Broadcaster::new());
+        let scheduler = CallOutScheduler::default_resolution(broadcaster);
         assert_eq!(scheduler.pending_count(), 0);
     }
 
     #[test]
     fn test_call_out_scheduler_schedule() {
-        let storage = Arc::new(RwLock::new(ScriptStorage::new(ScriptConfig::default())));
-        let scheduler = CallOutScheduler::default_storage(storage);
+        let broadcaster = Arc::new(Broadcaster::new());
+        let scheduler = CallOutScheduler::default_resolution(broadcaster);
 
-        let id = scheduler.call_out("test", "func", Duration::from_secs(10), vec![]);
+        let id = scheduler.call_out("test", "func", Duration::from_secs(10), vec![], None);
         assert_eq!(scheduler.pending_count(), 1);
 
         // Should be able to remove it
@@ -551,11 +606,11 @@ mod tests {
 
     #[test]
     fn test_call_out_scheduler_remove_by_name() {
-        let storage = Arc::new(RwLock::new(ScriptStorage::new(ScriptConfig::default())));
-        let scheduler = CallOutScheduler::default_storage(storage);
+        let broadcaster = Arc::new(Broadcaster::new());
+        let scheduler = CallOutScheduler::default_resolution(broadcaster);
 
-        scheduler.call_out("test", "func1", Duration::from_secs(10), vec![]);
-        scheduler.call_out("test", "func2", Duration::from_secs(10), vec![]);
+        scheduler.call_out("test", "func1", Duration::from_secs(10), vec![], None);
+        scheduler.call_out("test", "func2", Duration::from_secs(10), vec![], None);
 
         assert_eq!(scheduler.pending_count(), 2);
 

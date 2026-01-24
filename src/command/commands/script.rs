@@ -9,6 +9,7 @@ use tracing::info;
 use crate::command::{CommandResult, CommandFn};
 use crate::command::registry::{CommandRegistry, CommandInfo};
 use crate::player::{Body, body::SendLine};
+use crate::scheduler::CallOutScheduler;
 use crate::script::ScriptStorage;
 
 /// Execute a script command
@@ -19,8 +20,9 @@ pub async fn execute_script_command(
     line: &str,
     get_other_players_desc: Option<Arc<dyn Fn(&str) -> Vec<String> + Send + Sync>>,
     get_other_players_map: Option<Arc<dyn Fn() -> HashMap<String, String> + Send + Sync>>,
+    call_out_scheduler: Option<Arc<CallOutScheduler>>,
 ) -> CommandResult {
-    match script_storage.execute(script_name, player, line, get_other_players_desc, get_other_players_map) {
+    match script_storage.execute(script_name, player, line, get_other_players_desc, get_other_players_map, call_out_scheduler) {
         Ok((_outputs, special)) => {
             if let Some(cr) = special {
                 cr
@@ -40,11 +42,13 @@ pub async fn execute_script_command(
 /// Create a command function that executes a script.
 /// get_other_players_desc: 봐(view_map_data) 시 같은 방 다른 유저 getDesc. None이면 빈 목록.
 /// get_other_players_map: 봐 find_target에서 같은 방 다른 유저 (이름→getDesc) 맵. None이면 빈 맵.
+/// call_out_scheduler: Some이면 call_out/call_later 사용 가능.
 pub fn create_script_command(
     script_storage: Arc<RwLock<ScriptStorage>>,
     script_name: String,
     get_other_players_desc: Option<Arc<dyn Fn(&str) -> Vec<String> + Send + Sync>>,
     get_other_players_map: Option<Arc<dyn Fn() -> HashMap<String, String> + Send + Sync>>,
+    call_out_scheduler: Option<Arc<CallOutScheduler>>,
 ) -> CommandFn {
     Arc::new(move |player: &mut Body, args: &[&str]| -> CommandResult {
         let line = args.join(" ");
@@ -56,7 +60,7 @@ pub fn create_script_command(
                 return CommandResult::Error(msg);
             }
         };
-        match storage.execute(&script_name, player, &line, get_other_players_desc.clone(), get_other_players_map.clone()) {
+        match storage.execute(&script_name, player, &line, get_other_players_desc.clone(), get_other_players_map.clone(), call_out_scheduler.clone()) {
             Ok((outputs, special)) => {
                 if let Some(cr) = special {
                     return cr;
@@ -80,11 +84,13 @@ pub fn create_script_command(
 /// Only registers commands that don't already exist in the registry.
 /// Built-in commands take priority over script commands.
 /// get_other_players_desc: 봐 시 같은 방 다른 유저 getDesc. None이면 봐에서도 빈 목록.
+/// call_out_scheduler: Some이면 call_out/call_later 사용 가능.
 pub async fn register_script_commands(
     registry: &mut CommandRegistry,
     script_storage: Arc<RwLock<ScriptStorage>>,
     get_other_players_desc: Option<Arc<dyn Fn(&str) -> Vec<String> + Send + Sync>>,
     get_other_players_map: Option<Arc<dyn Fn() -> HashMap<String, String> + Send + Sync>>,
+    call_out_scheduler: Option<Arc<CallOutScheduler>>,
 ) {
     let scripts = script_storage.read().await;
     let script_names = scripts.script_names();
@@ -117,7 +123,7 @@ pub async fn register_script_commands(
         let name_clone = script_name.clone();
 
         // Create command from script
-        let command_fn = create_script_command(storage, script_name, get_other_players_desc.clone(), get_other_players_map.clone());
+        let command_fn = create_script_command(storage, script_name, get_other_players_desc.clone(), get_other_players_map.clone(), call_out_scheduler.clone());
 
         // Get description from script if available
         let description = format!("{} 명령어", name_clone);
