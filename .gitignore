@@ -127,6 +127,31 @@ dmypy.json
 # Pyre type checker
 .pyre/
 
+# Python 추가 (타입체커, 린터 캐시)
+.pytype/
+.ruff_cache/
+
 # etc
 *.swp
 *.swo
+*~
+*.bak
+*.orig
+
+# --- Rust (Cargo) ---
+/target/
+**/*.rs.bk
+*.pdb
+
+# --- fluffos (서브트리 전체 미추적) ---
+/fluffos/
+
+# --- OS, 편집기 ---
+.DS_Store
+Thumbs.db
+
+# --- 로컬/임시 ---
+/temp
+/tmp
+.env.local
+.env.*.local

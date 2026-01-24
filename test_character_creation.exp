@@ -1,0 +1,45 @@
+#!/usr/bin/expect -f
+
+set timeout 30
+spawn nc localhost 9900
+
+# Wait for the initial screen and name prompt
+expect "무림존함ː"
+sleep 1
+send "테스트\r"
+
+# Now we need to handle the interactive prompts
+# Let me capture what comes next
+expect {
+    -timeout 20
+    "암호" {
+        log_file "/tmp/mud_creation_log.txt"
+        send_user "\n=== PASSWORD PROMPT ===\n"
+        send "test1234\r"
+        expect {
+            -timeout 20
+            "암호" {
+                send_user "\n=== CONFIRM PASSWORD ===\n"
+                send "test1234\r"
+                exp_continue
+            }
+            timeout {
+                send_user "\n=== Timeout waiting for password confirmation ===\n"
+            }
+        }
+    }
+    "존재" {
+        send_user "\n=== CHARACTER ALREADY EXISTS ===\n"
+    }
+    "성별" {
+        log_file "/tmp/mud_creation_log.txt"
+        send_user "\n=== GENDER PROMPT ===\n"
+        send "1\r"
+        exp_continue
+    }
+    timeout {
+        send_user "\n=== TIMEOUT ===\n"
+    }
+}
+
+interact

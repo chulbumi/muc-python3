@@ -1,5 +1,5 @@
 #!/bin/sh
-export PYTHONPATH=/home/muc/py3MUC
+export PYTHONPATH=/home/ubuntu/muc-python3
 while [ 1 ]
 do
 #~/bin/python2.7 ~/bin/twistd -n  --reactor=epoll -y server.py

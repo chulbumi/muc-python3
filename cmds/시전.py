@@ -8,7 +8,7 @@ class CmdObj(Command):
         ob.cooltime[name] = 2
         if name == '능파미보':
             if ob.act != ACT_DEATH:
-                ob.sendLine('\r\n당신이 펼쳐놓은 [1;36m凌波微步[;37m의 신법을 멈춥니다.')
+                ob.sendLine('\r\n당신이 펼쳐놓은 [1;36m凌波微步\033[0;37m의 신법을 멈춥니다.')
             ob._miss -= 350
         elif name == '역근경':
             if ob.act != ACT_DEATH:
@@ -93,7 +93,7 @@ class CmdObj(Command):
             from twisted.internet import reactor
             if line == '능파미보':
                 ob._miss += 350
-                ob.sendLine('당신이 발걸음을 [1;37m交叉[0;37m하며 [1;36m凌波微步[;37m를 재빨리 펼쳐냅니다.')
+                ob.sendLine('당신이 발걸음을 [1;37m交叉[0;37m하며 [1;36m凌波微步\033[0;37m를 재빨리 펼쳐냅니다.')
                 reactor.callLater(2, self.cool1, ob, line)
             elif line == '역근경':
                 ob._arm += 500

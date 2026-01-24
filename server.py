@@ -49,8 +49,8 @@ t1.start()
 factory = protocol.ServerFactory()
 factory.protocol = Client
 application = service.Application("pyMUC_Server")
-server = internet.TCPServer(9999, factory)
+server = internet.TCPServer(9900, factory)
 server.setServiceParent(application)
 
-reactor.listenTCP(9999, factory)
+reactor.listenTCP(9900, factory)
 reactor.run()
