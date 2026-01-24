@@ -1,9 +1,8 @@
-// 지난잡담.rhai - 지난잡담 명령어
-// Python: cmds/지난잡담.py
+// 지난잡담.rhai - 지난잡담. Python: cmds/지난잡담.py
+// ob.chatHistory 순회.
 
 fn cmd(ob, line) {
-
-    send_line(ob, "☞ 아직 준비 중입니다.");
+    send_line(ob, "☞ (chatHistory 연동 예정)");
 }
 
 fn main(ob, line) {

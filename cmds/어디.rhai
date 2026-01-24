@@ -1,5 +1,6 @@
 // 어디.rhai - 어디 명령어. Python: cmds/어디.py
 // 인자 없음: 같은 zone 접속자 "이름 ▷ 방이름". 인자(이름): 해당 유저 "이름 ▷ 방이름". 없으면 "활동중인 그런 무림인이 없어요"
+// rhai unchecked feature로 표현 깊이 제한 비활성화 필요
 
 fn cmd(ob, line) {
     let name = trim(line);

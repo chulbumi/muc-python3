@@ -3,7 +3,7 @@
 
 fn cmd(ob, line) {
     let parts = line_args(line);
-    if length(parts) < 2 {
+    if len(parts) < 2 {
         send_line(ob, "☞ 사용법: [대상] [내용] 전음(/)");
         return;
     }
@@ -15,9 +15,9 @@ fn cmd(ob, line) {
 fn join_after(arr, from) {
     let s = "";
     let i = from;
-    while i < length(arr) {
+    while i < len(arr) {
         s = s + arr[i];
-        if i + 1 < length(arr) { s = s + " "; }
+        if i + 1 < len(arr) { s = s + " "; }
         i = i + 1;
     }
     s

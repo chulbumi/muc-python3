@@ -610,6 +610,15 @@ pub fn create_engine() -> Engine {
     engine.register_fn("len", |arr: &mut rhai::Array| -> i64 {
         arr.len() as i64
     });
+    engine.register_fn("length", |arr: &mut rhai::Array| -> i64 {
+        arr.len() as i64
+    });
+    engine.register_fn("join", |arr: &mut rhai::Array, sep: &str| -> String {
+        arr.iter()
+            .map(|v| v.to_string())
+            .collect::<Vec<_>>()
+            .join(sep)
+    });
 
     // ============================================================
     // ANSI COLOR CONVERSION
@@ -1373,6 +1382,15 @@ pub fn create_engine_with_output(output_collector: Arc<Mutex<Vec<String>>>) -> E
     engine.register_fn("len", |arr: &mut rhai::Array| -> i64 {
         arr.len() as i64
     });
+    engine.register_fn("length", |arr: &mut rhai::Array| -> i64 {
+        arr.len() as i64
+    });
+    engine.register_fn("join", |arr: &mut rhai::Array, sep: &str| -> String {
+        arr.iter()
+            .map(|v| v.to_string())
+            .collect::<Vec<_>>()
+            .join(sep)
+    });
 
     // ============================================================
     // ANSI COLOR CONVERSION
@@ -1741,6 +1759,14 @@ pub fn create_engine_with_output(output_collector: Arc<Mutex<Vec<String>>>) -> E
             .filter_map(|v| v.as_str())
             .collect::<Vec<_>>()
             .join("\r\n")
+    });
+
+    // get_timestamp(): Unix timestamp (초). 값값 등.
+    engine.register_fn("get_timestamp", || -> i64 { chrono::Utc::now().timestamp() });
+
+    // read_text_file(path): 텍스트 파일 내용. 없으면 "".
+    engine.register_fn("read_text_file", |path: &str| -> String {
+        std::fs::read_to_string(path).unwrap_or_default()
     });
 
     // ============================================================
@@ -2584,6 +2610,13 @@ pub fn create_engine_with_body_and_output(
         body.get_int(key)
     });
 
+    // get_body_string(ob, key): Body에서 문자열 읽기. set_value로 넣은 키(예: 위치각인, 꼬리말)용.
+    let body_ptr_getbs = body_ptr;
+    engine.register_fn("get_body_string", move |_ob: &mut rhai::Map, key: &str| -> String {
+        let body = unsafe { &*body_ptr_getbs };
+        body.get_string(key)
+    });
+
     // ---- 외쳐/전음/표현/주다: special_collector에 CommandResult 설정, handler에서 Shout/Tell/EmotionToRoom/GiveToPlayer 처리 ----
 
     // send_shout(ob, msg): 외쳐. 검사 후 Shout(formatted) 설정. 오류 시 oc에 push.
@@ -3304,6 +3337,12 @@ fn build_ob_from_body(body: &Body) -> rhai::Map {
     m.insert("소속".into(), body.get_string("소속").into());
     m.insert("env".into(), "".into());
     m.insert("objs".into(), rhai::Dynamic::from(rhai::Array::new()));
+    // 숙련도.rhai: 검/도/창/기타/맨손
+    m.insert("1 숙련도".into(), body.get_int("1 숙련도").into());
+    m.insert("2 숙련도".into(), body.get_int("2 숙련도").into());
+    m.insert("3 숙련도".into(), body.get_int("3 숙련도").into());
+    m.insert("4 숙련도".into(), body.get_int("4 숙련도").into());
+    m.insert("5 숙련도".into(), body.get_int("5 숙련도").into());
     m
 }
 

@@ -44,7 +44,7 @@ fastrand = "2.1"
 rand = "0.8"
 
 # 스크립팅 (Rhai)
-rhai = { version = "1.19", features = ["serde"] }
+rhai = { version = "1.19", features = ["serde", "unchecked"] }
 
 # 파일 감시 (핫리로딩)
 notify = "6.1"

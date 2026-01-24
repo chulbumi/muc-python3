@@ -1,9 +1,14 @@
-// 회복.rhai - 회복 명령어
-// Python: cmds/회복.py
+// 회복.rhai - 회복. Python: cmds/회복.py
+// 관리자 1000. ob['체력']=getMaxHp(), ob['내공']=getMaxMp(). set_value(ob, "hp", max_hp), set_value(ob, "mp", max_mp).
 
 fn cmd(ob, line) {
-
-    send_line(ob, "☞ 아직 준비 중입니다.");
+    if require_admin(ob, 1000) {
+        set_value(ob, "hp", get_int(ob, "max_hp"));
+        set_value(ob, "mp", get_int(ob, "max_mp"));
+        send_line(ob, "* 회복되었습니다.");
+    } else {
+        send_line(ob, "☞ 무슨 말인지 모르겠어요. *^_^*");
+    }
 }
 
 fn main(ob, line) {

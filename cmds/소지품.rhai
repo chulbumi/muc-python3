@@ -1,5 +1,6 @@
 // 소지품.rhai - 소지품 명령어 (Python: cmds/소지품.py)
 // target=다른대상 보기는 ob.env.findObjName 미지원으로 자신만 조회
+// rhai unchecked feature로 표현 깊이 제한 비활성화 필요
 
 fn cmd(ob, line) {
     send_line(ob, "━━━━━━━━━━━━━━━━━");

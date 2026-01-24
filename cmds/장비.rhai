@@ -7,7 +7,7 @@ fn cmd(ob, line) {
     let arm_msg = if len(eq) == 0 { "▷ 당신은 맨몸입니다" } else { "▷ 당신은 장비를 착용하고 있습니다" };
     send_line(ob, "\x1b[0m\x1b[44m\x1b[1m\x1b[37m" + fill_space(27, arm_msg) + "\x1b[0m\x1b[37m\x1b[40m");
     send_line(ob, "───────────────────────────");
-    let mut item_str = "";
+    let item_str = "";
     for e in eq {
         let slot = e["slot"];
         let disp = get_item_level_display(slot);

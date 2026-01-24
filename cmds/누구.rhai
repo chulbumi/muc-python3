@@ -12,15 +12,15 @@ fn cmd(ob, line) {
     }
     let so = ob["소속"];
     let lines = [];
-    let mut line_buf = "";
-    let mut cnt = 0;
+    let line_buf = "";
+    let cnt = 0;
     let arr = get_all_online_players();
     for c in arr {
         if mode && c["소속"] != so {
             continue;
         }
         let nick = c["무림별호"];
-        let mut buf = "";
+        let buf = "";
         if nick == "" || nick == () {
             buf = "[\x1b[0;37m무명객\x1b[0;37m]";
         } else {
@@ -53,10 +53,11 @@ fn cmd(ob, line) {
     send_line(ob, "└─────────────────────────────────────┘");
     send_line(ob, msg);
     send_line(ob, " ──────────────────────────────────────");
+    let cnt_s = int_to_str(cnt);
     if mode {
-        send_line(ob, " ★ 총 " + cnt + "명의 \x1b[1m【\x1b[36m" + so + "\x1b[37m】\x1b[0;37m파 무림인이 활동하고 있습니다.");
+        send_line(ob, " ★ 총 " + cnt_s + "명의 \x1b[1m【\x1b[36m" + so + "\x1b[37m】\x1b[0;37m파 무림인이 활동하고 있습니다.");
     } else {
-        send_line(ob, " ★ 총 " + cnt + "명의 무림인이 활동하고 있습니다.");
+        send_line(ob, " ★ 총 " + cnt_s + "명의 무림인이 활동하고 있습니다.");
     }
 }
 

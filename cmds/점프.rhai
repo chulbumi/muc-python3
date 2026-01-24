@@ -4,7 +4,7 @@
 // Rhai 식별자는 ASCII만 허용 → jump_land (점프_착지)
 fn jump_land(ob) {
     set_value(ob, "cooltime", 0);
-    send_line(ob, "당신은 안전하게 착지합니다. ^^v");
+    send_line(ob, "당신은 안전하게 착지합니다. 만세^^v");
 }
 
 fn cmd(ob, line) {

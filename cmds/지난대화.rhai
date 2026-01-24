@@ -1,9 +1,8 @@
-// 지난대화.rhai - 지난대화 명령어
-// Python: cmds/지난대화.py
+// 지난대화.rhai - 지난대화. Python: cmds/지난대화.py
+// ob.talkHistory 순회.
 
 fn cmd(ob, line) {
-
-    send_line(ob, "☞ 아직 준비 중입니다.");
+    send_line(ob, "☞ (talkHistory 연동 예정)");
 }
 
 fn main(ob, line) {
