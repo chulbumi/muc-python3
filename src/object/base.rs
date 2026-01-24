@@ -19,7 +19,8 @@ use crate::hangul;
 /// * `attr` - Persistent attributes stored as key-value pairs
 /// * `temp` - Temporary attributes that don't persist
 /// * `env` - Weak reference to parent object (prevents circular references)
-/// * `objs` - Child objects stored as Arc<Mutex<Object>>
+/// * `objs` - Child objects (non-stackable: 무기, 방어구, 개별인스턴스)
+/// * `inv_stack` - Stackable item counts: 인덱스(item key) -> 수량 (먹는것, 약 등)
 #[derive(Debug)]
 pub struct Object {
     /// Persistent attributes map
@@ -28,8 +29,10 @@ pub struct Object {
     pub temp: HashMap<String, Value>,
     /// Parent object (weak reference to prevent cycles)
     pub env: Option<Weak<Mutex<Object>>>,
-    /// Child objects
+    /// Child objects (non-stackable only)
     pub objs: Vec<Arc<Mutex<Object>>>,
+    /// Stackable inventory: item key (인덱스) -> count. Save/load as 소지품_수량.
+    pub inv_stack: HashMap<String, i64>,
 }
 
 impl Default for Object {
@@ -55,6 +58,7 @@ impl Object {
             temp: HashMap::new(),
             env: None,
             objs: Vec::new(),
+            inv_stack: HashMap::new(),
         }
     }
 
@@ -591,6 +595,7 @@ impl Object {
             temp: self.temp.clone(),
             env: None, // Don't clone env reference
             objs: self.objs.clone(), // Shallow copy of Arc references
+            inv_stack: self.inv_stack.clone(),
         }
     }
 
@@ -618,6 +623,7 @@ impl Object {
             temp,
             env: None,
             objs,
+            inv_stack: self.inv_stack.clone(),
         }
     }
 }

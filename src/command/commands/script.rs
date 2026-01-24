@@ -2,6 +2,7 @@
 //!
 //! This module provides command execution through Rhai scripts.
 
+use std::collections::HashMap;
 use std::sync::Arc;
 use tokio::sync::RwLock;
 use tracing::info;
@@ -16,11 +17,16 @@ pub async fn execute_script_command(
     player: &mut Body,
     script_name: &str,
     line: &str,
+    get_other_players_desc: Option<Arc<dyn Fn(&str) -> Vec<String> + Send + Sync>>,
+    get_other_players_map: Option<Arc<dyn Fn() -> HashMap<String, String> + Send + Sync>>,
 ) -> CommandResult {
-    match script_storage.execute(script_name, player, line) {
-        Ok(_outputs) => {
-            // Script outputs are sent via send_line function in the script
-            CommandResult::Ok
+    match script_storage.execute(script_name, player, line, get_other_players_desc, get_other_players_map) {
+        Ok((_outputs, special)) => {
+            if let Some(cr) = special {
+                cr
+            } else {
+                CommandResult::Ok
+            }
         }
         Err(e) => {
             // Return error message
@@ -31,10 +37,14 @@ pub async fn execute_script_command(
     }
 }
 
-/// Create a command function that executes a script
+/// Create a command function that executes a script.
+/// get_other_players_desc: 봐(view_map_data) 시 같은 방 다른 유저 getDesc. None이면 빈 목록.
+/// get_other_players_map: 봐 find_target에서 같은 방 다른 유저 (이름→getDesc) 맵. None이면 빈 맵.
 pub fn create_script_command(
     script_storage: Arc<RwLock<ScriptStorage>>,
     script_name: String,
+    get_other_players_desc: Option<Arc<dyn Fn(&str) -> Vec<String> + Send + Sync>>,
+    get_other_players_map: Option<Arc<dyn Fn() -> HashMap<String, String> + Send + Sync>>,
 ) -> CommandFn {
     Arc::new(move |player: &mut Body, args: &[&str]| -> CommandResult {
         let line = args.join(" ");
@@ -46,9 +56,11 @@ pub fn create_script_command(
                 return CommandResult::Error(msg);
             }
         };
-        match storage.execute(&script_name, player, &line) {
-            Ok(outputs) => {
-                // Return outputs via CommandResult::Output
+        match storage.execute(&script_name, player, &line, get_other_players_desc.clone(), get_other_players_map.clone()) {
+            Ok((outputs, special)) => {
+                if let Some(cr) = special {
+                    return cr;
+                }
                 if outputs.is_empty() {
                     CommandResult::Ok
                 } else {
@@ -67,9 +79,12 @@ pub fn create_script_command(
 ///
 /// Only registers commands that don't already exist in the registry.
 /// Built-in commands take priority over script commands.
+/// get_other_players_desc: 봐 시 같은 방 다른 유저 getDesc. None이면 봐에서도 빈 목록.
 pub async fn register_script_commands(
     registry: &mut CommandRegistry,
     script_storage: Arc<RwLock<ScriptStorage>>,
+    get_other_players_desc: Option<Arc<dyn Fn(&str) -> Vec<String> + Send + Sync>>,
+    get_other_players_map: Option<Arc<dyn Fn() -> HashMap<String, String> + Send + Sync>>,
 ) {
     let scripts = script_storage.read().await;
     let script_names = scripts.script_names();
@@ -102,19 +117,29 @@ pub async fn register_script_commands(
         let name_clone = script_name.clone();
 
         // Create command from script
-        let command_fn = create_script_command(storage, script_name);
+        let command_fn = create_script_command(storage, script_name, get_other_players_desc.clone(), get_other_players_map.clone());
 
         // Get description from script if available
         let description = format!("{} 명령어", name_clone);
+        let usage = description.clone();
+
+        // Rhai 전환된 주다/외쳐/전음/표현: 기존 alias 유지 (레지스트리 built-in 외 별도)
+        let aliases: Vec<String> = match name_clone.as_str() {
+            "주다" => vec!["줘".to_string(), "주".to_string(), "give".to_string(), "선물".to_string(), "선".to_string()],
+            "외쳐" => vec!["외".to_string(), "외침".to_string(), "잡".to_string(), "잡담".to_string(), ",".to_string(), "shout".to_string(), "창".to_string(), "창룡".to_string(), "창룡후".to_string(), "외친다".to_string()],
+            "전음" => vec!["전".to_string(), "/".to_string()],
+            "표현" => vec!["표".to_string(), "'".to_string(), "emote".to_string()],
+            _ => vec![],
+        };
 
         // Create CommandInfo
         let info = CommandInfo::new(
             name_clone.clone(),
-            vec![], // No aliases for now
+            aliases,
             command_fn,
             0,     // Level 0 = all players can use
             description.clone(),
-            description,
+            usage,
         );
 
         // Register the command

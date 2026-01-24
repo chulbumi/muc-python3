@@ -5,7 +5,9 @@
 
 use std::collections::HashMap;
 use std::sync::{Arc, Mutex, Weak};
+use crate::data::get_skill_defense_head;
 use crate::object::{Object, Value};
+use crate::world::item::get_item_weight_by_key;
 
 /// Action states for game entities
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
@@ -662,7 +664,7 @@ impl Body {
         }
     }
 
-    /// Gets item weight
+    /// Gets item weight (objs + inv_stack 수량*무게)
     pub fn get_item_weight(&self) -> i64 {
         let mut weight = 0;
         for obj in &self.object.objs {
@@ -672,10 +674,13 @@ impl Body {
                 }
             }
         }
+        for (key, cnt) in &self.object.inv_stack {
+            weight += cnt.saturating_mul(get_item_weight_by_key(key));
+        }
         weight
     }
 
-    /// Gets item count (excluding hidden items)
+    /// Gets item count (objs + inv_stack 수량 합, excluding hidden)
     pub fn get_item_count(&self) -> usize {
         let mut count = 0;
         for obj in &self.object.objs {
@@ -685,10 +690,11 @@ impl Body {
                 }
             }
         }
+        count += self.object.inv_stack.values().map(|&c| c as usize).sum::<usize>();
         count
     }
 
-    /// Gets inventory item count (not in use)
+    /// Gets inventory item count (not in use). objs 중 inUse 아닌 것 + inv_stack 합.
     pub fn get_inven_item_count(&self) -> usize {
         let mut count = 0;
         for obj in &self.object.objs {
@@ -698,6 +704,7 @@ impl Body {
                 }
             }
         }
+        count += self.object.inv_stack.values().map(|&c| c as usize).sum::<usize>();
         count
     }
 
@@ -885,6 +892,7 @@ impl Body {
     }
 
     /// 제3자가 볼 때 / 자신이 '나 봐' 할 때의 설명. 파이썬 objs/player.getDesc(myself).
+    /// 방파별호, 머리말, 꼬리말, 투명상태(호출처에서 필터), active_skills의 방어상태머리말.
     pub fn get_desc_for_look(&self, myself: bool) -> String {
         let act_str = if self.get_hp() <= 0 {
             "쓰러져 있습니다."
@@ -896,11 +904,42 @@ impl Body {
                 ActState::Move => "서 있습니다.",
             }
         };
-        if myself {
-            format!("당신이 {}", act_str)
-        } else {
-            format!("{}{}", self.han_iga(), act_str)
+        let mut msg = String::new();
+        if !myself {
+            // 방파별호: \x1b[1m【%s】\x1b[0m
+            let s = self.object.getString("방파별호");
+            if !s.is_empty() {
+                msg = format!("\x1b[1m【{}】\x1b[0m", s);
+            }
+            // 방어상태머리말: active_skills에 대해 skill.json의 방어상태머리말 이어붙임
+            for a in &self.active_skills {
+                let h = get_skill_defense_head(&a.name);
+                if !h.is_empty() {
+                    msg.push_str(&h);
+                    msg.push(' ');
+                }
+            }
         }
+        // 머리말
+        let m = self.object.getString("머리말");
+        if !m.is_empty() {
+            msg.push_str(&m);
+            msg.push(' ');
+        }
+        if myself {
+            msg.push_str("당신이 ");
+        } else {
+            msg.push_str(&self.han_iga());
+            msg.push(' ');
+        }
+        // 꼬리말
+        let t = self.object.getString("꼬리말");
+        if !t.is_empty() {
+            msg.push_str(&t);
+            msg.push(' ');
+        }
+        msg.push_str(&act_str);
+        msg
     }
 
     /// Delegates to Object::checkAttr

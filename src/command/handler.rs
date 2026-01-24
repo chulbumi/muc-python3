@@ -23,12 +23,31 @@ pub enum CommandResult {
     Move(String),
     /// Combat action
     Combat,
+    /// 말(say): (발언자에게 to_self, 같은 방 다른 플레이어에게 to_room) 전송.
+    SayToRoom(String, String),
+    /// 외쳐(shout): 게임 접속 전체에 broadcast. 이름 없이 (외침타입) : 메시지. 외침거부 체크는 broadcast 쪽에서.
+    Shout(String),
+    /// 전음: 특정 대상에게 귓속말. (대상이름, 메시지). 전음거부·대상 검증은 handle에서.
+    Tell(String, String),
+    /// 셧다운: 서버 종료 요청. 전체 사용자에게 알리고 종료 시퀀스.
+    Shutdown,
+    /// 감정표현: (to_self, to_room, to_target). to_target=(대상이름, buf2)이면 방 전송 시 대상 제외 후 대상에게 buf2 전송.
+    EmotionToRoom(String, String, Option<(String, String)>),
+    /// 주다: 플레이어에게 은전/금전/아이템 전달. handle에서 대상 조회·이전·메시지 전송.
+    GiveToPlayer {
+        target_name: String,
+        giver_name: String,
+        give_silver: Option<i64>,
+        give_gold: Option<i64>,
+        give_item: Option<(String, usize, usize)>, // (item_name, order, count) 비스택
+        give_item_stack: Option<(String, i64)>,    // (인덱스, count) 스택
+    },
 }
 
 impl CommandResult {
     /// Returns true if the command succeeded
     pub fn is_ok(&self) -> bool {
-        matches!(self, CommandResult::Ok | CommandResult::Output(_) | CommandResult::Move(_) | CommandResult::Combat | CommandResult::NoPrompt)
+        matches!(self, CommandResult::Ok | CommandResult::Output(_) | CommandResult::Move(_) | CommandResult::Combat | CommandResult::NoPrompt | CommandResult::SayToRoom(_, _) | CommandResult::Shout(_) | CommandResult::Tell(_, _) | CommandResult::Shutdown | CommandResult::EmotionToRoom(_, _, _) | CommandResult::GiveToPlayer { .. })
     }
 
     /// Returns true if the command should skip the prompt

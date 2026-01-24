@@ -1,3 +1,4 @@
+pub mod emotion;
 pub mod hangul;
 pub mod utils;
 pub mod network;

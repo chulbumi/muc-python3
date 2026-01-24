@@ -1,5 +1,10 @@
 # Rhai API 변환 현황
 
+## efun vs 출력 포맷
+- **efun**: 데이터·로직·유틸만 Rust에 등록. (이 목록의 API들이 efun.)
+- **출력 포맷**: 문구·레이아웃·ANSI 등은 Rhai(cmd/main)에서만.  
+→ 자세한 원칙: [docs/EFUN_RHAI_CONVENTION.md](../docs/EFUN_RHAI_CONVENTION.md)
+
 ## .clinerules 요구사항
 - 모든 파이썬 코드를 마이그레이션 해야 함 (190개 .py 파일)
 - cmds/ 디렉토리의 파이썬 코드는 실행시간에 업데이트하는 구조

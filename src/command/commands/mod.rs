@@ -7,12 +7,18 @@ pub mod info;
 pub mod communication;
 pub mod combat;
 pub mod script;
+pub mod system;
+pub mod give;
+pub mod update;
 
 pub use movement::*;
 pub use info::*;
 pub use communication::*;
 pub use combat::*;
 pub use script::*;
+pub use system::*;
+pub use give::*;
+pub use update::*;
 
 use std::sync::Arc;
 use crate::command::{CommandResult, CommandFn};
@@ -25,6 +31,9 @@ pub fn register_basic_commands(registry: &mut CommandRegistry) {
     register_info_commands(registry);
     register_communication_commands(registry);
     register_combat_commands(registry);
+    register_system_commands(registry);
+    register_give_commands(registry);
+    register_update_commands(registry);
 }
 
 /// Helper to create a command function wrapper

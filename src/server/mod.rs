@@ -10,11 +10,19 @@ pub mod game_loop;
 pub use game_loop::{GameLoop, GameLoopConfig, run_game_loop};
 
 use std::sync::Arc;
+use std::sync::Mutex;
 use tokio::net::TcpListener;
 use tokio::sync::Mutex as AsyncMutex;
+use tokio::sync::Notify;
 use tracing::{error, info};
 
+use crate::command::commands::register_basic_commands;
+use crate::command::commands::script::register_script_commands;
+use crate::command::CommandRegistry;
 use crate::network::broadcaster::Broadcaster;
+use crate::network::client::{get_other_players_desc_in_room, get_other_players_map_for_look};
+use crate::script::{ScriptConfig, ScriptStorage};
+use crate::world::{get_world_state, RoomCache};
 
 /// Server configuration
 #[derive(Debug, Clone)]
@@ -125,25 +133,91 @@ impl MudServer {
             run_game_loop(broadcaster, players, game_loop_config).await;
         });
 
-        // Accept connections
-        loop {
-            match listener.accept().await {
-                Ok((stream, addr)) => {
-                    info!("New connection from {}", addr);
+        // command_registry, script_storage, room_cache를 한 번만 생성 (접속마다 ScriptStorage 로딩 시 블로킹 방지)
+        let get_other_players_desc: Arc<dyn Fn(&str) -> Vec<String> + Send + Sync> = Arc::new({
+            let bc = self.broadcaster.clone();
+            move |exclude: &str| {
+                let world = get_world_state().read().unwrap();
+                let pos = match world.get_player_position(exclude) {
+                    Some(p) => p.clone(),
+                    None => return vec![],
+                };
+                get_other_players_desc_in_room(bc.as_ref(), &pos.zone, pos.room, exclude)
+            }
+        });
+        let get_other_players_map: Arc<dyn Fn() -> std::collections::HashMap<String, String> + Send + Sync> =
+            Arc::new(get_other_players_map_for_look);
+        let script_storage = Arc::new(tokio::sync::RwLock::new(ScriptStorage::new(ScriptConfig::default())));
+        let mut registry = CommandRegistry::new();
+        register_basic_commands(&mut registry);
+        register_script_commands(&mut registry, script_storage, Some(get_other_players_desc), Some(get_other_players_map)).await;
+        let command_registry = Arc::new(registry);
+        let room_cache = Arc::new(Mutex::new(RoomCache::new()));
 
-                    let broadcaster = self.broadcaster.clone();
-
-                    tokio::spawn(async move {
-                        if let Err(e) = crate::network::client::handle_client(stream, addr, broadcaster).await {
-                            error!("Error handling client {}: {}", addr, e);
-                        }
-                    });
+        // 셧다운/CTRL+C/kill(SIGTERM) 시 서버 종료 시퀀스 트리거
+        let shutdown_notify = Arc::new(Notify::new());
+        let sn = shutdown_notify.clone();
+        tokio::spawn(async move {
+            #[cfg(unix)]
+            {
+                use tokio::signal::unix::{signal, SignalKind};
+                if let Ok(mut sigterm) = signal(SignalKind::terminate()) {
+                    tokio::select! {
+                        _ = tokio::signal::ctrl_c() => {}
+                        _ = sigterm.recv() => {}
+                    }
+                } else {
+                    let _ = tokio::signal::ctrl_c().await;
                 }
-                Err(e) => {
-                    error!("Error accepting connection: {}", e);
+            }
+            #[cfg(not(unix))]
+            {
+                let _ = tokio::signal::ctrl_c().await;
+            }
+            sn.notify_waiters();
+        });
+
+        // Accept connections (shutdown_notify 시 루프 탈출)
+        loop {
+            tokio::select! {
+                result = listener.accept() => {
+                    match result {
+                        Ok((stream, addr)) => {
+                            info!("New connection from {}", addr);
+                            let broadcaster = self.broadcaster.clone();
+                            let command_registry = command_registry.clone();
+                            let room_cache = room_cache.clone();
+                            let shutdown_notify = shutdown_notify.clone();
+                            tokio::spawn(async move {
+                                if let Err(e) = crate::network::client::handle_client(
+                                    stream, addr, broadcaster, command_registry, room_cache,
+                                    Some(shutdown_notify),
+                                ).await {
+                                    error!("Error handling client {}: {}", addr, e);
+                                }
+                            });
+                        }
+                        Err(e) => {
+                            error!("Error accepting connection: {}", e);
+                        }
+                    }
+                }
+                _ = shutdown_notify.notified() => {
+                    info!("Shutdown requested (CTRL+C / kill / 셧다운)");
+                    break;
                 }
             }
         }
+
+        // 셧다운 시퀀스: 전체 사용자에게 종료 안내 → 연결 해제 요청 → 잠시 대기 후 종료
+        let msg = "\r\n\r\n\x1b[1;33m☞ 서버가 종료됩니다. 다음에 또 만나요~!!!\x1b[0;37m\r\n";
+        self.broadcaster.broadcast(msg, None);
+        for addr in self.broadcaster.client_addresses() {
+            let _ = self.broadcaster.request_disconnect(addr);
+        }
+        tokio::time::sleep(tokio::time::Duration::from_secs(2)).await;
+        info!("Server shutdown complete");
+        Ok(())
     }
 }
 

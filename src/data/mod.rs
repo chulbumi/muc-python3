@@ -6,8 +6,37 @@
 use std::collections::HashMap;
 use std::path::PathBuf;
 use std::sync::{Arc, RwLock};
+use once_cell::sync::Lazy;
 use serde_json::Value as JsonValue;
 use tracing::{info, warn, error};
+
+/// data/config/skill.json에서 스킬별 방어상태머리말 캐시. get_desc_for_look 등에서 사용.
+static SKILL_DEFENSE_HEAD_CACHE: Lazy<RwLock<HashMap<String, String>>> = Lazy::new(|| {
+    let mut m = HashMap::new();
+    if let Ok(s) = std::fs::read_to_string("data/config/skill.json") {
+        if let Ok(v) = serde_json::from_str::<JsonValue>(&s) {
+            if let Some(obj) = v.as_object() {
+                for (k, skill) in obj {
+                    if let Some(val) = skill.get("방어상태머리말").and_then(|v| v.as_str()) {
+                        m.insert(k.clone(), val.to_string());
+                    }
+                }
+            }
+        }
+    }
+    RwLock::new(m)
+});
+
+/// 스킬 이름에 해당하는 방어상태머리말. 파이썬 getDesc의 for s in self.skills: s['방어상태머리말'].
+/// data/config/skill.json을 로드해 캐시함. 없으면 "".
+pub fn get_skill_defense_head(skill_name: &str) -> String {
+    SKILL_DEFENSE_HEAD_CACHE
+        .read()
+        .unwrap()
+        .get(skill_name)
+        .cloned()
+        .unwrap_or_default()
+}
 
 /// 글로벌 데이터 캐시
 ///

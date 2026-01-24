@@ -481,6 +481,38 @@ pub fn get_item_cache() -> &'static RwLock<ItemCache> {
     CACHE.get_or_init(|| RwLock::new(ItemCache::new()))
 }
 
+/// Read item weight from data/item/{key}.json. Returns 0 if not found. inv_stack 무게 합산용.
+pub fn get_item_weight_by_key(key: &str) -> i64 {
+    let path = format!("data/item/{}.json", key);
+    let content = match std::fs::read_to_string(&path) {
+        Ok(c) => c,
+        Err(_) => return 0,
+    };
+    let json: serde_json::Value = match serde_json::from_str(&content) {
+        Ok(j) => j,
+        Err(_) => return 0,
+    };
+    let info = json.get("아이템정보").and_then(|v| v.as_object());
+    info.and_then(|o| o.get("무게").and_then(|v| v.as_i64())).unwrap_or(0)
+}
+
+/// 아이템 표시이름. data/item/{key}.json의 아이템정보.이름, 없으면 key.
+pub fn get_item_display_name(key: &str) -> String {
+    let path = format!("data/item/{}.json", key);
+    let content = match std::fs::read_to_string(&path) {
+        Ok(c) => c,
+        Err(_) => return key.to_string(),
+    };
+    let json: serde_json::Value = match serde_json::from_str(&content) {
+        Ok(j) => j,
+        Err(_) => return key.to_string(),
+    };
+    json.get("아이템정보")
+        .and_then(|o| o.get("이름").and_then(|v| v.as_str()))
+        .unwrap_or(key)
+        .to_string()
+}
+
 /// Helper to create an item instance
 pub fn create_item(item_key: &str) -> Result<ItemInstance, ItemError> {
     let cache = get_item_cache().read().unwrap();

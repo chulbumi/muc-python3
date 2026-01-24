@@ -1,10 +1,30 @@
-// 벗어.rhai - 장비 해제 명령어
-// Python: cmds/벗어.py
+// 벗어.rhai - 장비 해제. Python: cmds/벗어.py. item_unequip, item_unequip_all, parse_order_name
 
 fn cmd(ob, line) {
-    if !require_arg(ob, line, "☞ 사용법: [아이템 이름] 벗어  또는  [모두/전부] 벗어") { return; }
-    // ob.objs, inUse, armor, attpower, option 등 서버 연동 필요
-    send_line(ob, "☞ 이 기능은 서버 기능 연동 후 사용할 수 있습니다.");
+    if is_empty(line) {
+        send_line(ob, "☞ 사용법: [아이템 이름] 벗어  또는  [모두/전부] 벗어");
+        return;
+    }
+    let t = trim(line);
+    if t == "모두" || t == "전부" {
+        let n = item_unequip_all(ob);
+        if n == 0 {
+            send_line(ob, "☞ 착용중인 장비가 없어요.");
+        } else {
+            send_line(ob, "당신이 착용한 장비 " + int_to_str(n) + "개를 해제했습니다.");
+        }
+        return;
+    }
+    let arr = parse_order_name(line);
+    let ord = arr[0];
+    let nm = arr[1];
+    let err = item_unequip(ob, nm, ord);
+    if err != "" {
+        send_line(ob, err);
+        return;
+    }
+    let eul = han_eul(nm);
+    send_line(ob, "당신이 \x1b[36m" + nm + eul + "\x1b[37m 착용해제 합니다.");
 }
 
 fn main(ob, line) {

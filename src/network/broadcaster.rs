@@ -190,6 +190,21 @@ impl Broadcaster {
         None
     }
 
+    /// Request a client to disconnect (sends sentinel to their channel; e.g. kick on duplicate login).
+    /// Caller should also send an informative message to the user before calling this.
+    pub fn request_disconnect(&self, addr: SocketAddr) -> Result<(), String> {
+        use crate::network::client::DISCONNECT_SENTINEL;
+        let clients = self.clients.lock();
+        if let Some(client) = clients.get(&addr) {
+            client
+                .sender
+                .send(DISCONNECT_SENTINEL.to_string())
+                .map_err(|e| format!("Failed to send disconnect: {}", e))
+        } else {
+            Err(format!("Client {} not found", addr))
+        }
+    }
+
     /// Send a message to all clients in a room (environment)
     ///
     /// This is a placeholder for future room-based messaging.

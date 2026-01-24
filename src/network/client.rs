@@ -3,8 +3,10 @@
 //! Manages individual TCP client connections with line-based protocol
 //! and login flow.
 
+use std::cell::RefCell;
 use std::net::SocketAddr;
 use std::sync::Arc;
+use std::sync::RwLock;
 use std::path::PathBuf;
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
 use tokio::net::TcpStream;
@@ -14,12 +16,17 @@ use tracing::{debug, error, info, warn};
 use serde::Deserialize;
 use once_cell::sync::Lazy;
 
+use rhai::{Array, Dynamic, Map};
+
+use crate::emotion::{self, EmotionTarget};
 use crate::network::DelimiterCodec;
 use crate::player::{Player, STATE_ACTIVE};
 use crate::command::{CommandParser, CommandRegistry, CommandResult};
-use crate::world::RoomCache;
+use crate::command::commands::try_move_by_exit_name;
+use crate::world::item::{get_item_display_name, get_item_weight_by_key};
+use crate::world::{get_world_state, RoomCache};
 use std::collections::HashMap;
-use crate::script::{format_room_objs_display, ScriptConfig, ScriptStorage};
+use crate::script::{build_room_objs_grouped, format_room_objs_display, set_precomputed_all_online, clear_precomputed_all_online, save_body_to_json, load_body_from_json, password_hash, password_verify, load_user_password_hash};
 
 /// Client connection state
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -36,6 +43,9 @@ impl Default for ClientState {
     }
 }
 
+/// Sentinel sent to a client's channel to request the send task to exit (kicks the connection).
+pub(crate) const DISCONNECT_SENTINEL: &str = "\x1b__DISCONNECT__\x1b";
+
 /// Login state machine for client connection
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum LoginState {
@@ -45,6 +55,8 @@ enum LoginState {
     Name,
     /// Waiting for password input (for existing user)
     Password,
+    /// Same name already connected: wait for "기존 접속 종료할까요? (네/아니오)"
+    AskKickExisting,
     /// Showing notice after login
     Notice,
     /// Login complete, entering game
@@ -219,26 +231,15 @@ async fn send_prompt(
 ///
 /// This function runs in a task for each connected client,
 /// handling incoming data and managing the client lifecycle.
+/// `shutdown_notify`: 셧다운 명령 시 서버 종료 트리거용. None이면 셧다운 명령은 no-op.
 pub async fn handle_client(
     stream: TcpStream,
     addr: SocketAddr,
     broadcaster: Arc<crate::network::Broadcaster>,
+    command_registry: Arc<CommandRegistry>,
+    room_cache: Arc<std::sync::Mutex<RoomCache>>,
+    shutdown_notify: Option<Arc<tokio::sync::Notify>>,
 ) -> Result<(), Box<dyn std::error::Error>> {
-    // Create command registry and register basic commands
-    let command_registry = Arc::new({
-        let mut registry = CommandRegistry::new();
-        crate::command::commands::register_basic_commands(&mut registry);
-
-        // Also register script-based commands from cmds/ directory
-        let script_storage = Arc::new(tokio::sync::RwLock::new(ScriptStorage::new(ScriptConfig::default())));
-        let _ = crate::command::commands::script::register_script_commands(&mut registry, script_storage).await;
-
-        registry
-    });
-
-    // Create room cache for map data
-    let room_cache = Arc::new(std::sync::Mutex::new(RoomCache::new()));
-
     info!("Client connected from {}", addr);
 
     // Split the stream into owned reader and writer
@@ -266,6 +267,10 @@ pub async fn handle_client(
         let _login_complete = false;
 
         while let Some(msg) = rx.recv().await {
+            // Disconnect sentinel: break to close connection (e.g. kick on duplicate login)
+            if msg == DISCONNECT_SENTINEL {
+                break;
+            }
             // Don't add extra \r\n - messages already have proper line endings
             if let Err(e) = writer.write_all(msg.as_bytes()).await {
                 error!("Failed to send to {}: {}", addr, e);
@@ -333,6 +338,7 @@ pub async fn handle_client(
                                 &tx_clone,
                                 command_registry.clone(),
                                 room_cache.clone(),
+                                shutdown_notify.clone(),
                             ).await?;
 
                             if should_disconnect {
@@ -374,6 +380,7 @@ async fn process_login_state(
     _tx: &mpsc::UnboundedSender<String>,
     command_registry: Arc<CommandRegistry>,
     room_cache: Arc<std::sync::Mutex<RoomCache>>,
+    shutdown_notify: Option<Arc<tokio::sync::Notify>>,
 ) -> Result<bool, Box<dyn std::error::Error>> {
     // First, check if the client is still in login phase
     // Do this in a separate scope to ensure lock is released
@@ -387,7 +394,7 @@ async fn process_login_state(
 
     if is_logged_in {
         // Already logged in, handle as game command
-        handle_game_command(broadcaster, addr, input, command_registry, room_cache).await?;
+        handle_game_command(broadcaster, addr, input, command_registry, room_cache, shutdown_notify).await?;
         return Ok(false);
     }
 
@@ -395,8 +402,22 @@ async fn process_login_state(
     // We must drop the lock before any await points
     let next_action: LoginAction = {
         let mut clients = broadcaster.clients.lock();
-        let client = clients.get_mut(&addr);
+        let (name, state) = clients
+            .get(&addr)
+            .and_then(|c| c.login_session.as_ref())
+            .map(|s| (s.name.clone(), s.state))
+            .unwrap_or((String::new(), LoginState::Logo));
+        let has_duplicate = state == LoginState::Password
+            && clients.iter().any(|(a, c)| {
+                *a != addr
+                    && c.player
+                        .as_ref()
+                        .map(|p| p.body.get_string("이름"))
+                        .as_deref()
+                        == Some(name.as_str())
+            });
 
+        let client = clients.get_mut(&addr);
         if client.is_none() {
             return Ok(false);
         }
@@ -410,8 +431,6 @@ async fn process_login_state(
         }
 
         let session = session.unwrap();
-        let state = session.state;
-        let name = session.name.clone();
 
         // Update state based on current state and input
         // Return what action to take after releasing the lock
@@ -451,13 +470,37 @@ async fn process_login_state(
             }
             LoginState::Password => {
                 session.attempts += 1;
+                let stored = load_user_password_hash(&name);
+                let ok = stored.as_ref().map_or(false, |s| password_verify(s, input));
 
-                if input.is_empty() && session.attempts < 3 {
-                    // Will ask again for password
-                    LoginAction::AskPasswordRetry
+                if !ok {
+                    // 암호 틀림: 3회면 접속 끊기, 아니면 재입력
+                    if session.attempts >= 3 {
+                        LoginAction::PasswordWrongDisconnect
+                    } else {
+                        LoginAction::AskPasswordRetry
+                    }
                 } else {
-                    session.state = LoginState::Notice;
-                    LoginAction::ShowNotice
+                    session.attempts = 0;
+                    if has_duplicate {
+                        session.state = LoginState::AskKickExisting;
+                        LoginAction::AskKickExisting(name)
+                    } else {
+                        session.state = LoginState::Notice;
+                        LoginAction::ShowNotice
+                    }
+                }
+            }
+            LoginState::AskKickExisting => {
+                let t = input.trim();
+                let yes = matches!(t, "네" | "예" | "y" | "Y" | "yes" | "YES");
+                let no = matches!(t, "아니오" | "아니" | "n" | "N" | "no" | "NO");
+                if yes {
+                    LoginAction::KickExistingAndProceed(name)
+                } else if no {
+                    LoginAction::DisconnectSelf
+                } else {
+                    LoginAction::AskKickExistingRetry(name)
                 }
             }
             LoginState::Notice => {
@@ -695,8 +738,43 @@ async fn process_login_state(
             Ok(false)
         }
         LoginAction::AskPasswordRetry => {
-            send_password_prompt(broadcaster, addr).await?;
+            broadcaster.send_to(addr, "\r\n잘못된 암호 입니다.\r\n존함암호ː ")?;
             Ok(false)
+        }
+        LoginAction::PasswordWrongDisconnect => {
+            broadcaster.send_to(addr, "\r\n")?;
+            tokio::time::sleep(tokio::time::Duration::from_millis(100)).await;
+            return Ok(true);
+        }
+        LoginAction::AskKickExisting(_) | LoginAction::AskKickExistingRetry(_) => {
+            broadcaster.send_to(
+                addr,
+                "\r\n\x1b[1;37m기존 접속을 종료하고 접속하시겠습니까? (네/아니오)\x1b[0;37m\r\n",
+            )?;
+            Ok(false)
+        }
+        LoginAction::KickExistingAndProceed(name) => {
+            if let Some(existing_addr) = broadcaster.find_addr_by_player_name(&name) {
+                let _ = broadcaster.send_to(
+                    existing_addr,
+                    "\r\n\x1b[1;33m다른 곳에서 접속하여 접속이 종료됩니다.\x1b[0;37m\r\n",
+                );
+                let _ = broadcaster.request_disconnect(existing_addr);
+                {
+                    let mut w = crate::world::get_world_state().write().unwrap();
+                    w.remove_player_position(&name);
+                }
+            }
+            send_notice_and_complete(broadcaster, addr).await?;
+            Ok(false)
+        }
+        LoginAction::DisconnectSelf => {
+            broadcaster.send_to(
+                addr,
+                "\r\n\x1b[1;37m접속을 취소합니다.\x1b[0;37m\r\n",
+            )?;
+            tokio::time::sleep(tokio::time::Duration::from_millis(100)).await;
+            return Ok(true);
         }
         LoginAction::ShowNotice => {
             send_notice_and_complete(broadcaster, addr).await?;
@@ -707,7 +785,7 @@ async fn process_login_state(
             Ok(false)
         }
         LoginAction::GameCommand(_player_name) => {
-            handle_game_command(broadcaster, addr, input, command_registry, room_cache).await?;
+            handle_game_command(broadcaster, addr, input, command_registry, room_cache, shutdown_notify).await?;
             Ok(false)
         }
     }
@@ -728,6 +806,15 @@ enum LoginAction {
     StartScript,
     ScriptContinue,
     ScriptComplete(String),
+    /// 동일 접속자 있음: "기존 접속 종료? (네/아니오)" 질의
+    AskKickExisting(String),
+    AskKickExistingRetry(String),
+    /// 기존 접속자 kick 후 새 접속 진행
+    KickExistingAndProceed(String),
+    /// 새 접속자가 "아니오" 선택 → 현재(새) 접속 끊기
+    DisconnectSelf,
+    /// 암호 3회 오류 → 접속 끊기
+    PasswordWrongDisconnect,
 }
 
 /// Send helper selection menu
@@ -853,12 +940,35 @@ fn process_script_line(
     // Handle data input from user (when we were waiting for name/password/gender)
     if let Some(data_type) = session.waiting_for_data {
         let input_trimmed = input.trim();
-        if !input_trimmed.is_empty() {
+        if data_type == "name" {
+            // 케릭터 이름: 한글 1~6글자만 허용.
+            if input_trimmed.is_empty() || !crate::hangul::is_han(input_trimmed) {
+                return (
+                    session.script_mode,
+                    session.script_position,
+                    None,
+                    Some("한글 1~6글자만 입력 가능합니다.\r\n케릭터 이름:".to_string()),
+                    true,
+                    false,
+                    0,
+                );
+            }
+            let len = input_trimmed.chars().count();
+            if len > 6 {
+                return (
+                    session.script_mode,
+                    session.script_position,
+                    None,
+                    Some("한글 1~6글자만 입력 가능합니다.\r\n케릭터 이름:".to_string()),
+                    true,
+                    false,
+                    0,
+                );
+            }
+            session.char_name = input_trimmed.to_string();
+            session.waiting_for_data = None;
+        } else if !input_trimmed.is_empty() {
             match data_type {
-                "name" => {
-                    session.char_name = input_trimmed.to_string();
-                    session.waiting_for_data = None;
-                }
                 "password" => {
                     session.char_password = input_trimmed.to_string();
                     session.waiting_for_data = None;
@@ -1013,6 +1123,9 @@ async fn complete_char_creation_and_enter_game(
             let gender = client.login_session.as_ref()
                 .map(|s| s.char_gender.clone())
                 .unwrap_or_else(|| "남".to_string());
+            let pwd = client.login_session.as_ref()
+                .map(|s| s.char_password.clone())
+                .unwrap_or_default();
 
             // Complete login
             client.complete_login();
@@ -1022,6 +1135,7 @@ async fn complete_char_creation_and_enter_game(
             player.body.set("이름", name.as_str());
             player.body.set("성별", gender.as_str());
             player.body.init_body();
+            player.body.set("암호", password_hash(&pwd));
             player.state = STATE_ACTIVE;
             player.interactive = 1;
 
@@ -1034,6 +1148,8 @@ async fn complete_char_creation_and_enter_game(
             if name == "밍밍" {
                 player.body.set("관리자등급", 2000i64);
             }
+
+            let _ = save_body_to_json(&mut player.body, &format!("data/user/{}.json", name));
 
             // Store the player in the client
             client.set_player(player);
@@ -1116,12 +1232,12 @@ async fn send_logo_and_name_prompt(
     Ok(())
 }
 
-/// Send password prompt to client
+/// Send password prompt to client (존함암호ː)
 async fn send_password_prompt(
     broadcaster: &Arc<crate::network::Broadcaster>,
     addr: SocketAddr,
 ) -> Result<(), Box<dyn std::error::Error>> {
-    let prompt = "\r\n\x1b[1;37m비밀번호를 입력하여 주십시오.\r\n비밀번호:";
+    let prompt = "\r\n존함암호ː ";
     broadcaster.send_to(addr, prompt)?;
 
     // Update state to Password
@@ -1192,10 +1308,10 @@ async fn complete_login_and_enter_game(
             client.complete_login();
 
             // Create player and initialize
-            // TODO: Load existing player data if available
             let mut player = Player::new();
             player.body.set("이름", name.as_str());
             player.body.init_body();
+            let _ = load_body_from_json(&mut player.body, &format!("data/user/{}.json", name));
             if name == "밍밍" {
                 player.body.set("관리자등급", 2000i64);
             }
@@ -1267,24 +1383,23 @@ async fn send_game_prompt(
     Ok(())
 }
 
-/// Create visual compass string for room exits
+/// Create visual compass string for room exits (방향만, 숨겨진 제외)
 fn format_exit_compass(room: &crate::world::Room) -> String {
     use crate::world::Direction;
 
-    let exits = &room.exits;
-    let has_north = exits.contains_key(&Direction::North);
-    let has_south = exits.contains_key(&Direction::South);
-    let has_east = exits.contains_key(&Direction::East);
-    let has_west = exits.contains_key(&Direction::West);
+    let has = |d: Direction| room.exits.values().any(|e| e.direction == Some(d) && e.has_destination() && !e.hidden);
+    let has_north = has(Direction::North);
+    let has_south = has(Direction::South);
+    let has_east = has(Direction::East);
+    let has_west = has(Direction::West);
 
-    // Build direction list
     let mut directions = Vec::new();
     if has_north { directions.push("북"); }
     if has_south { directions.push("남"); }
     if has_east { directions.push("동"); }
     if has_west { directions.push("서"); }
-    if exits.contains_key(&Direction::Up) { directions.push("위"); }
-    if exits.contains_key(&Direction::Down) { directions.push("아래"); }
+    if has(Direction::Up) { directions.push("위"); }
+    if has(Direction::Down) { directions.push("아래"); }
 
     if directions.is_empty() {
         return "  ○  어느 쪽으로도 이동할 수 없습니다.\r\n".to_string();
@@ -1327,29 +1442,6 @@ fn format_exit_compass(room: &crate::world::Room) -> String {
     compass.push_str(&format!(" 〔{}〕쪽으로 이동할 수 있습니다.\r\n", dir_str));
 
     compass
-}
-
-/// 바닥 아이템을 이름별로 묶어서 포맷. 파이썬 viewMapData의 nStr 로직.
-/// 동일 이름이면 "죽검 2개가 떨어져 있습니다"처럼 표시.
-/// Rhai 공통 함수(format_room_objs.rhai) 사용 — 이동 후·봐(인자 없음) 공통.
-fn format_room_objs_grouped(
-    room_objs: &[std::sync::Arc<std::sync::Mutex<crate::object::Object>>],
-) -> String {
-    let mut map: HashMap<String, (usize, String)> = HashMap::new(); // name -> (count, desc1)
-    for arc in room_objs {
-        if let Ok(o) = arc.lock() {
-            let name = o.getName();
-            let desc1 = o.getString("설명1");
-            map.entry(name)
-                .and_modify(|e| e.0 += 1)
-                .or_insert((1, desc1));
-        }
-    }
-    let grouped: Vec<(String, usize, String)> = map
-        .into_iter()
-        .map(|(name, (count, desc1))| (name, count, desc1))
-        .collect();
-    format_room_objs_display(grouped)
 }
 
 /// Show the current room to the player
@@ -1411,10 +1503,10 @@ async fn show_room_to_player(
             room_ref.display_name
         );
 
-        // Get exits
-        let exits: Vec<&str> = room_ref.exits.values()
-            .filter(|e| e.has_destination())
-            .map(|e| e.direction().korean_name())
+        // Get exits (방향은 korean_name, 고유명은 display_name. 숨겨진 제외)
+        let exits: Vec<String> = room_ref.exits.values()
+            .filter(|e| e.has_destination() && !e.hidden)
+            .map(|e| e.direction.as_ref().map(|d| d.korean_name().to_string()).unwrap_or_else(|| e.display_name.clone()))
             .collect();
         let exits_str = if exits.is_empty() {
             "출구가 없습니다.".to_string()
@@ -1442,17 +1534,27 @@ async fn show_room_to_player(
             }
         };
 
-        // 바닥에 떨어진 아이템(room_objs). 동일 이름은 N개로 묶어 표시. 파이썬 viewMapData nStr.
+        // 바닥에 떨어진 아이템(room_objs + room_inv_stack). 동일 이름은 N개로 묶어 표시.
         let room_objs = world.get_room_objs(&pos.zone, pos.room);
-        let item_str = format_room_objs_grouped(&room_objs);
+        let room_stack = world.get_room_objs_stack(&pos.zone, pos.room);
+        let item_str = build_room_objs_grouped(&room_objs, &room_stack);
+
+        // 같은 방의 다른 접속 유저. 봐/show_room_to_player_with_world와 동일.
+        let other_descs = get_other_players_desc_in_room(broadcaster.as_ref(), &pos.zone, pos.room, player_name);
+        let other_str = if other_descs.is_empty() {
+            String::new()
+        } else {
+            format!("\r\n{}", other_descs.join("\r\n"))
+        };
 
         format!(
-            "{}\r\n{}\r\n{}{}{}\r\n[ {}/{} , {}/{} ]\r\n",
+            "{}\r\n{}\r\n{}{}{}{}\r\n[ {}/{} , {}/{} ]\r\n",
             room_name_formatted,
             room_ref.description.join("\r\n"),
             exits_str,
             mob_str,
             item_str,
+            other_str,
             100, 900, 18, 18  // Default HP/MP display
         )
     } else {
@@ -1518,6 +1620,173 @@ fn handle_movement(
     Ok(())
 }
 
+// handle_game_command가 이미 clients 락을 보유한 상태에서 봐 스크립트를 실행할 때
+// get_other_players_desc → get_other_players_desc_in_room이 같은 락을 다시 잡으면 데드락이 난다.
+// 이 스레드로컬이 Some이면 그 값을 그대로 반환하고, None이면 broadcaster.clients.lock() 후 수집.
+thread_local! {
+    static PRE_COMPUTED_OTHER_DESCS: RefCell<Option<Vec<String>>> = RefCell::new(None);
+}
+thread_local! {
+    static PRE_COMPUTED_OTHER_MAP: RefCell<Option<HashMap<String, String>>> = RefCell::new(None);
+}
+
+/// 락 보유 중에 get_other가 재진입하지 않도록, 미리 수집해 두고 핸들러 호출 전/후로 set/clear.
+struct PreComputedOtherDescsGuard;
+impl Drop for PreComputedOtherDescsGuard {
+    fn drop(&mut self) {
+        PRE_COMPUTED_OTHER_DESCS.with(|c| *c.borrow_mut() = None);
+        PRE_COMPUTED_OTHER_MAP.with(|c| *c.borrow_mut() = None);
+        clear_precomputed_all_online();
+    }
+}
+
+fn collect_other_players_from_map(
+    zone: &str,
+    room: i64,
+    exclude_name: &str,
+    world: &crate::world::WorldState,
+    clients_map: &HashMap<SocketAddr, Client>,
+) -> (Vec<String>, HashMap<String, String>) {
+    let mut out = Vec::new();
+    let mut map = HashMap::new();
+    for (_, client) in clients_map.iter() {
+        if let Some(ref p) = client.player {
+            if p.body.object_ref().getInt("투명상태") == 1 {
+                continue;
+            }
+            let name = p.body.get_string("이름");
+            if name.is_empty() || name == exclude_name {
+                continue;
+            }
+            if let Some(pos) = world.get_player_position(&name) {
+                if pos.zone == zone && pos.room == room {
+                    let desc = p.body.get_desc_for_look(false);
+                    out.push(desc.clone());
+                    map.insert(name, desc);
+                }
+            }
+        }
+    }
+    (out, map)
+}
+
+/// 같은 방(zone, room)에 있는 다른 접속 유저들의 getDesc. 파이썬 viewMapData의 for obj in room.objs: is_player, getDesc.
+/// 투명상태==1인 유저는 제외. 파이썬: if obj['투명상태'] == 1: continue
+pub(crate) fn get_other_players_desc_in_room(
+    broadcaster: &crate::network::Broadcaster,
+    zone: &str,
+    room: i64,
+    exclude_name: &str,
+) -> Vec<String> {
+    if let Some(taken) = PRE_COMPUTED_OTHER_DESCS.with(|c| c.borrow_mut().take()) {
+        return taken;
+    }
+    let world = crate::world::get_world_state().read().unwrap();
+    let clients = broadcaster.clients.lock();
+    collect_other_players_from_map(zone, room, exclude_name, &world, &*clients).0
+}
+
+/// find_target(봐 [대상])에서 같은 방 다른 유저 매칭용. PRE가 설정돼 있으면 그걸 반환(데드락 회피).
+pub(crate) fn get_other_players_map_for_look() -> HashMap<String, String> {
+    PRE_COMPUTED_OTHER_MAP.with(|c| c.borrow_mut().take()).unwrap_or_default()
+}
+
+/// 감정표현 대상: 같은 방에서 name으로 플레이어 또는 몹 검색. self_name이면 None. 파이썬 env.findObjName.
+fn find_emotion_target_in_room(
+    zone: &str,
+    room: i64,
+    name: &str,
+    self_name: &str,
+    world: &crate::world::WorldState,
+    clients: &HashMap<SocketAddr, Client>,
+) -> Option<EmotionTarget> {
+    if name.is_empty() || name == self_name {
+        return None;
+    }
+    for (_addr, client) in clients.iter() {
+        if let Some(ref p) = client.player {
+            let n = p.body.get_string("이름");
+            if n != name {
+                continue;
+            }
+            if let Some(pos) = world.get_player_position(&n) {
+                if pos.zone == zone && pos.room == room {
+                    let contact_refuse = p.body.get_string("설정상태").contains("접촉거부 1");
+                    return Some(EmotionTarget::Player {
+                        name: n,
+                        contact_refuse,
+                    });
+                }
+            }
+        }
+    }
+    for mob in world.mob_cache.get_mobs_in_room(zone, room) {
+        if !mob.alive {
+            continue;
+        }
+        if mob.name == name {
+            return Some(EmotionTarget::Mob {
+                name: mob.name.clone(),
+            });
+        }
+    }
+    None
+}
+
+/// 같은 방의 발언자(및 선택적 to_target)를 제외한 나머지 접속자에게만 msg 전송.
+/// exclude: 제외할 플레이어 이름들 (발언자, 감정표현 시 대상 등).
+/// clients 락을 잡은 채 broadcaster.send_to()를 호출하면 send_to가 다시 clients.lock()을 시도해 데드락이 나므로,
+/// 이미 보유한 client 참조의 sender로 직접 전송.
+pub(crate) fn send_to_others_in_room(
+    broadcaster: &crate::network::Broadcaster,
+    zone: &str,
+    room: i64,
+    exclude: &[&str],
+    msg: &str,
+) {
+    let world = get_world_state().read().unwrap();
+    let clients = broadcaster.clients.lock();
+    let line = format!("\r\n{}\r\n", msg);
+    for (_addr, client) in clients.iter() {
+        if let Some(ref p) = client.player {
+            if p.body.object_ref().getInt("투명상태") == 1 {
+                continue;
+            }
+            let name = p.body.get_string("이름");
+            if name.is_empty() || exclude.iter().any(|x| *x == name) {
+                continue;
+            }
+            if let Some(pos) = world.get_player_position(&name) {
+                if pos.zone == zone && pos.room == room {
+                    let _ = client.sender.send(line.clone());
+                }
+            }
+        }
+    }
+}
+
+/// 외쳐(shout): 게임 접속 전체에 전송. Active이고 외침거부가 아닌 클라이언트에만.
+/// clients 락을 잡은 채 send_to를 호출하면 데드락이 나므로, client.sender로 직접 전송.
+pub(crate) fn broadcast_shout(broadcaster: &crate::network::Broadcaster, msg: &str) {
+    use crate::network::ClientState;
+    let clients = broadcaster.clients.lock();
+    let line = format!("\r\n{}\r\n", msg);
+    for (_addr, client) in clients.iter() {
+        if client.state != ClientState::Active {
+            continue;
+        }
+        if let Some(ref p) = client.player {
+            let config = p.body.get_string("설정상태");
+            if config.contains("외침거부 1") {
+                continue;
+            }
+        } else {
+            continue;
+        }
+        let _ = client.sender.send(line.clone());
+    }
+}
+
 /// Show room to player using WorldState (synchronous version for use after movement)
 fn show_room_to_player_with_world(
     broadcaster: &Arc<crate::network::Broadcaster>,
@@ -1577,11 +1846,20 @@ fn show_room_to_player_with_world(
             }
         };
 
-        // 바닥에 떨어진 아이템(room_objs). 동일 이름은 N개로 묶어 표시. 파이썬 viewMapData nStr.
+        // 바닥에 떨어진 아이템(room_objs + room_inv_stack). 동일 이름은 N개로 묶어 표시.
         let room_objs = world.get_room_objs(&pos.zone, pos.room);
-        let item_str = format_room_objs_grouped(&room_objs);
+        let room_stack = world.get_room_objs_stack(&pos.zone, pos.room);
+        let item_str = build_room_objs_grouped(&room_objs, &room_stack);
 
-        // 파이썬 viewMapData 레이아웃: 헤더 \r\n\r\n 설명 \r\n\r\n 출구 \r\n [몹] \r\n [바닥 아이템]
+        // 같은 방의 다른 접속 유저. 파이썬 viewMapData: for obj in room.objs: is_player then getDesc.
+        let other_descs = get_other_players_desc_in_room(broadcaster.as_ref(), &pos.zone, pos.room, player_name);
+        let other_str = if other_descs.is_empty() {
+            String::new()
+        } else {
+            format!("\r\n{}", other_descs.join("\r\n"))
+        };
+
+        // 파이썬 viewMapData: 헤더 \r\n\r\n 설명 \r\n\r\n 출구 \r\n [몹] \r\n [바닥 아이템] \r\n [다른 유저]
         broadcaster.send_to(addr, "\r\n")?;
         broadcaster.send_to(addr, &room_name_formatted)?;
         broadcaster.send_to(addr, "\r\n\r\n")?;
@@ -1595,6 +1873,10 @@ fn show_room_to_player_with_world(
         }
         if !item_str.is_empty() {
             broadcaster.send_to(addr, &item_str)?;
+            broadcaster.send_to(addr, "\r\n")?;
+        }
+        if !other_str.is_empty() {
+            broadcaster.send_to(addr, &other_str)?;
             broadcaster.send_to(addr, "\r\n")?;
         }
     } else {
@@ -1611,6 +1893,7 @@ async fn handle_game_command(
     command: &str,
     command_registry: Arc<CommandRegistry>,
     room_cache: Arc<std::sync::Mutex<RoomCache>>,
+    shutdown_notify: Option<Arc<tokio::sync::Notify>>,
 ) -> Result<(), Box<dyn std::error::Error>> {
     if command.is_empty() {
         send_prompt_raw(broadcaster, addr, ">> ").await?;
@@ -1637,9 +1920,12 @@ async fn handle_game_command(
 
     // 봐/보/look: 봐.rhai 스크립트로 처리 (registry 통해 호출).
 
-    // Handle movement commands
-    if matches!(parsed.command.as_str(), "북" | "남" | "동" | "서" | "위" | "아래" | "북서" | "북동" | "남서" | "남동") {
-        handle_movement(broadcaster, addr, &parsed.command, &room_cache)?;
+    // Handle movement commands. n/e/s/w 등 alias 해석 후에도 방향이면 handle_movement 사용.
+    // handle_movement → show_room_to_player_with_world 는 다른 유저(get_other_players_desc_in_room) 포함.
+    // registry의 move_command → display_room 은 다른 유저 미포함이므로, 모든 이동을 여기서 처리.
+    let move_cmd = command_registry.resolve_alias(parsed.command.as_str());
+    if matches!(move_cmd.as_str(), "북" | "남" | "동" | "서" | "위" | "아래" | "북서" | "북동" | "남서" | "남동") {
+        handle_movement(broadcaster, addr, &move_cmd, &room_cache)?;
         send_game_prompt(broadcaster, addr).await?;
         return Ok(());
     }
@@ -1662,19 +1948,119 @@ async fn handle_game_command(
 
     // Unknown command - try command registry
     let mut response = String::new();
+    let mut say_to_room: Option<(String, String, i64, String)> = None;
+    let mut emotion_to_room: Option<(String, String, i64, String, Option<(String, String)>)> = None; // (pname, zone, room, to_room, to_target)
+    let mut give_pending: Option<(
+        std::net::SocketAddr,
+        String,
+        i64,
+        String,
+        String,
+        Option<i64>,
+        Option<i64>,
+        Option<(String, usize, usize)>,
+        Option<(String, i64)>,
+    )> = None; // (giver_addr, zone, room, target_name, giver_name, give_silver, give_gold, give_item, give_item_stack)
+    let mut shout_to_broadcast: Option<String> = None;
+    let mut tell_pending: Option<(String, String, String)> = None; // (target, message, sender_name)
     {
         let mut clients = broadcaster.clients.lock();
+        let world = get_world_state().read().unwrap();
+        // 봐/보 등 스크립트의 view_map_data → get_other_players_desc_in_room이 clients 락을 다시 잡으면 데드락.
+        let player_name = clients
+            .get(&addr)
+            .and_then(|c| c.player.as_ref())
+            .map(|p| p.body.get_string("이름"))
+            .unwrap_or_default();
+        let (zone, room) = world
+            .get_player_position(&player_name)
+            .map(|p| (p.zone.clone(), p.room))
+            .unwrap_or((String::new(), 0));
+        let (other_descs, other_map) =
+            collect_other_players_from_map(&zone, room, &player_name, &*world, &*clients);
+        PRE_COMPUTED_OTHER_DESCS.with(|c| *c.borrow_mut() = Some(other_descs));
+        PRE_COMPUTED_OTHER_MAP.with(|c| *c.borrow_mut() = Some(other_map));
+        // 전 접속자 목록: 누구 스크립트용 get_all_online_players()
+        let mut all_online = Array::new();
+        for (_addr, client) in clients.iter() {
+            if client.state != ClientState::Active {
+                continue;
+            }
+            let p = match &client.player {
+                Some(x) => x,
+                None => continue,
+            };
+            if p.body.get_int("투명상태") == 1 {
+                continue;
+            }
+            let name = p.body.get_string("이름");
+            if name.is_empty() {
+                continue;
+            }
+            let mut m = Map::new();
+            m.insert("이름".into(), Dynamic::from(name.clone()));
+            m.insert("무림별호".into(), Dynamic::from(p.body.get_string("무림별호")));
+            m.insert("성격".into(), Dynamic::from(p.body.get_string("성격")));
+            m.insert("레벨초기화".into(), Dynamic::from(p.body.get_string("레벨초기화")));
+            m.insert("소속".into(), Dynamic::from(p.body.get_string("소속")));
+            if let Some(pos) = world.get_player_position(&name) {
+                m.insert("zone".into(), Dynamic::from(pos.zone.clone()));
+                m.insert("room".into(), Dynamic::from(pos.room));
+            } else {
+                m.insert("zone".into(), Dynamic::from(""));
+                m.insert("room".into(), Dynamic::from(0i64));
+            }
+            all_online.push(Dynamic::from(m));
+        }
+        set_precomputed_all_online(all_online);
+        let _tl = PreComputedOtherDescsGuard;
+
+        let first_word = command.split_whitespace().next().unwrap_or("");
+        let is_emotion = emotion::is_emotion_command(first_word);
+        let (emotion_param, emotion_target) = if is_emotion {
+            let ep = command
+                .strip_prefix(first_word)
+                .map(|s| s.trim())
+                .unwrap_or("");
+            let fip = ep.split_whitespace().next().unwrap_or("");
+            let t = find_emotion_target_in_room(
+                &zone,
+                room,
+                fip,
+                &player_name,
+                &world,
+                &*clients,
+            );
+            (ep.to_string(), t)
+        } else {
+            (String::new(), None)
+        };
+
+        // 데드락 방지: world.read()를 잡은 채로 (cmd.handler)를 호출하면,
+        // 귀환/이동 등이 get_world_state().write()를 시도해 블로킹된다. 핸들러 호출 전에 해제.
+        drop(world);
+
         if let Some(client) = clients.get_mut(&addr) {
             if let Some(player) = client.player_mut() {
-                // Try the command handler with the player's body
-                let args: Vec<&str> = parsed.tokens.iter().map(|s| s.as_str()).collect();
-                let cmd_lookup = command_registry.get(parsed.command.as_str());
-                if let Some(cmd) = cmd_lookup {
-                    info!("[CMD] Executing command: {} (handler: {})", parsed.command, cmd.name);
+                let result = if is_emotion {
+                    Some(emotion::do_emotion(
+                        &player.body,
+                        first_word,
+                        &emotion_param,
+                        emotion_target,
+                    ))
                 } else {
-                    info!("[CMD] Command not found: {}", parsed.command);
-                }
-                let result = cmd_lookup.map(|cmd| (cmd.handler)(&mut player.body, &args));
+                    let args: Vec<&str> = parsed.tokens.iter().map(|s| s.as_str()).collect();
+                    let cmd_lookup = command_registry.get(parsed.command.as_str());
+                    let result = if let Some(cmd) = cmd_lookup {
+                        info!("[CMD] Executing command: {} (handler: {})", parsed.command, cmd.name);
+                        Some((cmd.handler)(&mut player.body, &args))
+                    } else {
+                        info!("[CMD] Command not found, trying as exit name: {}", parsed.command);
+                        try_move_by_exit_name(&mut player.body, &parsed.command)
+                    };
+                    result
+                };
 
                 response = match result {
                     Some(CommandResult::Output(msg)) => {
@@ -1698,11 +2084,475 @@ async fn handle_game_command(
                     Some(CommandResult::NoPrompt) => {
                         String::new()
                     }
+                    Some(CommandResult::SayToRoom(to_self, to_room)) => {
+                        say_to_room = Some((player_name.clone(), zone.clone(), room, to_room));
+                        format!("{}\r\n", to_self)
+                    }
+                    Some(CommandResult::Shout(msg)) => {
+                        shout_to_broadcast = Some(msg);
+                        String::new()
+                    }
+                    Some(CommandResult::Tell(target_name, message)) => {
+                        tell_pending = Some((target_name, message, player_name.clone()));
+                        String::new()
+                    }
+                    Some(CommandResult::Shutdown) => {
+                        if let Some(ref n) = shutdown_notify {
+                            n.notify_waiters();
+                        }
+                        "☞ 서버를 종료합니다.\r\n".to_string()
+                    }
+                    Some(CommandResult::EmotionToRoom(to_self, to_room, to_target)) => {
+                        emotion_to_room =
+                            Some((player_name.clone(), zone.clone(), room, to_room, to_target));
+                        format!("{}\r\n", to_self)
+                    }
+                    Some(CommandResult::GiveToPlayer {
+                        target_name,
+                        giver_name,
+                        give_silver,
+                        give_gold,
+                        give_item,
+                        give_item_stack,
+                    }) => {
+                        give_pending = Some((
+                            addr,
+                            zone.clone(),
+                            room,
+                            target_name,
+                            giver_name,
+                            give_silver,
+                            give_gold,
+                            give_item,
+                            give_item_stack,
+                        ));
+                        String::new()
+                    }
                     None => {
                         "\x1b[1;31m☞ 무슨 말인지 모르겠어요. *^_^*\x1b[0;37m\r\n".to_string()
                     }
                 };
             }
+        }
+    }
+
+    if let Some((pname, z, r, msg)) = say_to_room {
+        send_to_others_in_room(broadcaster, &z, r, &[pname.as_str()], &msg);
+    }
+    if let Some((pname, z, r, to_room, to_target)) = emotion_to_room {
+        let exclude: Vec<&str> = if let Some((ref tname, _)) = &to_target {
+            vec![pname.as_str(), tname.as_str()]
+        } else {
+            vec![pname.as_str()]
+        };
+        send_to_others_in_room(broadcaster, &z, r, &exclude, &to_room);
+        if let Some((tname, tmsg)) = to_target {
+            let line = format!("\r\n{}\r\n", tmsg);
+            let clients = broadcaster.clients.lock();
+            for (_a, c) in clients.iter() {
+                if let Some(ref p) = c.player {
+                    if p.body.get_string("이름") == tname {
+                        let _ = c.sender.send(line);
+                        break;
+                    }
+                }
+            }
+        }
+    }
+    if let Some((
+        giver_addr,
+        z,
+        r,
+        target_name,
+        giver_name,
+        give_silver,
+        give_gold,
+        give_item,
+        give_item_stack,
+    )) = give_pending.take()
+    {
+        use std::sync::Mutex;
+        let world = get_world_state().read().unwrap();
+        let mut target_addr: Option<SocketAddr> = None;
+        {
+            let clients = broadcaster.clients.lock();
+            for (&a, c) in clients.iter() {
+                if let Some(ref p) = c.player {
+                    if p.body.get_string("이름") == target_name {
+                        if let Some(pos) = world.get_player_position(&target_name) {
+                            if pos.zone == z && pos.room == r {
+                                target_addr = Some(a);
+                                break;
+                            }
+                        }
+                    }
+                }
+            }
+        }
+        if let Some(taddr) = target_addr {
+            let mut to_move: Vec<Arc<Mutex<crate::object::Object>>> = Vec::new();
+            let mut give_item_error: Option<(String, Option<String>)> = None;
+            {
+                let mut clients = broadcaster.clients.lock();
+                if let Some(giver) = clients.get_mut(&giver_addr).and_then(|c| c.player_mut()) {
+                    if let Some(amt) = give_silver {
+                        let have = giver.body.get_int("은전");
+                        giver.body.set("은전", (have - amt).max(0));
+                    } else if let Some(amt) = give_gold {
+                        let have = giver.body.get_int("금전");
+                        giver.body.set("금전", (have - amt).max(0));
+                    }
+                    // give_item: 아래 별도 블록에서 giver+target 동시에 처리 (출력안함/줄수없음/무게/수량한계 검사)
+                }
+            }
+            // 아이템 건네기: 대상의 무게/수량한계를 검사하려면 giver와 target을 동시에 보유해야 함. remove 후 로직 수행, insert로 복귀.
+            if give_item.is_some() {
+                if let Some((ref name, order, count)) = give_item {
+                    const MAX_ITEMS: usize = 300;
+                    let mut clients = broadcaster.clients.lock();
+                    let giver_opt = clients.remove(&giver_addr);
+                    let target_opt = clients.remove(&taddr);
+                    if giver_opt.is_none() {
+                        if let Some(t) = target_opt {
+                            clients.insert(taddr, t);
+                        }
+                        response = "☞ 오류가 발생했어요.\r\n".to_string();
+                        give_item_error = Some(("".to_string(), None));
+                    } else if target_opt.is_none() {
+                        clients.insert(giver_addr, giver_opt.unwrap());
+                        give_item_error = Some(("☞ 물품을 건내줄 무림인을 찾을 수 없어요. ^^".to_string(), None));
+                    } else {
+                        let mut giver = giver_opt.unwrap();
+                        let mut target = target_opt.unwrap();
+                        match (giver.player.as_mut(), target.player.as_mut()) {
+                            (Some(gp), Some(tp)) => {
+                                let giver_body = &mut gp.body;
+                                let target_body = &mut tp.body;
+                                let mut n = 0usize;
+                                let mut running_weight: i64 = 0;
+                                for obj in &giver_body.object.objs {
+                                    if to_move.len() >= count {
+                                        break;
+                                    }
+                                    let o = match obj.lock() {
+                                        Ok(x) => x,
+                                        Err(_) => continue,
+                                    };
+                                    let rn = o.getString("반응이름");
+                                    let ok = o.getName() == name.as_str()
+                                        || (!rn.is_empty() && rn.contains(name.as_str()));
+                                    if !ok || o.getBool("inUse") {
+                                        continue;
+                                    }
+                                    if o.checkAttr("아이템속성", "출력안함") {
+                                        continue;
+                                    }
+                                    n += 1;
+                                    if n < order {
+                                        continue;
+                                    }
+                                    if o.checkAttr("아이템속성", "줄수없음") {
+                                        if to_move.is_empty() {
+                                            give_item_error = Some((
+                                                "☞ 그 물건은 줄 수 없어요. ^^".to_string(),
+                                                None,
+                                            ));
+                                            break;
+                                        }
+                                        continue; // 이번 건만 스킵, 다음 후보 계속
+                                    }
+                                    let w = o.getInt("무게");
+                                    if target_body.get_item_weight() + running_weight + w > target_body.get_str() * 10 {
+                                        if to_move.is_empty() {
+                                            let iga = crate::hangul::han_iga(&target_name);
+                                            let go = o.han_obj();
+                                            give_item_error = Some((
+                                                format!("\x1b[1m{}\x1b[0;37m{} 무거워서 받지 못합니다.", target_name, iga),
+                                                Some(format!("\r\n\x1b[1m{}\x1b[0;37m{} 줄려는 \x1b[36m{}\x1b[37m 무거워서 받지 못합니다.", giver_name, crate::hangul::han_iga(&giver_name), go)),
+                                            ));
+                                        }
+                                        break;
+                                    }
+                                    if target_body.get_item_count() + to_move.len() + 1 > MAX_ITEMS {
+                                        if to_move.is_empty() {
+                                            let iga = crate::hangul::han_iga(&target_name);
+                                            let go = o.han_obj();
+                                            give_item_error = Some((
+                                                format!("\x1b[1m{}\x1b[0;37m{} 수량 한계로 받지 못합니다.", target_name, iga),
+                                                Some(format!("\r\n\x1b[1m{}\x1b[0;37m{} 줄려는 \x1b[36m{}\x1b[37m 수량 한계로 받지 못합니다.", giver_name, crate::hangul::han_iga(&giver_name), go)),
+                                            ));
+                                        }
+                                        break;
+                                    }
+                                    running_weight += w;
+                                    to_move.push(obj.clone());
+                                }
+                                if give_item_error.is_none() {
+                                    for arc in &to_move {
+                                        giver_body.object.remove(arc);
+                                        target_body.object.append(arc.clone());
+                                    }
+                                }
+                                clients.insert(giver_addr, giver);
+                                clients.insert(taddr, target);
+                            }
+                            _ => {
+                                clients.insert(giver_addr, giver);
+                                clients.insert(taddr, target);
+                                give_item_error = Some(("☞ 오류가 발생했어요.".to_string(), None));
+                            }
+                        }
+                    }
+                }
+            } else if let Some((ref key, cnt)) = give_item_stack {
+                const MAX_ITEMS: usize = 300;
+                let cnt_u = cnt as usize;
+                let w = get_item_weight_by_key(key);
+                let mut clients = broadcaster.clients.lock();
+                let giver_opt = clients.remove(&giver_addr);
+                let target_opt = clients.remove(&taddr);
+                if giver_opt.is_none() {
+                    if let Some(t) = target_opt {
+                        clients.insert(taddr, t);
+                    }
+                    response = "☞ 오류가 발생했어요.\r\n".to_string();
+                    give_item_error = Some(("".to_string(), None));
+                } else if target_opt.is_none() {
+                    clients.insert(giver_addr, giver_opt.unwrap());
+                    give_item_error = Some(("☞ 물품을 건내줄 무림인을 찾을 수 없어요. ^^".to_string(), None));
+                } else {
+                    let mut giver = giver_opt.unwrap();
+                    let mut target = target_opt.unwrap();
+                    match (giver.player.as_mut(), target.player.as_mut()) {
+                        (Some(gp), Some(tp)) => {
+                            let giver_body = &mut gp.body;
+                            let target_body = &mut tp.body;
+                            let have = *giver_body.object.inv_stack.get(key).unwrap_or(&0);
+                            if have < cnt {
+                                give_item_error = Some(("☞ 그런 아이템이 소지품에 없어요.".to_string(), None));
+                            } else if target_body.get_item_weight() + w * cnt > target_body.get_str() * 10 {
+                                let iga = crate::hangul::han_iga(&target_name);
+                                let disp = get_item_display_name(key);
+                                let go = format!("\x1b[33m{}\x1b[37m{}", disp, crate::hangul::han_obj(&disp));
+                                give_item_error = Some((
+                                    format!("\x1b[1m{}\x1b[0;37m{} 무거워서 받지 못합니다.", target_name, iga),
+                                    Some(format!("\r\n\x1b[1m{}\x1b[0;37m{} 줄려는 \x1b[36m{}\x1b[37m 무거워서 받지 못합니다.", giver_name, iga, go)),
+                                ));
+                            } else if target_body.get_item_count() + cnt_u > MAX_ITEMS {
+                                let iga = crate::hangul::han_iga(&target_name);
+                                let disp = get_item_display_name(key);
+                                let go = format!("\x1b[33m{}\x1b[37m{}", disp, crate::hangul::han_obj(&disp));
+                                give_item_error = Some((
+                                    format!("\x1b[1m{}\x1b[0;37m{} 수량 한계로 받지 못합니다.", target_name, iga),
+                                    Some(format!("\r\n\x1b[1m{}\x1b[0;37m{} 줄려는 \x1b[36m{}\x1b[37m 수량 한계로 받지 못합니다.", giver_name, iga, go)),
+                                ));
+                            } else {
+                                let should_remove = {
+                                    let r = giver_body.object.inv_stack.get_mut(key.as_str()).unwrap();
+                                    *r -= cnt;
+                                    *r <= 0
+                                };
+                                if should_remove {
+                                    giver_body.object.inv_stack.remove(key.as_str());
+                                }
+                                *target_body.object.inv_stack.entry(key.clone()).or_insert(0) += cnt;
+                            }
+                            clients.insert(giver_addr, giver);
+                            clients.insert(taddr, target);
+                        }
+                        _ => {
+                            clients.insert(giver_addr, giver);
+                            clients.insert(taddr, target);
+                            give_item_error = Some(("☞ 오류가 발생했어요.".to_string(), None));
+                        }
+                    }
+                }
+            }
+            if let Some((gmsg, tmsg)) = give_item_error {
+                if !gmsg.is_empty() {
+                    response = format!("{}\r\n", gmsg);
+                }
+                if let Some(tm) = tmsg {
+                    let clients = broadcaster.clients.lock();
+                    for (_a, c) in clients.iter() {
+                        if *_a == taddr {
+                            let _ = c.sender.send(format!("\r\n{}\r\n", tm));
+                            break;
+                        }
+                    }
+                }
+            } else {
+            let (c, post, name_multi) = if give_item.is_some() {
+                let c = to_move.len();
+                if c == 0 {
+                    (0, String::new(), String::new())
+                } else if c == 1 {
+                    let o = to_move[0].lock().unwrap();
+                    (c, o.han_obj(), o.getName())
+                } else {
+                    let o = to_move[0].lock().unwrap();
+                    let n = o.getName();
+                    (c, n.clone(), n)
+                }
+            } else if let Some((ref key, cnt)) = give_item_stack {
+                let c = cnt as usize;
+                let name_multi = get_item_display_name(key);
+                let post = format!("\x1b[33m{}\x1b[37m{}", name_multi, crate::hangul::han_obj(&name_multi));
+                (c, post, name_multi)
+            } else {
+                (0, String::new(), String::new())
+            };
+            {
+                let mut clients = broadcaster.clients.lock();
+                if let Some(target) = clients.get_mut(&taddr).and_then(|c| c.player_mut()) {
+                    if let Some(amt) = give_silver {
+                        let have = target.body.get_int("은전");
+                        target.body.set("은전", have + amt);
+                    } else if let Some(amt) = give_gold {
+                        let have = target.body.get_int("금전");
+                        target.body.set("금전", have + amt);
+                    }
+                    // give_item: 위 아이템 블록에서 이미 giver→target 이전함
+                }
+            }
+            let iga = crate::hangul::han_iga(&giver_name);
+            let (to_self, to_target, to_room) = if let Some(amt) = give_silver {
+                (
+                    format!("당신이 {}에게 은전 {}개를 줍니다.", target_name, amt),
+                    format!(
+                        "\r\n{}{} 당신에게 은전 {}개를 줍니다.",
+                        giver_name, iga, amt
+                    ),
+                    format!(
+                        "{}{} {}에게 은전 {}개를 줍니다.",
+                        giver_name, iga, target_name, amt
+                    ),
+                )
+            } else if let Some(amt) = give_gold {
+                (
+                    format!("당신이 {}에게 금전 {}개를 줍니다.", target_name, amt),
+                    format!(
+                        "\r\n{}{} 당신에게 금전 {}개를 줍니다.",
+                        giver_name, iga, amt
+                    ),
+                    format!(
+                        "{}{} {}에게 금전 {}개를 줍니다.",
+                        giver_name, iga, target_name, amt
+                    ),
+                )
+            } else {
+                if c == 0 {
+                    response = "☞ 그런 아이템이 소지품에 없어요.\r\n".to_string();
+                    (String::new(), String::new(), String::new())
+                } else {
+                    (
+                        if c == 1 {
+                            format!(
+                                "당신이 \x1b[1m{}\x1b[0;37m에게 \x1b[36m{}\x1b[37m 줍니다.",
+                                target_name, post
+                            )
+                        } else {
+                            format!(
+                                "당신이 \x1b[1m{}\x1b[0;37m에게 \x1b[36m{}\x1b[37m {}개를 줍니다.",
+                                target_name, name_multi, c
+                            )
+                        },
+                        if c == 1 {
+                            format!(
+                                "\r\n\x1b[1m{}\x1b[0;37m{} 당신에게 \x1b[36m{}\x1b[37m 줍니다.",
+                                giver_name, iga, post
+                            )
+                        } else {
+                            format!(
+                                "\r\n\x1b[1m{}\x1b[0;37m{} 당신에게 \x1b[36m{}\x1b[37m {}개를 줍니다.",
+                                giver_name, iga, name_multi, c
+                            )
+                        },
+                        if c == 1 {
+                            format!(
+                                "{}{} {}에게 \x1b[36m{}\x1b[37m 줍니다.",
+                                giver_name, iga, target_name, post
+                            )
+                        } else {
+                            format!(
+                                "{}{} {}에게 \x1b[36m{}\x1b[37m {}개를 줍니다.",
+                                giver_name, iga, target_name, name_multi, c
+                            )
+                        },
+                    )
+                }
+            };
+            if !to_self.is_empty() {
+                response = format!("{}\r\n", to_self);
+                let clients = broadcaster.clients.lock();
+                for (_a, c) in clients.iter() {
+                    if *_a == taddr {
+                        let _ = c.sender.send(format!("\r\n{}\r\n", to_target));
+                        break;
+                    }
+                }
+                send_to_others_in_room(
+                    broadcaster,
+                    &z,
+                    r,
+                    &[giver_name.as_str(), target_name.as_str()],
+                    &to_room,
+                );
+            }
+            {
+                let mut clients = broadcaster.clients.lock();
+                if let Some(p) = clients.get_mut(&giver_addr).and_then(|c| c.player_mut()) {
+                    let path = format!("data/user/{}.json", p.body.get_name());
+                    let _ = save_body_to_json(&mut p.body, &path);
+                }
+                if let Some(p) = clients.get_mut(&taddr).and_then(|c| c.player_mut()) {
+                    let path = format!("data/user/{}.json", p.body.get_name());
+                    let _ = save_body_to_json(&mut p.body, &path);
+                }
+            }
+            } // else of give_item_error (c, post, name_multi, to_self/to_target/to_room)
+        } else {
+            response =
+                "☞ 물품을 건내줄 무림인을 찾을 수 없어요. ^^\r\n".to_string();
+        }
+    }
+    if let Some(ref msg) = shout_to_broadcast {
+        broadcast_shout(broadcaster, msg);
+    }
+    if let Some((target_name, message, sender_name)) = tell_pending.take() {
+        use crate::network::ClientState;
+        let clients = broadcaster.clients.lock();
+        let mut tell_response = String::new();
+        let mut tell_target: Option<(std::net::SocketAddr, String)> = None;
+        for (&a, c) in clients.iter() {
+            if c.state != ClientState::Active {
+                continue;
+            }
+            if let Some(ref p) = c.player {
+                if p.body.get_string("이름") != target_name {
+                    continue;
+                }
+                if p.body.get_int("투명상태") == 1 {
+                    continue;
+                }
+                if p.body.get_string("설정상태").contains("전음거부 1") {
+                    tell_response = format!("\x1b[1;31m☞ 전음 거부중이에요. ^^\x1b[0;37m\r\n");
+                    break;
+                }
+                let msg_to_sender = format!("[\x1b[1m\x1b[36m전음\x1b[0m\x1b[37m] {}에게 보냄 : {}", target_name, message);
+                let msg_to_target = format!("\r\n[\x1b[1m\x1b[36m전음\x1b[0m\x1b[37m] {} : {}\r\n", sender_name, message);
+                tell_response = format!("{}\r\n", msg_to_sender);
+                tell_target = Some((a, msg_to_target));
+                break;
+            }
+        }
+        if tell_response.is_empty() {
+            tell_response = "☞ 전음이 전달될만한 상대가 없어요. ^^\r\n".to_string();
+        }
+        response = tell_response;
+        drop(clients);
+        if let Some((a, m)) = tell_target {
+            let _ = broadcaster.send_to(a, &m);
         }
     }
 
@@ -1728,9 +2578,9 @@ struct DoumiSettings {
     초기도우미: Vec<String>,
 }
 
-/// Loaded script data from doumi.json
-static SCRIPT_DATA: Lazy<Option<DoumiScriptData>> = Lazy::new(|| {
-    load_doumi_json()
+/// Loaded script data from doumi.json. RwLock로 감싸 관리자 명령 '업데이트 도우미'에서 재로딩 가능.
+static SCRIPT_DATA: Lazy<RwLock<Option<DoumiScriptData>>> = Lazy::new(|| {
+    RwLock::new(load_doumi_json())
 });
 
 /// Holds the script vectors
@@ -1760,12 +2610,21 @@ fn load_doumi_json() -> Option<DoumiScriptData> {
 
 /// Get the script for the given mode
 fn get_script(script_mode: u8) -> Option<Vec<String>> {
-    let data = SCRIPT_DATA.as_ref()?;
+    let guard = SCRIPT_DATA.read().unwrap();
+    let data = guard.as_ref()?;
     match script_mode {
         1 => Some(data.quick_helper.clone()),
         2 => Some(data.initial_helper.clone()),
         _ => None,
     }
+}
+
+/// doumi.json을 다시 로드. 관리자 명령 '업데이트 도우미'에서 호출.
+pub fn reload_doumi_json() -> Result<(), String> {
+    let v = load_doumi_json()
+        .ok_or_else(|| "doumi.json 재로딩 실패 (파일 없음 또는 형식 오류)".to_string())?;
+    *SCRIPT_DATA.write().unwrap() = Some(v);
+    Ok(())
 }
 
 #[cfg(test)]

@@ -3,11 +3,18 @@
 //! Provides an asynchronous TCP server using tokio for handling multiple client connections.
 
 use std::sync::Arc;
+use std::sync::Mutex;
 use tokio::net::TcpListener;
 use tracing::{error, info};
 use tracing_subscriber;
 
-use crate::network::{broadcaster::Broadcaster, client::handle_client};
+use crate::command::commands::register_basic_commands;
+use crate::command::commands::script::register_script_commands;
+use crate::command::CommandRegistry;
+use crate::network::broadcaster::Broadcaster;
+use crate::network::client::{get_other_players_desc_in_room, get_other_players_map_for_look, handle_client};
+use crate::script::{ScriptConfig, ScriptStorage};
+use crate::world::{get_world_state, RoomCache};
 
 /// TCP Server configuration
 #[derive(Debug, Clone)]
@@ -62,15 +69,37 @@ pub async fn run_server(config: ServerConfig) -> Result<(), Box<dyn std::error::
 
     let broadcaster = Arc::new(Broadcaster::new());
 
+    let get_other_players_desc: Arc<dyn Fn(&str) -> Vec<String> + Send + Sync> = Arc::new({
+        let bc = broadcaster.clone();
+        move |exclude: &str| {
+            let world = get_world_state().read().unwrap();
+            let pos = match world.get_player_position(exclude) {
+                Some(p) => p.clone(),
+                None => return vec![],
+            };
+            get_other_players_desc_in_room(bc.as_ref(), &pos.zone, pos.room, exclude)
+        }
+    });
+    let get_other_players_map: Arc<dyn Fn() -> std::collections::HashMap<String, String> + Send + Sync> =
+        Arc::new(get_other_players_map_for_look);
+    let script_storage = Arc::new(tokio::sync::RwLock::new(ScriptStorage::new(ScriptConfig::default())));
+    let mut registry = CommandRegistry::new();
+    register_basic_commands(&mut registry);
+    register_script_commands(&mut registry, script_storage, Some(get_other_players_desc), Some(get_other_players_map)).await;
+    let command_registry = Arc::new(registry);
+    let room_cache = Arc::new(Mutex::new(RoomCache::new()));
+
     loop {
         match listener.accept().await {
             Ok((stream, addr)) => {
                 info!("New connection from {}", addr);
 
                 let broadcaster_clone = broadcaster.clone();
+                let command_registry = command_registry.clone();
+                let room_cache = room_cache.clone();
 
                 tokio::spawn(async move {
-                    if let Err(e) = handle_client(stream, addr, broadcaster_clone).await {
+                    if let Err(e) = handle_client(stream, addr, broadcaster_clone, command_registry, room_cache, None).await {
                         error!("Error handling client {}: {}", addr, e);
                     }
                 });
@@ -94,15 +123,37 @@ pub async fn run_server_with_broadcaster(
 
     info!("MUD Server listening on {}", bind_addr);
 
+    let get_other_players_desc: Arc<dyn Fn(&str) -> Vec<String> + Send + Sync> = Arc::new({
+        let bc = broadcaster.clone();
+        move |exclude: &str| {
+            let world = get_world_state().read().unwrap();
+            let pos = match world.get_player_position(exclude) {
+                Some(p) => p.clone(),
+                None => return vec![],
+            };
+            get_other_players_desc_in_room(bc.as_ref(), &pos.zone, pos.room, exclude)
+        }
+    });
+    let get_other_players_map: Arc<dyn Fn() -> std::collections::HashMap<String, String> + Send + Sync> =
+        Arc::new(get_other_players_map_for_look);
+    let script_storage = Arc::new(tokio::sync::RwLock::new(ScriptStorage::new(ScriptConfig::default())));
+    let mut registry = CommandRegistry::new();
+    register_basic_commands(&mut registry);
+    register_script_commands(&mut registry, script_storage, Some(get_other_players_desc), Some(get_other_players_map)).await;
+    let command_registry = Arc::new(registry);
+    let room_cache = Arc::new(Mutex::new(RoomCache::new()));
+
     loop {
         match listener.accept().await {
             Ok((stream, addr)) => {
                 info!("New connection from {}", addr);
 
                 let broadcaster_clone = broadcaster.clone();
+                let command_registry = command_registry.clone();
+                let room_cache = room_cache.clone();
 
                 tokio::spawn(async move {
-                    if let Err(e) = handle_client(stream, addr, broadcaster_clone).await {
+                    if let Err(e) = handle_client(stream, addr, broadcaster_clone, command_registry, room_cache, None).await {
                         error!("Error handling client {}: {}", addr, e);
                     }
                 });
@@ -125,15 +176,37 @@ pub async fn run_echo_server(port: u16) -> Result<(), Box<dyn std::error::Error>
 
     let broadcaster = Arc::new(Broadcaster::new());
 
+    let get_other_players_desc: Arc<dyn Fn(&str) -> Vec<String> + Send + Sync> = Arc::new({
+        let bc = broadcaster.clone();
+        move |exclude: &str| {
+            let world = get_world_state().read().unwrap();
+            let pos = match world.get_player_position(exclude) {
+                Some(p) => p.clone(),
+                None => return vec![],
+            };
+            get_other_players_desc_in_room(bc.as_ref(), &pos.zone, pos.room, exclude)
+        }
+    });
+    let get_other_players_map: Arc<dyn Fn() -> std::collections::HashMap<String, String> + Send + Sync> =
+        Arc::new(get_other_players_map_for_look);
+    let script_storage = Arc::new(tokio::sync::RwLock::new(ScriptStorage::new(ScriptConfig::default())));
+    let mut registry = CommandRegistry::new();
+    register_basic_commands(&mut registry);
+    register_script_commands(&mut registry, script_storage, Some(get_other_players_desc), Some(get_other_players_map)).await;
+    let command_registry = Arc::new(registry);
+    let room_cache = Arc::new(Mutex::new(RoomCache::new()));
+
     loop {
         match listener.accept().await {
             Ok((stream, addr)) => {
                 println!("New connection from {}", addr);
 
                 let broadcaster_clone = broadcaster.clone();
+                let command_registry = command_registry.clone();
+                let room_cache = room_cache.clone();
 
                 tokio::spawn(async move {
-                    if let Err(e) = handle_client(stream, addr, broadcaster_clone).await {
+                    if let Err(e) = handle_client(stream, addr, broadcaster_clone, command_registry, room_cache, None).await {
                         eprintln!("Error handling client {}: {}", addr, e);
                     }
                 });

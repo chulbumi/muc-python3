@@ -54,3 +54,6 @@ uuid = { version = "1.10", features = ["v4", "serde"] }
 
 # 시간 처리
 chrono = "0.4"
+
+# SHA-512 비밀번호 해시
+sha2 = "0.10"

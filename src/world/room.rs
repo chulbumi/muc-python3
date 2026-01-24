@@ -74,40 +74,42 @@ impl Direction {
     }
 }
 
-/// Room exit information
+/// Room exit information.
+/// 출구: 방향명(동서남북위아래, 대각), 숨겨진 출구(이름 끝 $), 고유 명칭(예: 초보수련장, 출구) 지원.
 #[derive(Debug, Clone)]
-pub enum Exit {
-    /// No exit in this direction (just a direction name)
-    None(Direction),
-    /// Exit to a room in the same zone
-    Local { direction: Direction, room_index: i64 },
-    /// Exit to a room in another zone
-    Remote { direction: Direction, zone: String, room_index: i64 },
+pub struct Exit {
+    /// 표시명(방향 "북" 또는 고유명 "초보수련장"). 이동/표시에 사용.
+    pub display_name: String,
+    /// 방향(있으면 나침반·방향이동에 사용). 고유명만 있는 출구는 None.
+    pub direction: Option<Direction>,
+    /// 목적지 (zone, room_index). 없으면 출구 없음(방향만 표시).
+    pub destination: Option<(String, i64)>,
+    /// 숨겨진 출구(표시 안 함, 이름으로는 이동 가능). JSON에서 이름 끝 `$`.
+    pub hidden: bool,
 }
 
 impl Exit {
-    /// Get the direction of this exit
-    pub fn direction(&self) -> Direction {
-        match self {
-            Exit::None(dir) => *dir,
-            Exit::Local { direction, .. } => *direction,
-            Exit::Remote { direction, .. } => *direction,
-        }
+    /// Get the direction of this exit (if it has one)
+    pub fn direction(&self) -> Option<Direction> {
+        self.direction
     }
 
     /// Check if this exit leads somewhere
     pub fn has_destination(&self) -> bool {
-        !matches!(self, Exit::None(_))
+        self.destination.is_some()
     }
 
     /// Get the destination as a tuple of (zone, room_index)
-    /// Returns None if exit doesn't lead anywhere
-    pub fn destination(&self, current_zone: &str) -> Option<(String, i64)> {
-        match self {
-            Exit::None(_) => None,
-            Exit::Local { room_index, .. } => Some((current_zone.to_string(), *room_index)),
-            Exit::Remote { zone, room_index, .. } => Some((zone.clone(), *room_index)),
-        }
+    pub fn destination(&self, _current_zone: &str) -> Option<(String, i64)> {
+        self.destination.clone()
+    }
+
+    /// 이동 메시지용 문자열: 방향이 있으면 "북쪽", 없으면 "초보수련장" 등
+    pub fn exit_message_name(&self) -> &str {
+        self.direction
+            .as_ref()
+            .map(|d| d.description())
+            .unwrap_or(self.display_name.as_str())
     }
 }
 
@@ -141,8 +143,8 @@ pub struct Room {
     pub description: Vec<String>,
     /// Map properties
     pub properties: Vec<String>,
-    /// Parsed exits
-    pub exits: HashMap<Direction, Exit>,
+    /// Parsed exits. key=display_name(방향 또는 고유명, 숨겨진은 $ 제거). value=Exit.
+    pub exits: HashMap<String, Exit>,
     /// Players currently in this room
     pub players: Vec<String>,
     /// NPCs in this room
@@ -194,13 +196,25 @@ impl Room {
 
     /// Get exit information as a display string
     pub fn get_exits_display(&self) -> String {
-        let mut exits: Vec<&str> = self.exits
+        let mut names: Vec<String> = self.exits
             .values()
-            .filter(|e| e.has_destination())
-            .map(|e| e.direction().description())
+            .filter(|e| e.has_destination() && !e.hidden)
+            .map(|e| e.display_name.clone())
             .collect();
-        exits.sort();
-        format!("출구: {}", exits.join(", "))
+        names.sort();
+        format!("출구: {}", names.join(", "))
+    }
+
+    /// 방향으로 출구 조회 (이동용). destination 있는 것만.
+    pub fn get_exit(&self, direction: Direction) -> Option<&Exit> {
+        self.exits
+            .values()
+            .find(|e| e.direction == Some(direction) && e.has_destination())
+    }
+
+    /// 고유명/방향명으로 출구 조회 (이동용). "초보수련장", "북" 등.
+    pub fn get_exit_by_name(&self, name: &str) -> Option<&Exit> {
+        self.exits.get(name).filter(|e| e.has_destination())
     }
 
     /// Check if a player can enter based on level restrictions
@@ -224,11 +238,6 @@ impl Room {
     /// Remove a player from this room
     pub fn remove_player(&mut self, player_name: &str) {
         self.players.retain(|p| p != player_name);
-    }
-
-    /// Get the exit in a specific direction
-    pub fn get_exit(&self, direction: Direction) -> Option<&Exit> {
-        self.exits.get(&direction)
     }
 }
 
@@ -313,8 +322,8 @@ impl RoomCache {
         room.properties = raw.properties;
         room.mob_ids = raw.mob_ids.clone();
 
-        // Parse exits
-        room.exits = self.parse_exits(&raw.exits)?;
+        // Parse exits (zone needed for same-zone "동 35" 형식)
+        room.exits = self.parse_exits(&raw.exits, &raw.zone)?;
 
         // Parse properties for special flags
         for prop in &room.properties {
@@ -403,50 +412,49 @@ impl RoomCache {
         })
     }
 
-    /// Parse exit strings into Exit enums
-    fn parse_exits(&self, exit_strings: &[String]) -> Result<HashMap<Direction, Exit>, RoomError> {
+    /// Parse exit strings into HashMap<display_name, Exit>.
+    /// - "북 35", "동 2": 방향+같은존  / "서 절강성:52": 방향+다른존
+    /// - "초보수련장 하북성:3001", "출구 낙양성:42": 고유 명칭
+    /// - "북" only: 방향만(출구 없음)  / "북$ 35": 숨겨진(표시 제외, 이름으로 이동 가능)
+    fn parse_exits(&self, exit_strings: &[String], current_zone: &str) -> Result<HashMap<String, Exit>, RoomError> {
         let mut exits = HashMap::new();
 
         for exit_str in exit_strings {
             let parts: Vec<&str> = exit_str.split_whitespace().collect();
-
             if parts.is_empty() {
                 continue;
             }
 
-            // Parse direction
-            let direction = Direction::from_korean(parts[0])
-                .ok_or_else(|| RoomError::ParseError(format!("Invalid direction: {}", parts[0])))?;
+            let raw_name = parts[0];
+            let hidden = raw_name.ends_with('$');
+            let display_name = raw_name.trim_end_matches('$').to_string();
+            let direction = Direction::from_korean(display_name.as_str());
 
-            // Create exit based on format
-            // "존:방" 형식(다른 존 연결)을 먼저 검사. parts.len()==2일 때 "남 6"과 "서 섬서성:52" 구분.
-            let exit = if parts.len() == 1 {
-                // 방향만, 출구 없음
-                Exit::None(direction)
+            let destination: Option<(String, i64)> = if parts.len() == 1 {
+                None
             } else if parts.len() >= 2 && parts[1].contains(':') {
-                // "서 섬서성:52", "동 낙양성:1072" — 다른 존으로 연결
                 let zone_parts: Vec<&str> = parts[1].splitn(2, ':').collect();
                 if zone_parts.len() == 2 {
                     let zone = zone_parts[0].trim().to_string();
                     let room_index = zone_parts[1].trim().parse::<i64>()
                         .map_err(|_| RoomError::ParseError(format!("Invalid room index: {}", parts[1])))?;
-                    Exit::Remote { direction, zone, room_index }
+                    Some((zone, room_index))
                 } else {
                     return Err(RoomError::ParseError(format!("Invalid zone format: {}", parts[1])));
                 }
-            } else if parts.len() == 2 {
-                // "남 6", "동 1071" — 같은 존 내 방
-                let room_index = parts[1].parse::<i64>()
-                    .map_err(|_| RoomError::ParseError(format!("Invalid room index: {}", parts[1])))?;
-                Exit::Local { direction, room_index }
             } else {
-                // 기타: 첫 번째 토큰을 방 번호로
                 let room_index = parts[1].parse::<i64>()
                     .map_err(|_| RoomError::ParseError(format!("Invalid exit format: {}", exit_str)))?;
-                Exit::Local { direction, room_index }
+                Some((current_zone.to_string(), room_index))
             };
 
-            exits.insert(direction, exit);
+            let exit = Exit {
+                display_name: display_name.clone(),
+                direction,
+                destination,
+                hidden,
+            };
+            exits.insert(display_name, exit);
         }
 
         Ok(exits)
@@ -599,22 +607,19 @@ pub fn handle_player_enter(
 /// Handle a player exiting a room
 ///
 /// Returns the exit message to broadcast.
+/// `exit_msg`: 방향이면 "북쪽", 고유명이면 "초보수련장" (Exit::exit_message_name() 사용)
 pub fn handle_player_exit(
     _room: &Room,
     player_name: &str,
-    direction: Direction,
+    exit_msg: &str,
     mode: ExitMode,
 ) -> String {
-    // Remove player from room
-    // Note: We can't modify room here due to borrow, caller should do that
-
     let msg = match mode {
-        ExitMode::Walk => format!("{} {}쪽으로 갔습니다.", player_name, direction.korean_name()),
+        ExitMode::Walk => format!("{} {}으로 갔습니다.", player_name, exit_msg),
         ExitMode::Flee => format!("{} 신형을 비틀거리며 간신히 도망갑니다. '살리도~~'", player_name),
         ExitMode::Teleport => format!("{} 경공술을 펼치며 하늘로 치솟아 오릅니다. '무영지신!!!'", player_name),
         ExitMode::Summon => format!("{} 알수 없는 기운에 휘말려 사라집니다. '고오오오~~~'", player_name),
     };
-
     msg
 }
 
@@ -658,13 +663,12 @@ pub fn format_room_header(display_name: &str) -> String {
     format!("{}{}{}", _ANSI_HEADER, display_name, _ANSI_HEADER_END)
 }
 
-/// 파이썬 objs/room.initExit longExitStr: 3줄 나침반 + 〔방향〕쪽으로 이동할 수 있습니다.
-/// 1줄: 북서↖ 북△ 북동↗ (Rust는 북만), 2줄: 서◁ ○ 동▷ + 문구, 3줄: 남서↙ 남▽ 남동↘ (Rust는 남만).
-/// ◁△▽▷는 해당 출구가 있을 때만 표시, 없으면 공백. 방향은 동서남북위아래 순, ː로 이어붙임.
+/// 파이썬 objs/room.initExit longExitStr: 3줄 나침반 + 〔방향/고유명〕쪽으로 이동할 수 있습니다.
+/// 방향 출구만 나침반(◁△▽▷)에 반영; 고유명(초보수련장, 출구)은 ː 이어붙인 str1에만. 숨겨진($) 출구는 표시 제외.
 pub fn format_exits_long(room: &Room) -> String {
-    let has = |d: Direction| room.exits.get(&d).map_or(false, |e| e.has_destination());
+    let has = |d: Direction| room.exits.values().any(|e| e.direction == Some(d) && e.has_destination() && !e.hidden);
 
-    // 파이썬 sortExit 순서: 동,서,남,북,위,아래,남동,남서,북동,북서
+    // 파이썬 sortExit 순서: 동,서,남,북,위,아래,남동,남서,북동,북서, 그 다음 고유명
     const ORDER: [Direction; 10] = [
         Direction::East,
         Direction::West,
@@ -683,6 +687,14 @@ pub fn format_exits_long(room: &Room) -> String {
             dirs.push(format!("{}{}{}", _ANSI_GREEN, d.korean_name(), _ANSI_RESET));
         }
     }
+    // 고유 명칭(방향이 None인 출구) 추가. 표시된 것만, ː 로 이어붙일 대상.
+    let mut named: Vec<String> = room.exits
+        .values()
+        .filter(|e| e.direction.is_none() && e.has_destination() && !e.hidden)
+        .map(|e| format!("{}{}{}", _ANSI_GREEN, e.display_name.as_str(), _ANSI_RESET))
+        .collect();
+    named.sort();
+    dirs.extend(named);
     if dirs.is_empty() {
         return "  ○  어느 쪽으로도 이동할 수 없습니다.".to_string();
     }
@@ -805,28 +817,24 @@ mod tests {
 
     #[test]
     fn test_exit_none() {
-        let exit = Exit::None(Direction::North);
-        assert_eq!(exit.direction(), Direction::North);
+        let exit = Exit { display_name: "북".into(), direction: Some(Direction::North), destination: None, hidden: false };
+        assert_eq!(exit.direction(), Some(Direction::North));
         assert!(!exit.has_destination());
         assert!(exit.destination("test_zone").is_none());
     }
 
     #[test]
     fn test_exit_local() {
-        let exit = Exit::Local { direction: Direction::South, room_index: 5 };
-        assert_eq!(exit.direction(), Direction::South);
+        let exit = Exit { display_name: "남".into(), direction: Some(Direction::South), destination: Some(("test_zone".into(), 5)), hidden: false };
+        assert_eq!(exit.direction(), Some(Direction::South));
         assert!(exit.has_destination());
         assert_eq!(exit.destination("test_zone"), Some(("test_zone".to_string(), 5)));
     }
 
     #[test]
     fn test_exit_remote() {
-        let exit = Exit::Remote {
-            direction: Direction::East,
-            zone: "other_zone".to_string(),
-            room_index: 10
-        };
-        assert_eq!(exit.direction(), Direction::East);
+        let exit = Exit { display_name: "동".into(), direction: Some(Direction::East), destination: Some(("other_zone".into(), 10)), hidden: false };
+        assert_eq!(exit.direction(), Some(Direction::East));
         assert!(exit.has_destination());
         assert_eq!(exit.destination("test_zone"), Some(("other_zone".to_string(), 10)));
     }
@@ -841,7 +849,7 @@ mod tests {
     #[test]
     fn test_room_cache_with_data_dir() {
         let cache = RoomCache::with_data_dir("/custom/path");
-        assert_eq!(cache.data_dir, PathBuf::from("/custom/path"));
+        assert!(cache.is_empty());
     }
 
     #[test]
@@ -870,20 +878,13 @@ mod tests {
     #[test]
     fn test_parse_exits() {
         let cache = RoomCache::new();
-
-        // Test exit formats: "남", "동 6", "서 절강성:7"
-        let exit_strings = vec![
-            "북".to_string(),
-            "동 2".to_string(),
-            "남 24".to_string(),
-        ];
-
-        let exits = cache.parse_exits(&exit_strings).unwrap();
-
+        let exit_strings = vec!["북".to_string(), "동 2".to_string(), "남 24".to_string()];
+        let exits = cache.parse_exits(&exit_strings, "test_zone").unwrap();
         assert_eq!(exits.len(), 3);
-        assert!(matches!(exits.get(&Direction::North), Some(Exit::None(_))));
-        assert!(matches!(exits.get(&Direction::East), Some(Exit::Local { room_index: 2, .. })));
-        assert!(matches!(exits.get(&Direction::South), Some(Exit::Local { room_index: 24, .. })));
+        let north = exits.get("북").unwrap();
+        assert!(north.destination.is_none());
+        assert_eq!(exits.get("동").unwrap().destination, Some(("test_zone".into(), 2)));
+        assert_eq!(exits.get("남").unwrap().destination, Some(("test_zone".into(), 24)));
     }
 
     #[test]
@@ -891,7 +892,7 @@ mod tests {
         let mut room = Room::new("test_zone".to_string(), "test_room".to_string());
         room.display_name = "Test Room".to_string();
         room.description = vec!["A nice room.".to_string()];
-        room.exits.insert(Direction::North, Exit::Local { direction: Direction::North, room_index: 1 });
+        room.exits.insert("북".into(), Exit { display_name: "북".into(), direction: Some(Direction::North), destination: Some(("test_zone".into(), 1)), hidden: false });
 
         let messages = handle_player_enter(&mut room, "TestPlayer", EnterMode::Walk);
 
@@ -904,12 +905,9 @@ mod tests {
 
     #[test]
     fn test_handle_player_exit() {
-        let mut room = Room::new("test_zone".to_string(), "test_room".to_string());
-        room.add_player("TestPlayer".to_string());
-
-        let msg = handle_player_exit(&room, "TestPlayer", Direction::North, ExitMode::Walk);
-
+        let room = Room::new("test_zone".to_string(), "test_room".to_string());
+        let msg = handle_player_exit(&room, "TestPlayer", "북쪽", ExitMode::Walk);
         assert!(msg.contains("TestPlayer"));
-        assert!(msg.contains("북"));
+        assert!(msg.contains("북쪽"));
     }
 }

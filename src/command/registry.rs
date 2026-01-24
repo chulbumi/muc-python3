@@ -122,17 +122,38 @@ impl CommandRegistry {
         aliases.insert("바라보기".to_string(), "봐".to_string());
         aliases.insert("도".to_string(), "도망".to_string());
         aliases.insert("도움".to_string(), "도움말".to_string());
+        aliases.insert("help".to_string(), "도움말".to_string());
+        aliases.insert("?".to_string(), "도움말".to_string());
+        aliases.insert("/h".to_string(), "도움말".to_string());
+        aliases.insert("인벤토리".to_string(), "소지품".to_string());
+        aliases.insert("inventory".to_string(), "소지품".to_string());
+        aliases.insert("점수".to_string(), "능력치".to_string());
+        aliases.insert("점".to_string(), "능력치".to_string());
+        aliases.insert("상태".to_string(), "능력치".to_string());
+        aliases.insert("상".to_string(), "능력치".to_string());
+        aliases.insert("정".to_string(), "능력치".to_string());
+        aliases.insert("정보".to_string(), "능력치".to_string());
+        aliases.insert("score".to_string(), "능력치".to_string());
+        aliases.insert("stat".to_string(), "능력치".to_string());
         aliases.insert("외".to_string(), "외쳐".to_string());
         aliases.insert("외침".to_string(), "외쳐".to_string());
         aliases.insert("잡".to_string(), "외쳐".to_string());
         aliases.insert("잡담".to_string(), "외쳐".to_string());
         aliases.insert(",".to_string(), "외쳐".to_string());
+        // 파이썬 cmd.json 잡담: 창룡후, 창룡, 창
+        aliases.insert("창".to_string(), "외쳐".to_string());
+        aliases.insert("창룡".to_string(), "외쳐".to_string());
+        aliases.insert("창룡후".to_string(), "외쳐".to_string());
+        aliases.insert("외친다".to_string(), "외쳐".to_string());
         aliases.insert("품".to_string(), "품목표".to_string());
         aliases.insert("품목".to_string(), "품목표".to_string());
         aliases.insert("판다".to_string(), "판매".to_string());
         aliases.insert("판".to_string(), "판매".to_string());
         aliases.insert("팔".to_string(), "판매".to_string());
         aliases.insert("팔다".to_string(), "판매".to_string());
+        // 파이썬 cmd.json: 장비확인 장/장비, 대화 대/대화(=말), 장->장비(스크립트)
+        aliases.insert("장".to_string(), "장비".to_string());
+        aliases.insert("대".to_string(), "말".to_string());
 
         aliases
     }

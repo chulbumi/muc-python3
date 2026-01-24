@@ -8,7 +8,7 @@ fn cmd(ob, line) {
         return;
     }
     // checkConfig, act, 전체 플레이어 전송 등 서버 연동 필요
-    send_line(ob, "☞ 이 기능은 서버 기능 연동 후 사용할 수 있습니다.");
+    send_line(ob, "☞ 아직 준비 중입니다.");
 }
 
 fn main(ob, line) {

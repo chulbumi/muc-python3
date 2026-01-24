@@ -132,9 +132,10 @@ fn display_room(player: &mut Body, zone: &str, room_id: i64) -> CommandResult {
         )
     };
 
-    // 바닥에 떨어진 아이템(room_objs). 봐/build_room_lines·show_room_to_player와 동일.
+    // 바닥에 떨어진 아이템(room_objs + room_inv_stack). 봐/build_room_lines·show_room_to_player와 동일.
     let room_objs = world.get_room_objs(zone, room_id);
-    let item_str = build_room_objs_grouped(&room_objs);
+    let room_stack = world.get_room_objs_stack(zone, room_id);
+    let item_str = build_room_objs_grouped(&room_objs, &room_stack);
 
     let hp = player.get_hp();
     let max_hp = player.get_max_hp();
@@ -149,6 +150,85 @@ fn display_room(player: &mut Body, zone: &str, room_id: i64) -> CommandResult {
     );
 
     CommandResult::Output(out)
+}
+
+/// 명령에 없는 경우, 현재 방의 출구 이름(고유명 "초보수련장", "출구" 또는 방향 "북" 등)으로 이동 시도.
+/// 전투 중·플레이어명 없음·해당 출구 없음이면 None. 성공 시 Some(CommandResult::Output(방 설명)).
+pub fn try_move_by_exit_name(player: &mut Body, exit_name: &str) -> Option<CommandResult> {
+    if player.act == ActState::Fight {
+        return None;
+    }
+    let name = player.get_name();
+    if name.is_empty() {
+        return None;
+    }
+    let mut world = get_world_state().write().unwrap();
+    match world.move_player_by_name(&name, exit_name) {
+        Ok((new_zone, new_room, _)) => {
+            drop(world);
+            Some(display_room(player, &new_zone, new_room))
+        }
+        Err(_) => None,
+    }
+}
+
+/// 귀환: 귀환지(귀환지맵 or 낙양성:42)로 이동. 파이썬 cmds/귀환.py
+/// 귀환금지 방·전투/휴식 중 불가, isMovable=!(Fight|Rest)
+fn return_command(player: &mut Body, _args: &[&str]) -> CommandResult {
+    use crate::world::PlayerPosition;
+
+    if player.act == ActState::Fight {
+        return CommandResult::Error("전투 중에는 이동 할 수 없습니다.".to_string());
+    }
+    if player.act == ActState::Rest {
+        return CommandResult::Error("☞ 지금은 귀환할 상황이 아니에요. ^^".to_string());
+    }
+
+    let player_name = player.get_name();
+    if player_name.is_empty() {
+        return CommandResult::Error("플레이어 이름이 없습니다.".to_string());
+    }
+
+    let mut world = get_world_state().write().unwrap();
+    let (cur_zone, cur_room) = match world.get_player_position(&player_name) {
+        Some(p) => (p.zone.clone(), p.room),
+        None => {
+            world.set_player_position(&player_name, PlayerPosition::start());
+            let p = world.get_player_position(&player_name).unwrap();
+            (p.zone.clone(), p.room)
+        }
+    };
+
+    // 귀환금지: 현재 방 맵속성에 있으면 불가
+    if let Ok(room_arc) = world.room_cache.get_room(&cur_zone, &cur_room.to_string()) {
+        if let Ok(r) = room_arc.read() {
+            if r.properties.iter().any(|p| p == "귀환금지") {
+                return CommandResult::Error("☞ 이곳에선 귀환하실 수 없어요. ^^".to_string());
+            }
+        }
+    }
+
+    let dest = player.get_string("귀환지맵");
+    let (dest_zone, dest_room) = if dest.is_empty() {
+        ("낙양성".to_string(), 42i64)
+    } else {
+        match dest.split_once(':') {
+            Some((z, r)) => (z.to_string(), r.trim().parse().unwrap_or(42)),
+            None => ("낙양성".to_string(), 42),
+        }
+    };
+
+    if world.room_cache.get_room(&dest_zone, &dest_room.to_string()).is_err() {
+        return CommandResult::Error("귀환지맵이 없습니다. 관리자에게 연락하세요.".to_string());
+    }
+    if dest_zone == cur_zone && dest_room == cur_room {
+        return CommandResult::Error("☞ 같은 자리에요. ^^".to_string());
+    }
+
+    world.set_player_position(&player_name, PlayerPosition::new(dest_zone.clone(), dest_room));
+    world.spawn_mobs_for_room(&dest_zone, dest_room);
+    drop(world);
+    display_room(player, &dest_zone, dest_room)
 }
 
 /// Creates a movement command for a specific direction
@@ -282,6 +362,16 @@ pub fn register_movement_commands(registry: &mut CommandRegistry) {
         level: 0,
         description: "남동쪽으로 이동합니다.".to_string(),
         usage: "남동".to_string(),
+    });
+
+    // 귀환 (파이썬 cmds/귀환.py): 귀환지맵 or 낙양성:42, 귀환금지·isMovable 검사
+    registry.register(crate::command::registry::CommandInfo {
+        name: "귀환".to_string(),
+        aliases: vec!["귀".to_string(), "귀가".to_string()],
+        handler: Arc::new(move |p, a| return_command(p, a)),
+        level: 0,
+        description: "귀환지로 돌아갑니다.".to_string(),
+        usage: "귀환".to_string(),
     });
 
     // 봐/보/look/바라보기: 봐.rhai 스크립트로 처리. built_in_aliases에 보→봐, look→봐, 바라보기→봐.

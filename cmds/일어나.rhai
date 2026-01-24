@@ -1,9 +1,15 @@
-// 일어나.rhai - 일어나기 명령어
-// Python: cmds/일어나.py
+// 일어나.rhai - 일어나기. Python: cmds/일어나.py. set_act(ob,"서")
 
 fn cmd(ob, line) {
-    // ob.act 확인/설정, send_room 등 서버 연동 필요
-    send_line(ob, "☞ 이 기능은 서버 기능 연동 후 사용할 수 있습니다.");
+    let a = get_int(ob, "act");
+    if a == 2 {
+        set_act(ob, "서");
+        send_line(ob, "당신이 운기조식을 마치며 벌떡 일어섭니다.");
+    } else if a == 0 {
+        send_line(ob, "☞ 이미 서있는 상태입니다. ^^");
+    } else {
+        send_line(ob, "☞ 운기조식중인 상태가 아닙니다.");
+    }
 }
 
 fn main(ob, line) {

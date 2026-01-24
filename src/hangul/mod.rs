@@ -347,6 +347,105 @@ pub fn han_aya(word: &str) -> &'static str {
     }
 }
 
+/// ANSI 이스케이프 시퀀스(\x1b...[^m]*m)를 제거. 파이썬 lib/func.stripANSI.
+pub fn strip_ansi(s: &str) -> String {
+    let mut out = String::with_capacity(s.len());
+    let mut i = 0;
+    let bytes = s.as_bytes();
+    while i < bytes.len() {
+        if bytes[i] == 27 {
+            // skip until 'm'
+            i += 1;
+            while i < bytes.len() && bytes[i] != b'm' {
+                i += 1;
+            }
+            if i < bytes.len() {
+                i += 1;
+            }
+            continue;
+        }
+        if bytes[i] == 155 {
+            i += 1;
+            continue;
+        }
+        if bytes[i] == 8 {
+            out.pop();
+            i += 1;
+            continue;
+        }
+        out.push(bytes[i] as char);
+        i += 1;
+    }
+    out
+}
+
+/// (이/가), (을/를) 등 조사 패턴을 한 번 치환. 괄호 앞 문자열(ANSI 제거)의 받침에 따라 선택.
+/// 파이썬 lib/hangul.postPosition1. 한 번에 하나만 치환하고 반환.
+pub fn post_position1(line: &str) -> String {
+    let s = match line.find('(') {
+        Some(i) => i,
+        None => return line.to_string(),
+    };
+    let e = match line.find(')') {
+        Some(i) => i,
+        None => return line.to_string(),
+    };
+    if e <= s {
+        return line.to_string();
+    }
+    let pps = &line[s..=e];
+    let word = strip_ansi(&line[..s]).trim_end().to_string();
+
+    // (으)로: / 가 없어서 별도 처리. "(으)로" 전체를 han_uro 결과로 치환.
+    if pps == "(으)" {
+        if let Some(rest) = line.get(e + 1..) {
+            if rest.starts_with("로") {
+                let picked = han_uro(&word);
+                let end = e + 1 + "로".len();
+                let mut out = String::with_capacity(line.len());
+                out.push_str(&line[..s]);
+                out.push_str(picked);
+                out.push_str(&line[end..]);
+                return out;
+            }
+        }
+    }
+
+    let sep = match pps.find('/') {
+        Some(i) => i,
+        None => return line.to_string(),
+    };
+    let form = pps[1..sep].trim();
+    let picked: &str = match form {
+        "이" if pps.contains("/가") => han_iga(&word),
+        "을" if pps.contains("/를") => han_obj(&word),
+        "에게" => "에게",
+        "와" if pps.contains("/과") => han_wa(&word),
+        "의" => "의",
+        "은" if pps.contains("/는") => han_un(&word),
+        "이라" if pps.contains("/라") => han_ira(&word),
+        _ => form,
+    };
+    let mut out = String::with_capacity(line.len());
+    out.push_str(&line[..s]);
+    out.push_str(picked);
+    out.push_str(&line[e + 1..]);
+    out
+}
+
+/// post_position1을 (x/y) 패턴이 없을 때까지 반복 적용. 감정표현 makeScript용.
+pub fn post_position_all(line: &str) -> String {
+    let mut cur = line.to_string();
+    loop {
+        let next = post_position1(&cur);
+        if next == cur {
+            break;
+        }
+        cur = next;
+    }
+    cur
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

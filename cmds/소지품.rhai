@@ -16,17 +16,17 @@ fn cmd(ob, line) {
             if c == 1 {
                 send_line(ob, "\x1b[36m" + name + "\x1b[37m");
             } else {
-                send_line(ob, "\x1b[36m" + name + " \x1b[36m" + c + "개\x1b[37m");
+                send_line(ob, "\x1b[36m" + name + "  \x1b[36m" + int_to_str(c) + "개\x1b[37m");
             }
         }
     }
 
     send_line(ob, "─────────────────");
     let e = get_int(ob, "은전");
-    send_line(ob, "\x1b[0m\x1b[47m\x1b[30m▶ 은전 : " + e + " 개 \x1b[0m\x1b[37m\x1b[40m");
+    send_line(ob, "\x1b[0m\x1b[47m\x1b[30m▶ 은전 : " + pad_start(int_to_str(e), 20, " ") + " 개 \x1b[0m\x1b[37m\x1b[40m");
     let g = get_int(ob, "금전");
     if g > 0 {
-        send_line(ob, "\x1b[0m\x1b[43m\x1b[30m▶ 금전 : " + g + " 개 \x1b[0m\x1b[37m\x1b[40m");
+        send_line(ob, "\x1b[0m\x1b[43m\x1b[30m▶ 금전 : " + pad_start(int_to_str(g), 20, " ") + " 개 \x1b[0m\x1b[37m\x1b[40m");
     }
     send_line(ob, "─────────────────\x1b[0;37m");
 }
