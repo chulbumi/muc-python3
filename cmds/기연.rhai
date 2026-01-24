@@ -1,13 +1,12 @@
-// 기연.rhai - 기연. Python: cmds/기연.py
-// ONEITEM.attr 순회. get_global("oneitem") 등 연동 없음 → 관리자 안내.
+// 기연.rhai - Python: cmds/기연.py
+// for index in ONEITEM.attr: name=ONEITEM.getName(index), owner=ONEITEM.attr[index], msg += '%-16s (%-16s) : %s\\r\\n'. sendLine(msg). ONEITEM 연동 예정.
 
 fn cmd(ob, line) {
-    if require_admin(ob, 1000) {
-        // ONEITEM.attr, ONEITEM.getName(index), ONEITEM.attr[index] (owner) 없음
-        send_line(ob, "☞ 기연: 단일아이템 목록. (ONEITEM 연동 예정)");
-    } else {
-        send_line(ob, "☞ 무슨 말인지 모르겠어요. *^_^*");
+    if !require_admin(ob, 1000) {
+        return;
     }
+    // ONEITEM.attr, ONEITEM.getName(index), ONEITEM.attr[index] (owner) 연동 예정. 순회 결과가 없으면 msg는 빈 문자열.
+    send_line(ob, "☞ (ONEITEM.attr 순회: name (index) : owner. ONEITEM 연동 예정)");
 }
 
 fn main(ob, line) {
