@@ -1,3 +1,4 @@
+pub mod doumi;
 pub mod emotion;
 pub mod hangul;
 pub mod utils;
@@ -13,6 +14,7 @@ pub mod scheduler;
 pub mod data;
 pub mod hotreload;
 pub mod world;
+pub mod oneitem;
 
 // Re-export commonly used types
 pub use loader::{load_json, load_script, save_json, ScriptValue, ScriptValueInner};

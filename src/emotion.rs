@@ -2,6 +2,12 @@
 //!
 //! data/config/emotion.json의 "감정표현" 데이터를 로드하고,
 //! 파이썬 objs/emotion.py (Emotion.load, replace, makeScript), objs/player.doEmotion 로직을 제공.
+//!
+//! ## 한국어 어법: 명령어가 마지막. [대상] [인용구] [명령]
+//! - **밍밍 하하 웃음**: 대상=밍밍, 인용구=하하, 명령=웃음. **밍밍 웃음**, **웃음**(대상 없음) 등.
+//! - NPC(몹): kd[1]. 본인 buf1, 방 buf3. NPC는 별도 수신 없음.
+//! - 플레이어: kd[1] 또는 접촉거부 시 kd[2]. 본인 buf1, 방(buf3) 대상 제외, **대상에게만** buf2.
+//! - 대상 없음/self/못 찾음: kd[0], buf2 없음.
 
 use once_cell::sync::Lazy;
 use std::collections::HashMap;
@@ -146,12 +152,15 @@ pub fn do_emotion(
 
     let (buf1, buf2, buf3) = match &target {
         None => make_script(&kd[0], &i, None, param),
-        Some(EmotionTarget::Mob { .. }) => make_script(&kd[1], &i, u_ref, sub_rest),
+        Some(EmotionTarget::Mob { .. }) => {
+            let tpl = kd.get(1).unwrap_or_else(|| kd.first().unwrap());
+            make_script(tpl, &i, u_ref, sub_rest)
+        }
         Some(EmotionTarget::Player { contact_refuse, .. }) => {
             let e = if *contact_refuse && kd.len() >= 3 {
                 kd[2].as_str()
             } else {
-                kd[1].as_str()
+                kd.get(1).map(|s| s.as_str()).unwrap_or_else(|| kd[0].as_str())
             };
             make_script(e, &i, u_ref, sub_rest)
         }

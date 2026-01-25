@@ -348,6 +348,7 @@ pub fn han_aya(word: &str) -> &'static str {
 }
 
 /// ANSI 이스케이프 시퀀스(\x1b...[^m]*m)를 제거. 파이썬 lib/func.stripANSI.
+/// UTF-8 문자 단위로 복사(바이트 as char 사용 금지: 한글이 깨져 조사 선택 오류).
 pub fn strip_ansi(s: &str) -> String {
     let mut out = String::with_capacity(s.len());
     let mut i = 0;
@@ -373,8 +374,13 @@ pub fn strip_ansi(s: &str) -> String {
             i += 1;
             continue;
         }
-        out.push(bytes[i] as char);
-        i += 1;
+        // UTF-8 문자 단위로 복사 (바이트 as char는 한글 등 멀티바이트 깨짐 → 조사 '가' 오류)
+        if let Some(c) = s[i..].chars().next() {
+            out.push(c);
+            i += c.len_utf8();
+        } else {
+            break;
+        }
     }
     out
 }
@@ -513,6 +519,7 @@ mod tests {
         assert_eq!(han_iga("철"), "이");     // ㄹ 받침
         assert_eq!(han_iga("한글"), "이");  // ㄹ 받침
         assert_eq!(han_iga("밥"), "이");     // ㅂ 받침
+        assert_eq!(han_iga("당신"), "이");   // 신: ㄴ 받침
 
         // 받침 없으면 "가"
         assert_eq!(han_iga("민지"), "가");  // 받침 없음
@@ -520,6 +527,13 @@ mod tests {
         assert_eq!(han_iga("나"), "가");     // 받침 없음
         assert_eq!(han_iga("사과"), "가");  // 받침 없음
         assert_eq!(han_iga("수"), "가");     // 받침 없음
+    }
+
+    #[test]
+    fn test_post_position_dansin_iga() {
+        // 당신(받침 ㄴ) + (이/가) → 당신이
+        let r = post_position_all("당신(이/가) 웃습니다.");
+        assert!(r.starts_with("당신이"), "expected '당신이', got: {:?}", r);
     }
 
     // han_ira 테스트

@@ -12,7 +12,7 @@ use tokio::sync::RwLock;
 use tracing::{debug, info};
 
 use crate::network::Broadcaster;
-use crate::player::Body;
+use crate::player::{Body, MemoRecord};
 use crate::object::{Object, Value};
 use crate::scheduler::CallOutScheduler;
 use std::time::Duration;
@@ -24,6 +24,10 @@ use crate::world::{
     get_world_state, Direction, format_exits_long, format_room_header, MobInstance, PlayerPosition,
     RawMobData, WorldState,
 };
+use crate::world::guild::{
+    guild_attr_keys, guild_get, guild_has, guild_list, guild_remove, guild_save, guild_set,
+};
+use crate::world::rank::{rank_clear, rank_get_all, rank_get_num, rank_read, rank_write};
 
 /// Script engine configuration
 #[derive(Debug, Clone)]
@@ -67,6 +71,120 @@ pub fn get_precomputed_all_online() -> rhai::Array {
 /// PreComputedOtherDescsGuard Drop에서 호출.
 pub fn clear_precomputed_all_online() {
     PRE_COMPUTED_ALL_ONLINE.with(|c| *c.borrow_mut() = None);
+}
+
+/// 설정상태 문자열 파싱: "키 값" (줄바꿈 또는 공백 구분). ob["설정"][키]에 대응.
+fn parse_config_string(s: &str) -> std::collections::HashMap<String, String> {
+    let mut out = std::collections::HashMap::new();
+    if s.is_empty() {
+        return out;
+    }
+    let mut pairs: Vec<(String, String)> = Vec::new();
+    if s.contains('\n') {
+        for line in s.split('\n') {
+            let line = line.trim();
+            if let Some(sp) = line.find(' ') {
+                let (k, v) = (line[..sp].to_string(), line[sp + 1..].trim().to_string());
+                if !k.is_empty() {
+                    pairs.push((k, v));
+                }
+            }
+        }
+    } else {
+        let toks: Vec<&str> = s.split_whitespace().collect();
+        let mut i = 0;
+        while i + 1 < toks.len() {
+            pairs.push((toks[i].to_string(), toks[i + 1].to_string()));
+            i += 2;
+        }
+    }
+    for (k, v) in pairs {
+        out.insert(k, v);
+    }
+    out
+}
+
+/// 설정상태 맵을 문자열로 직렬화. "키 값"을 \n으로 이어붙임.
+fn format_config_string(m: &std::collections::HashMap<String, String>) -> String {
+    let mut v: Vec<_> = m.iter().map(|(k, val)| format!("{} {}", k, val)).collect();
+    v.sort();
+    v.join("\n")
+}
+
+/// 이벤트설정리스트 파싱: "키=값" 또는 "키" 한 줄씩(\n 구분). ob["이벤트"][키]에 대응.
+/// world::event::do_event에서도 사용. pub(crate).
+pub(crate) fn parse_event_string(s: &str) -> std::collections::HashMap<String, String> {
+    let mut out = std::collections::HashMap::new();
+    for line in s.split('\n') {
+        let line = line.trim();
+        if line.is_empty() {
+            continue;
+        }
+        if let Some(eq) = line.find('=') {
+            out.insert(line[..eq].to_string(), line[eq + 1..].to_string());
+        } else {
+            out.insert(line.to_string(), "1".to_string());
+        }
+    }
+    out
+}
+
+pub(crate) fn format_event_string(m: &std::collections::HashMap<String, String>) -> String {
+    let mut v: Vec<_> = m
+        .iter()
+        .map(|(k, val)| {
+            if val == "1" {
+                k.clone()
+            } else {
+                format!("{}={}", k, val)
+            }
+        })
+        .collect();
+    v.sort();
+    v.join("\n")
+}
+
+/// 접속 중인 이름 목록. get_precomputed_all_online에서 이름만 추출.
+pub fn get_online_names() -> rhai::Array {
+    use rhai::Dynamic;
+    PRE_COMPUTED_ALL_ONLINE.with(|c| {
+        let a = c.borrow();
+        if let Some(ref arr) = *a {
+            let mut out = rhai::Array::new();
+            for d in arr {
+                if let Some(m) = d.clone().try_cast::<rhai::Map>() {
+                    if let Some(n) = m.get("이름").and_then(|v: &Dynamic| v.clone().into_string().ok()) {
+                        if !n.is_empty() {
+                            out.push(Dynamic::from(n));
+                        }
+                    }
+                }
+            }
+            out
+        } else {
+            rhai::Array::new()
+        }
+    })
+}
+
+/// 해당 이름이 설정(ob["설정"]["외침거부"])에서 "1"인지. get_precomputed_all_online의 설정상태 파싱.
+pub fn user_refuses_shout(name: &str) -> bool {
+    use rhai::Dynamic;
+    PRE_COMPUTED_ALL_ONLINE.with(|c| {
+        let a = c.borrow();
+        if let Some(ref arr) = *a {
+            for d in arr {
+                if let Some(m) = d.clone().try_cast::<rhai::Map>() {
+                    let n: String = m.get("이름").and_then(|v: &Dynamic| v.clone().into_string().ok()).unwrap_or_default();
+                    if n == name {
+                        let cfg: String = m.get("설정상태").and_then(|v: &Dynamic| v.clone().into_string().ok()).unwrap_or_default();
+                        return parse_config_string(&cfg).get("외침거부").map(|v| v.as_str()) == Some("1");
+                    }
+                }
+            }
+        }
+        false
+    })
 }
 
 /// Stored script with metadata
@@ -164,10 +282,10 @@ fn han_eul(name: &str) -> String {
     han_obj(name).to_string()
 }
 
-/// Korean particle helper (은/는) - placeholder, uses han_iga for now
+/// Korean particle helper (은/는)
 fn han_eun(name: &str) -> String {
-    // TODO: implement proper 은/는 particle
-    name.to_string()
+    use crate::hangul::han_un;
+    han_un(name).to_string()
 }
 
 /// Korean particle helper (와/과)
@@ -304,6 +422,12 @@ pub fn save_body_to_json(body: &mut Body, path: &str) -> bool {
         .collect();
     root.insert("소지품_수량".to_string(), serde_json::Value::Object(stack_map));
 
+    for (k, v) in &body.memos {
+        if let Ok(val) = serde_json::to_value(v) {
+            root.insert(k.clone(), val);
+        }
+    }
+
     let j = serde_json::Value::Object(root);
     match std::fs::write(path, serde_json::to_string_pretty(&j).unwrap_or_default()) {
         Ok(_) => true,
@@ -398,12 +522,43 @@ pub fn load_body_from_json(body: &mut Body, path: &str) -> bool {
         }
     }
 
+    body.memos.clear();
+    for (k, v) in root.iter() {
+        if k.starts_with("메모:") {
+            if let Some(obj) = v.as_object() {
+                let record = MemoRecord {
+                    제목: obj.get("제목").and_then(|x| x.as_str()).unwrap_or("").to_string(),
+                    시간: obj.get("시간").and_then(|x| x.as_str()).unwrap_or("").to_string(),
+                    작성자: obj.get("작성자").and_then(|x| x.as_str()).unwrap_or("").to_string(),
+                    내용: obj.get("내용").and_then(|x| x.as_str()).unwrap_or("").to_string(),
+                };
+                body.memos.insert(k.clone(), record);
+            }
+        }
+    }
+
     true
+}
+
+/// data/script/{path} 로드. JSON 배열이면 파싱, 아니면 줄 단위. $스크립트호출·무기강화용.
+pub(crate) fn load_script_file(path: &str) -> Option<Vec<String>> {
+    let p = std::path::Path::new("data/script").join(path);
+    let content = std::fs::read_to_string(&p).ok()?;
+    if let Ok(arr) = serde_json::from_str::<Vec<String>>(content.trim()) {
+        return Some(arr);
+    }
+    Some(
+        content
+            .lines()
+            .map(|s| s.to_string())
+            .collect(),
+    )
 }
 
 /// Create an Object from data/item/{key}.json 아이템정보.
 /// Returns None if file missing or invalid; else Some((object, 아이템정보.이름 or key)).
-fn object_from_item_json(key: &str) -> Option<(Arc<Mutex<Object>>, String)> {
+/// world::event::$아이템주기에서 사용. pub(crate).
+pub(crate) fn object_from_item_json(key: &str) -> Option<(Arc<Mutex<Object>>, String)> {
     let path = format!("data/item/{}.json", key);
     let content = std::fs::read_to_string(&path).ok()?;
     let json: serde_json::Value = serde_json::from_str(&content).ok()?;
@@ -966,23 +1121,25 @@ pub fn build_room_objs_grouped(
 }
 
 /// 방 전체 문자열(헤더·설명·출구·몹·바닥아이템·다른유저). view_map_data efun 및 show_room_to_player_with_world와 동일 포맷.
-/// other_player_descs: 같은 방의 다른 접속 유저 getDesc. 파이썬 viewMapData for obj in room.objs: is_player then getDesc.
-pub fn build_room_lines(player_name: &str, other_player_descs: &[String]) -> String {
+/// 오류 시 Err((코드, zone, room)): "no_position"|"room_error"|"unknown_room". 성공 시 Ok(문자열).
+/// other_player_descs: 같은 방의 다른 접속 유저 getDesc.
+pub fn build_room_lines(
+    player_name: &str,
+    other_player_descs: &[String],
+) -> Result<String, (String, String, String)> {
     let world = get_world_state().read().unwrap();
     let pos = match world.get_player_position(player_name) {
         Some(p) => p.clone(),
-        None => {
-            return "\x1b[1;31m위치 정보가 없습니다.\x1b[0;37m".to_string();
-        }
+        None => return Err(("no_position".to_string(), String::new(), "0".to_string())),
     };
-    if let Some(room) = world.room_cache.get_room_cached(&pos.zone, &pos.room.to_string()) {
+    if let Some(room) = world.room_cache.get_room_cached(&pos.zone, &pos.room) {
         let room_ref = match room.read() {
             Ok(r) => r,
-            Err(_) => return "\x1b[1;31m방 정보를 읽을 수 없습니다.\x1b[0;37m".to_string(),
+            Err(_) => return Err(("room_error".to_string(), String::new(), "0".to_string())),
         };
         let room_name_formatted = format_room_header(&room_ref.display_name);
         let exits_str = format_exits_long(&*room_ref);
-        let mobs = world.mob_cache.get_mobs_in_room(&pos.zone, pos.room);
+        let mobs = world.mob_cache.get_mobs_in_room(&pos.zone, &pos.room);
         let mob_str = if mobs.is_empty() {
             String::new()
         } else {
@@ -1000,8 +1157,8 @@ pub fn build_room_lines(player_name: &str, other_player_descs: &[String]) -> Str
                 format!("\r\n{}", mob_msgs.join("\r\n"))
             }
         };
-        let room_objs = world.get_room_objs(&pos.zone, pos.room);
-        let room_stack = world.get_room_objs_stack(&pos.zone, pos.room);
+        let room_objs = world.get_room_objs(&pos.zone, &pos.room);
+        let room_stack = world.get_room_objs_stack(&pos.zone, &pos.room);
         let item_str = build_room_objs_grouped(&room_objs, &room_stack);
         let mut out = String::new();
         out.push_str("\r\n");
@@ -1023,12 +1180,13 @@ pub fn build_room_lines(player_name: &str, other_player_descs: &[String]) -> Str
             out.push_str(s);
             out.push_str("\r\n");
         }
-        out
+        Ok(out)
     } else {
-        format!(
-            "\x1b[1;37m[{}:{}]\x1b[0;37m\r\n알 수 없는 곳입니다.\r\n",
-            pos.zone, pos.room
-        )
+        Err((
+            "unknown_room".to_string(),
+            pos.zone.clone(),
+            pos.room.clone(),
+        ))
     }
 }
 
@@ -1243,11 +1401,11 @@ fn look_at_target(
         None => return (vec!["위치 정보가 없습니다.".to_string()], None),
     };
     let zone = pos.zone.as_str();
-    let room_i = pos.room;
+    let room_s = pos.room.as_str();
     let mut c = 0usize;
 
     if name.is_empty() && order >= 1 {
-        for mob in world.mob_cache.get_mobs_in_room(zone, room_i) {
+        for mob in world.mob_cache.get_mobs_in_room(zone, room_s) {
             if !mob.alive {
                 continue;
             }
@@ -1265,7 +1423,7 @@ fn look_at_target(
     }
 
     if name == "시체" {
-        for mob in world.mob_cache.get_mobs_in_room(zone, room_i) {
+        for mob in world.mob_cache.get_mobs_in_room(zone, room_s) {
             if !mob.alive {
                 c += 1;
                 if c == order {
@@ -1279,7 +1437,7 @@ fn look_at_target(
     }
 
     // 파이썬 room.findObjName: 이름==name, name in 반응이름, 또는 alias.find(name)==0(alias가 name으로 시작)
-    let room_objs = world.get_room_objs(zone, room_i);
+    let room_objs = world.get_room_objs(zone, room_s);
     for arc in &room_objs {
         let ok = {
             if let Ok(o) = arc.lock() {
@@ -1300,7 +1458,7 @@ fn look_at_target(
     }
 
     // 파이썬: 이름==name, name in 반응이름, 또는 reaction.find(name)==0
-    for mob in world.mob_cache.get_mobs_in_room(zone, room_i) {
+    for mob in world.mob_cache.get_mobs_in_room(zone, room_s) {
         if let Some(data) = world.mob_cache.get_mob(&mob.mob_key) {
             let ok = data.name == name
                 || data.name.starts_with(name.as_str())
@@ -1326,7 +1484,7 @@ fn look_at_target(
     }
 
     if let Some(dir) = Direction::from_korean(&name) {
-        if let Some(room_arc) = world.room_cache.get_room_cached(zone, &room_i.to_string()) {
+        if let Some(room_arc) = world.room_cache.get_room_cached(zone, room_s) {
             if let Ok(room_guard) = room_arc.read() {
                 if room_guard.get_exit(dir).is_some() {
                     c += 1;
@@ -1602,48 +1760,29 @@ pub fn create_engine_with_output(output_collector: Arc<Mutex<Vec<String>>>) -> E
             .collect()
     });
 
-    let oc_req = output_collector.clone();
-    engine.register_fn("require_arg", move |_ob: &mut rhai::Map, line: &str, usage: &str| -> bool {
-        if line.trim().is_empty() {
-            if let Ok(mut o) = oc_req.lock() {
-                o.push(usage.to_string());
-            }
-            return false;
-        }
-        true
+    // require_arg: 기능만. line이 비었으면 false. usage/오류 메시지는 Rhai에서 send_line.
+    engine.register_fn("require_arg", |_ob: &mut rhai::Map, line: &str| -> bool {
+        !line.trim().is_empty()
     });
 
-    let oc_adm = output_collector.clone();
-    engine.register_fn("require_admin", move |ob: &mut rhai::Map, min_level: i64| -> bool {
+    // require_admin: 기능만. 관리자등급 < min_level 이면 false. 오류 메시지는 Rhai에서 send_line.
+    engine.register_fn("require_admin", |ob: &mut rhai::Map, min_level: i64| -> bool {
         let adm = ob
             .get("관리자등급")
             .and_then(|v| v.as_int().ok())
             .unwrap_or(0i64);
-        if adm < min_level {
-            if let Ok(mut o) = oc_adm.lock() {
-                o.push("☞ 무슨 말인지 모르겠어요. *^_^*".to_string());
-            }
-            return false;
-        }
-        true
+        adm >= min_level
     });
 
-    let oc_act = output_collector.clone();
-    engine.register_fn(
-        "send_item_action",
-        move |_ob: &mut rhai::Map, name: &str, verb: &str, count: i64| {
-            let eul = han_eul(name);
-            let msg1 = if count == 1 {
-                format!("당신이 \x1b[36m{}{}\x1b[37m {}", name, eul, verb)
-            } else {
-                format!("당신이 \x1b[36m{}\x1b[37m {}개를 {}", name, count, verb)
-            };
-            // msg2(이 OO은/는 verb — 방의 다른 사용자용)는 send_room 연동 시 푸시
-            if let Ok(mut o) = oc_act.lock() {
-                o.push(msg1);
-            }
-        },
-    );
+    // format_item_action_self: 기능만. "당신이 X을/를 verb" 형식 문자열 반환. 출력은 Rhai에서 send_line.
+    engine.register_fn("format_item_action_self", |name: &str, verb: &str, count: i64| -> String {
+        let eul = han_eul(name);
+        if count == 1 {
+            format!("당신이 \x1b[36m{}{}\x1b[37m {}", name, eul, verb)
+        } else {
+            format!("당신이 \x1b[36m{}\x1b[37m {}개를 {}", name, count, verb)
+        }
+    });
 
     // ============================================================
     // DATA LOADING (get_item_data, get_mob_data, get_room_data, get_skill_data)
@@ -1797,6 +1936,7 @@ pub fn create_engine_with_body_and_output(
     get_other_players_desc: Option<Arc<dyn Fn(&str) -> Vec<String> + Send + Sync>>,
     get_other_players_map: Option<Arc<dyn Fn() -> HashMap<String, String> + Send + Sync>>,
     special_collector: Arc<Mutex<Option<CommandResult>>>,
+    user_sends: Arc<Mutex<Vec<(String, String)>>>,
     call_out_scheduler: Option<Arc<CallOutScheduler>>,
     script_name: Option<&str>,
 ) -> Engine {
@@ -1804,6 +1944,10 @@ pub fn create_engine_with_body_and_output(
     let mut engine = create_engine_with_output(output_collector);
     let body_ptr = body as *mut Body;
     let spec = special_collector.clone();
+
+    engine.register_fn("get_bool", |player_data: &mut rhai::Map, key: &str| -> bool {
+        player_data.get(key).and_then(|v| v.as_bool().ok()).unwrap_or(false)
+    });
 
     engine.register_fn("item_create", move |_ob: &mut rhai::Map, key: &str| -> String {
         let body = unsafe { &mut *body_ptr };
@@ -1826,7 +1970,7 @@ pub fn create_engine_with_body_and_output(
         let count = count.max(1).min(100) as usize;
         let mut w = get_world_state().write().unwrap();
         let (zone, room) = match w.get_player_position(body.get_name().as_str()) {
-            Some(p) => (p.zone.clone(), p.room),
+            Some(p) => (p.zone.clone(), p.room.clone()),
             None => return 0,
         };
         // 스택 아이템: inv_stack에서 빼서 room_inv_stack으로
@@ -1843,7 +1987,7 @@ pub fn create_engine_with_body_and_output(
                     if should_remove {
                         body.object.inv_stack.remove(key);
                     }
-                    let room_stack = w.get_room_objs_stack_mut(&zone, room);
+                    let room_stack = w.get_room_objs_stack_mut(&zone, &room);
                     *room_stack.entry(key.clone()).or_insert(0) += drop_cnt;
                     drop(w);
                     let path = format!("data/user/{}.json", body.get_name());
@@ -1880,7 +2024,7 @@ pub fn create_engine_with_body_and_output(
         if dropped == 0 {
             return 0;
         }
-        let room_objs = w.get_room_objs_mut(&zone, room);
+        let room_objs = w.get_room_objs_mut(&zone, &room);
         for arc in to_remove {
             body.object.remove(&arc);
             room_objs.push(arc);
@@ -1898,14 +2042,14 @@ pub fn create_engine_with_body_and_output(
         let count = count.max(1).min(100) as usize;
         let mut w = get_world_state().write().unwrap();
         let (zone, room) = match w.get_player_position(body.get_name().as_str()) {
-            Some(p) => (p.zone.clone(), p.room),
+            Some(p) => (p.zone.clone(), p.room.clone()),
             None => return 0,
         };
         let mut taken = 0usize;
         // 스택: room_inv_stack에서 가져와 body.inv_stack에
         if let Some(ref key) = find_item_key_by_name(name) {
             if is_stackable(key) {
-                let room_stack = w.get_room_objs_stack_mut(&zone, room);
+                let room_stack = w.get_room_objs_stack_mut(&zone, &room);
                 let have = *room_stack.get(key).unwrap_or(&0);
                 let take_cnt = (count as i64).min(have).max(0) as usize;
                 if take_cnt > 0 {
@@ -1923,7 +2067,7 @@ pub fn create_engine_with_body_and_output(
             }
         }
         // 바닥 Object에서 추가 (비스택 또는 예전 드랍)
-        let room_list = w.get_room_objs_mut(&zone, room);
+        let room_list = w.get_room_objs_mut(&zone, &room);
         let mut i = 0;
         while i < room_list.len() && taken < count {
             let matches = {
@@ -2124,8 +2268,7 @@ pub fn create_engine_with_body_and_output(
         0
     });
 
-    // merchant_buy(ob, name, count): 상인에게 구입. {err, bought, display_name, total_cost}.
-    // 상인 없음/물건 없음/은전/무게/칸 수 검사. 호위·alias 등은 미구현.
+    // merchant_buy(ob, name, count): 기능만. {err: ""|"usage"|"no_merchant"|"not_for_sale"|"inv_full"|"too_heavy"|"no_money", bought, display_name, total_cost}. 오류 메시지는 Rhai에서.
     let body_ptr_mbuy = body_ptr;
     engine.register_fn(
         "merchant_buy",
@@ -2136,7 +2279,7 @@ pub fn create_engine_with_body_and_output(
             let mut display_name = String::new();
             let mut total_cost = 0i64;
             if name.is_empty() {
-                m.insert("err".into(), Dynamic::from("☞ 사용법: [물품이름] [수량] 구입".to_string()));
+                m.insert("err".into(), Dynamic::from("usage".to_string()));
                 m.insert("bought".into(), Dynamic::from(0i64));
                 m.insert("display_name".into(), Dynamic::from(String::new()));
                 m.insert("total_cost".into(), Dynamic::from(0i64));
@@ -2147,7 +2290,7 @@ pub fn create_engine_with_body_and_output(
             let w = match get_world_state().read() {
                 Ok(g) => g,
                 Err(_) => {
-                    m.insert("err".into(), Dynamic::from("☞ 품목을 보여줄 상인이 없어요. ^^".to_string()));
+                    m.insert("err".into(), Dynamic::from("no_merchant".to_string()));
                     m.insert("bought".into(), Dynamic::from(0i64));
                     m.insert("display_name".into(), Dynamic::from(String::new()));
                     m.insert("total_cost".into(), Dynamic::from(0i64));
@@ -2181,8 +2324,7 @@ pub fn create_engine_with_body_and_output(
                 }
             }
             if item_key.is_empty() {
-                err = "☞ 그런 물건은 팔지 않아요. ^_^".to_string();
-                m.insert("err".into(), Dynamic::from(err));
+                m.insert("err".into(), Dynamic::from("not_for_sale".to_string()));
                 m.insert("bought".into(), Dynamic::from(0i64));
                 m.insert("display_name".into(), Dynamic::from(display_name));
                 m.insert("total_cost".into(), Dynamic::from(0i64));
@@ -2193,19 +2335,19 @@ pub fn create_engine_with_body_and_output(
             for _ in 0..cnt {
                 if body.get_item_count() >= MAX_ITEMS {
                     if bought == 0 {
-                        err = "☞ 자네가 가질 물품의 한계라네".to_string();
+                        err = "inv_full".to_string();
                     }
                     break;
                 }
                 if body.get_item_weight() + weight > body.get_str() * 10 {
                     if bought == 0 {
-                        err = "☞ 무거워서 더 이상 가질 수 없어요. ^^".to_string();
+                        err = "too_heavy".to_string();
                     }
                     break;
                 }
                 if body.get_int("은전") < unit_price {
                     if bought == 0 {
-                        err = "☞ 돈이 모자라네요. ^^".to_string();
+                        err = "no_money".to_string();
                     }
                     break;
                 }
@@ -2338,23 +2480,36 @@ pub fn create_engine_with_body_and_output(
         },
     );
 
-    // view_map_data(ob): arg 없는 봐. build_room_lines(ob 이름, 같은 방 다른 유저 getDesc) → output 1회 push.
-    let oc_view = oc.clone();
+    // view_map_data(ob): 기능만. {ok, text, err, zone, room}. ok=true면 text에 방 문자열. err="no_position"|"room_error"|"unknown_room". 출력은 Rhai에서 send_line.
     let get_other = get_other_players_desc;
-    engine.register_fn("view_map_data", move |ob: &mut rhai::Map| {
+    engine.register_fn("view_map_data", move |ob: &mut rhai::Map| -> Dynamic {
         let name: String = ob
             .get("이름")
             .or_else(|| ob.get("name"))
             .and_then(|v| v.clone().into_string().ok())
             .unwrap_or_default();
         let others = get_other.as_ref().map(|f| f(&name)).unwrap_or_default();
-        let s = build_room_lines(&name, &others);
-        if let Ok(mut out) = oc_view.lock() {
-            out.push(s);
+        let mut m = rhai::Map::new();
+        match build_room_lines(&name, &others) {
+            Ok(text) => {
+                m.insert("ok".into(), Dynamic::from(true));
+                m.insert("text".into(), Dynamic::from(text));
+                m.insert("err".into(), Dynamic::from(String::new()));
+                m.insert("zone".into(), Dynamic::from(String::new()));
+                m.insert("room".into(), Dynamic::from(""));
+            }
+            Err((err, zone, room)) => {
+                m.insert("ok".into(), Dynamic::from(false));
+                m.insert("text".into(), Dynamic::from(String::new()));
+                m.insert("err".into(), Dynamic::from(err));
+                m.insert("zone".into(), Dynamic::from(zone));
+                m.insert("room".into(), Dynamic::from(room));
+            }
         }
+        Dynamic::from(m)
     });
 
-    // find_target(ob, line): [대상] 봐. other_player_descs=같은 방 다른 유저 (이름→getDesc). 파이썬 findObjName·반응이름 앞부분 매칭.
+    // find_target(ob, line): [대상] 봐. {found, lines, to_target, err}. err=""|"no_position"|"not_found". 오류 메시지는 Rhai에서.
     let body_ptr_ft = body_ptr;
     let get_other_map_ft = get_other_players_map.clone();
     engine.register_fn("find_target", move |ob: &mut rhai::Map, line: &str| -> Dynamic {
@@ -2367,12 +2522,24 @@ pub fn create_engine_with_body_and_output(
         let other = get_other_map_ft.as_ref().map(|f| f()).unwrap_or_default();
         let (lines, to_target) =
             look_at_target(unsafe { &*body_ptr_ft }, &world, &viewer_name, line, &other);
-        let found = !(lines.len() == 1 && lines[0].contains("안광으로는 그런것을 볼수 없다"));
+        let (err, lines_out) = if lines.len() == 1 {
+            if lines[0].contains("위치 정보가 없습니다") {
+                ("no_position".to_string(), vec![])
+            } else if lines[0].contains("안광으로는 그런것을 볼수 없다") {
+                ("not_found".to_string(), vec![])
+            } else {
+                (String::new(), lines)
+            }
+        } else {
+            (String::new(), lines)
+        };
+        let found = to_target.is_some() || (!lines_out.is_empty() && err.is_empty());
         let mut m = rhai::Map::new();
         m.insert("found".into(), Dynamic::from(found));
+        m.insert("err".into(), Dynamic::from(err));
         m.insert(
             "lines".into(),
-            Dynamic::from(rhai::Array::from_iter(lines.into_iter().map(Dynamic::from))),
+            Dynamic::from(rhai::Array::from_iter(lines_out.into_iter().map(Dynamic::from))),
         );
         let mut to_map = rhai::Map::new();
         if let Some((n, msg)) = to_target {
@@ -2386,8 +2553,55 @@ pub fn create_engine_with_body_and_output(
         Dynamic::from(m)
     });
 
-    // get_all_online_players(): 전 접속자 목록. [{"이름","무림별호","성격","레벨초기화","소속"}, ...]. 누구 스크립트용.
+    // get_all_online_players(): 전 접속자 목록. [{"이름","무림별호","성격","레벨초기화","소속","설정상태"}, ...]. 누구 스크립트용.
     engine.register_fn("get_all_online_players", get_precomputed_all_online);
+    engine.register_fn("get_online_names", get_online_names);
+    engine.register_fn("user_refuses_shout", user_refuses_shout);
+
+    // get_user_config(ob, 키), set_user_config(ob, 키, 값): 영구 저장 사용자 설정. ob["설정"][키]=값. 설정상태 파싱/저장.
+    let body_ptr_cfg = body_ptr;
+    engine.register_fn("get_user_config", move |_ob: &mut rhai::Map, key: &str| -> String {
+        let body = unsafe { &*body_ptr_cfg };
+        parse_config_string(&body.get_string("설정상태")).get(key).cloned().unwrap_or_default()
+    });
+    let body_ptr_cfg2 = body_ptr;
+    engine.register_fn("set_user_config", move |_ob: &mut rhai::Map, key: &str, value: &str| {
+        let body = unsafe { &mut *body_ptr_cfg2 };
+        let mut m = parse_config_string(&body.get_string("설정상태"));
+        m.insert(key.to_string(), value.to_string());
+        body.object.attr.insert("설정상태".to_string(), Value::String(format_config_string(&m)));
+        let path = format!("data/user/{}.json", body.get_name());
+        let _ = save_body_to_json(body, &path);
+    });
+
+    // get_user_event(ob, 키), set_user_event(ob, 키, 값), del_user_event(ob, 키): 임무 등 이벤트. ob["이벤트"][키]=값. 이벤트설정리스트.
+    let body_ptr_ev = body_ptr;
+    engine.register_fn("get_user_event", move |_ob: &mut rhai::Map, key: &str| -> String {
+        let body = unsafe { &*body_ptr_ev };
+        parse_event_string(&body.get_string("이벤트설정리스트")).get(key).cloned().unwrap_or_default()
+    });
+    let body_ptr_ev2 = body_ptr;
+    engine.register_fn("set_user_event", move |_ob: &mut rhai::Map, key: &str, value: &str| {
+        let body = unsafe { &mut *body_ptr_ev2 };
+        let mut m = parse_event_string(&body.get_string("이벤트설정리스트"));
+        if value.is_empty() {
+            m.remove(key);
+        } else {
+            m.insert(key.to_string(), value.to_string());
+        }
+        body.object.attr.insert("이벤트설정리스트".to_string(), Value::String(format_event_string(&m)));
+        let path = format!("data/user/{}.json", body.get_name());
+        let _ = save_body_to_json(body, &path);
+    });
+    let body_ptr_ev3 = body_ptr;
+    engine.register_fn("del_user_event", move |_ob: &mut rhai::Map, key: &str| {
+        let body = unsafe { &mut *body_ptr_ev3 };
+        let mut m = parse_event_string(&body.get_string("이벤트설정리스트"));
+        m.remove(key);
+        body.object.attr.insert("이벤트설정리스트".to_string(), Value::String(format_event_string(&m)));
+        let path = format!("data/user/{}.json", body.get_name());
+        let _ = save_body_to_json(body, &path);
+    });
 
     // get_my_position(ob) -> {zone, room}. 어디 등.
     let body_ptr_pos = body_ptr;
@@ -2402,7 +2616,7 @@ pub fn create_engine_with_body_and_output(
         let mut m = rhai::Map::new();
         if let Some(p) = pos {
             m.insert("zone".into(), Dynamic::from(p.zone.clone()));
-            m.insert("room".into(), Dynamic::from(p.room));
+            m.insert("room".into(), Dynamic::from(p.room.clone()));
         } else {
             m.insert("zone".into(), Dynamic::from(""));
             m.insert("room".into(), Dynamic::from(0i64));
@@ -2539,7 +2753,7 @@ pub fn create_engine_with_body_and_output(
         let mut m = rhai::Map::new();
         if let Some(p) = w.get_player_position(name) {
             m.insert("zone".into(), Dynamic::from(p.zone.clone()));
-            m.insert("room".into(), Dynamic::from(p.room));
+            m.insert("room".into(), Dynamic::from(p.room.clone()));
         } else {
             m.insert("zone".into(), Dynamic::from(String::new()));
             m.insert("room".into(), Dynamic::from(0i64));
@@ -2547,28 +2761,29 @@ pub fn create_engine_with_body_and_output(
         Dynamic::from(m)
     });
 
-    // set_my_position(ob, zone, room): 관리자 순간이동. ""=성공, else 오류. 호출 후 view_map_data(ob) 권장.
+    // set_my_position(ob, zone, room): 기능만. ""=성공, "fail"|"same_place". 오류 메시지는 Rhai에서.
     let body_ptr_setpos = body_ptr;
-    engine.register_fn("set_my_position", move |_ob: &mut rhai::Map, zone: &str, room: i64| -> String {
+    engine.register_fn("set_my_position", move |_ob: &mut rhai::Map, zone: &str, room: rhai::Dynamic| -> String {
         let body = unsafe { &*body_ptr_setpos };
         let name = body.get_name();
         if name.is_empty() {
-            return "* 이동 실패!!!".to_string();
+            return "fail".to_string();
         }
+        let room_s = room.to_string();
         let mut w = match get_world_state().write() {
             Ok(g) => g,
-            Err(_) => return "* 이동 실패!!!".to_string(),
+            Err(_) => return "fail".to_string(),
         };
         let cur = w.get_player_position(&name).cloned();
-        let (cz, cr) = cur.as_ref().map(|p| (p.zone.as_str(), p.room)).unwrap_or(("", 0));
-        if cz == zone && cr == room {
-            return "☞ 같은 자리에요. ^^".to_string();
+        let (cz, cr) = cur.as_ref().map(|p| (p.zone.as_str(), p.room.as_str())).unwrap_or(("", "0"));
+        if cz == zone && cr == room_s {
+            return "same_place".to_string();
         }
-        if w.room_cache.get_room(zone, &room.to_string()).is_err() {
-            return "* 이동 실패!!!".to_string();
+        if w.room_cache.get_room(zone, &room_s).is_err() {
+            return "fail".to_string();
         }
-        w.set_player_position(&name, PlayerPosition::new(zone.to_string(), room));
-        w.spawn_mobs_for_room(zone, room);
+        w.set_player_position(&name, PlayerPosition::new(zone.to_string(), room_s.clone()));
+        w.spawn_mobs_for_room(zone, &room_s);
         String::new()
     });
 
@@ -2582,6 +2797,215 @@ pub fn create_engine_with_body_and_output(
             body.set(key, val.to_string());
         }
     });
+
+    // set_obj_attr(ob, target, key, val): 기능만. 대상에 속성 설정. 성공 true. 오류 메시지는 Rhai에서 send_line.
+    let body_ptr_soa = body_ptr;
+    engine.register_fn(
+        "set_obj_attr",
+        move |ob: &mut rhai::Map, target: &str, key: &str, val: rhai::Dynamic| -> bool {
+            let body = unsafe { &mut *body_ptr_soa };
+            let my_name = ob.get("이름").and_then(|v| v.clone().into_string().ok()).unwrap_or_default();
+            let val_str = if val.is_int() {
+                val.as_int().unwrap_or(0).to_string()
+            } else {
+                val.to_string()
+            };
+            let v: crate::object::Value = if val.is_int() {
+                (val.as_int().unwrap_or(0)).into()
+            } else {
+                val_str.as_str().into()
+            };
+            if target == "방" {
+                let pos = match get_world_state().read().ok().and_then(|w| w.get_player_position(&my_name).cloned()) {
+                    Some(p) => p,
+                    None => return false,
+                };
+                get_world_state().write().unwrap().get_room_attrs_mut(&pos.zone, &pos.room).insert(key.to_string(), val_str);
+                return true;
+            }
+            if target == "나" || target == my_name {
+                body.set(key, v);
+                return true;
+            }
+            for arc in &body.object.objs {
+                if let Ok(o) = arc.lock() {
+                    if o.getName() == target || (!o.getString("반응이름").is_empty() && o.getString("반응이름").contains(target)) {
+                        drop(o);
+                        if let Ok(mut obj) = arc.lock() {
+                            obj.set(key, v);
+                        }
+                        return true;
+                    }
+                }
+            }
+            if let Some((zone, room)) = get_world_state().read().ok().and_then(|w| w.get_player_position(&my_name).map(|p| (p.zone.clone(), p.room.clone()))) {
+                let mut w = get_world_state().write().unwrap();
+                let room_list = w.get_room_objs_mut(&zone, &room);
+                for arc in room_list.iter_mut() {
+                    if let Ok(o) = arc.lock() {
+                        if o.getName() == target || (!o.getString("반응이름").is_empty() && o.getString("반응이름").contains(target)) {
+                            drop(o);
+                            if let Ok(mut obj) = arc.lock() {
+                                obj.set(key, v);
+                            }
+                            return true;
+                        }
+                    }
+                }
+            }
+            false
+        },
+    );
+
+    // del_obj_attr(ob, target, key): 기능만. 대상에서 속성 삭제. 성공 true. 오류 메시지는 Rhai에서 send_line.
+    let body_ptr_doa = body_ptr;
+    engine.register_fn("del_obj_attr", move |ob: &mut rhai::Map, target: &str, key: &str| -> bool {
+        let body = unsafe { &mut *body_ptr_doa };
+        let my_name = ob.get("이름").and_then(|v| v.clone().into_string().ok()).unwrap_or_default();
+        if target == "방" {
+            let (zone, room) = match get_world_state().read().ok().and_then(|w| w.get_player_position(&my_name).map(|p| (p.zone.clone(), p.room.clone()))) {
+                Some(x) => x,
+                None => return false,
+            };
+            let mut w = get_world_state().write().unwrap();
+            let attrs = w.get_room_attrs_mut(&zone, &room);
+            return attrs.remove(key).is_some();
+        }
+        if target == "나" || target == my_name {
+            return body.attr_mut().remove(key).is_some();
+        }
+        for arc in &body.object.objs {
+            if let Ok(o) = arc.lock() {
+                if o.getName() == target || (!o.getString("반응이름").is_empty() && o.getString("반응이름").contains(target)) {
+                    drop(o);
+                    if let Ok(mut obj) = arc.lock() {
+                        return obj.attr.remove(key).is_some();
+                    }
+                }
+            }
+        }
+        if let Some((zone, room)) = get_world_state().read().ok().and_then(|w| w.get_player_position(&my_name).map(|p| (p.zone.clone(), p.room.clone()))) {
+            let mut w = get_world_state().write().unwrap();
+            let room_list = w.get_room_objs_mut(&zone, &room);
+            for arc in room_list.iter_mut() {
+                if let Ok(o) = arc.lock() {
+                    if o.getName() == target || (!o.getString("반응이름").is_empty() && o.getString("반응이름").contains(target)) {
+                        drop(o);
+                        if let Ok(mut obj) = arc.lock() {
+                            return obj.attr.remove(key).is_some();
+                        }
+                    }
+                }
+            }
+        }
+        false
+    });
+
+    // exit_hide(ob, name): 기능만. 출구숨김. 성공 true. 오류 메시지는 Rhai에서 send_line.
+    engine.register_fn("exit_hide", move |ob: &mut rhai::Map, name: &str| -> bool {
+        let name_body = ob.get("이름").and_then(|v| v.clone().into_string().ok()).unwrap_or_default();
+        let (zone, room) = match get_world_state().read().ok().and_then(|w| w.get_player_position(&name_body).map(|p| (p.zone.clone(), p.room.clone()))) {
+            Some(x) => x,
+            None => return false,
+        };
+        let mut w = match get_world_state().write() {
+            Ok(g) => g,
+            Err(_) => return false,
+        };
+        let room_arc = match w.room_cache.get_room(&zone, &room.to_string()) {
+            Ok(r) => r,
+            Err(_) => return false,
+        };
+        let ok = room_arc.write().unwrap().set_exit_hidden(name, true);
+        ok
+    });
+
+    // exit_show(ob, name): 출구 드러냄. 성공 true.
+    let oc_es = oc.clone();
+    engine.register_fn("exit_show", move |ob: &mut rhai::Map, name: &str| -> bool {
+        let name_body = ob.get("이름").and_then(|v| v.clone().into_string().ok()).unwrap_or_default();
+        let (zone, room) = match get_world_state().read().ok().and_then(|w| w.get_player_position(&name_body).map(|p| (p.zone.clone(), p.room.clone()))) {
+            Some(x) => x,
+            None => return false,
+        };
+        let mut w = match get_world_state().write() {
+            Ok(g) => g,
+            Err(_) => return false,
+        };
+        let room_arc = match w.room_cache.get_room(&zone, &room.to_string()) {
+            Ok(r) => r,
+            Err(_) => return false,
+        };
+        let ok = room_arc.write().unwrap().set_exit_hidden(name, false);
+        ok
+    });
+
+    // exit_remove(ob, name): 기능만. 출구제거. 성공 true. 오류 메시지는 Rhai에서 send_line.
+    engine.register_fn("exit_remove", move |ob: &mut rhai::Map, name: &str| -> bool {
+        let name_body = ob.get("이름").and_then(|v| v.clone().into_string().ok()).unwrap_or_default();
+        let (zone, room) = match get_world_state().read().ok().and_then(|w| w.get_player_position(&name_body).map(|p| (p.zone.clone(), p.room.clone()))) {
+            Some(x) => x,
+            None => return false,
+        };
+        let mut w = match get_world_state().write() {
+            Ok(g) => g,
+            Err(_) => return false,
+        };
+        let room_arc = match w.room_cache.get_room(&zone, &room) {
+            Ok(r) => r,
+            Err(_) => return false,
+        };
+        let ok = room_arc.write().unwrap().remove_exit(name);
+        ok
+    });
+
+    // exit_set_wander(ob, name): 기능만. 맴돌이. 출구 목적지를 자기 방으로. 성공 true. 오류 메시지는 Rhai에서 send_line.
+    engine.register_fn("exit_set_wander", move |ob: &mut rhai::Map, name: &str| -> bool {
+        let name_body = ob.get("이름").and_then(|v| v.clone().into_string().ok()).unwrap_or_default();
+        let (zone, room) = match get_world_state().read().ok().and_then(|w| w.get_player_position(&name_body).map(|p| (p.zone.clone(), p.room.clone()))) {
+            Some(x) => x,
+            None => return false,
+        };
+        let mut w = match get_world_state().write() {
+            Ok(g) => g,
+            Err(_) => return false,
+        };
+        let room_arc = match w.room_cache.get_room(&zone, &room) {
+            Ok(r) => r,
+            Err(_) => return false,
+        };
+        let ok = room_arc.write().unwrap().set_exit_destination(name, &zone, &room);
+        ok
+    });
+
+    // mob_regen(ob, name): 리젠. 시체만 가능. 성공 true.
+    engine.register_fn("mob_regen", move |ob: &mut rhai::Map, name: &str| -> bool {
+        let name_body = ob.get("이름").and_then(|v| v.clone().into_string().ok()).unwrap_or_default();
+        let (zone, room) = match get_world_state().read().ok().and_then(|w| w.get_player_position(&name_body).map(|p| (p.zone.clone(), p.room.clone()))) {
+            Some(x) => x,
+            None => return false,
+        };
+        get_world_state().write().unwrap().mob_cache.do_regen(&zone, &room, name)
+    });
+
+    // guild_get(id, key), guild_set(id, key, value), guild_attr_keys(id), guild_list(), guild_has(id), guild_remove(id), guild_save()
+    // guild_list는 Vec<String> 대신 rhai::Array 반환 (len, [] 연산 호환)
+    engine.register_fn("guild_get", guild_get);
+    engine.register_fn("guild_set", guild_set);
+    engine.register_fn("guild_attr_keys", guild_attr_keys);
+    engine.register_fn("guild_list", || -> rhai::Array {
+        guild_list().into_iter().map(rhai::Dynamic::from).collect()
+    });
+    engine.register_fn("guild_has", guild_has);
+    engine.register_fn("guild_remove", guild_remove);
+    engine.register_fn("guild_save", guild_save);
+
+    // rank_write(ty, name, value, level), rank_read(ty, name), rank_get_num(ty, rank), rank_get_all(ty), rank_clear(ty). ty 빈 문자열이면 전체.
+    engine.register_fn("rank_write", rank_write);
+    engine.register_fn("rank_read", rank_read);
+    engine.register_fn("rank_get_num", rank_get_num);
+    engine.register_fn("rank_get_all", rank_get_all);
+    engine.register_fn("rank_clear", rank_clear);
 
     // password_hash(plain): 평문을 SHA-512 해시 16진수 문자열로. 암호 저장/암호변경용.
     engine.register_fn("password_hash", |plain: &str| -> String { password_hash(plain) });
@@ -2618,97 +3042,94 @@ pub fn create_engine_with_body_and_output(
     });
 
     // ---- 외쳐/전음/표현/주다: special_collector에 CommandResult 설정, handler에서 Shout/Tell/EmotionToRoom/GiveToPlayer 처리 ----
+    // send_to_user(name, msg): 해당 접속자에게 msg 전송. 스크립트에서 포맷·조건(외침거부 등) 정한 뒤 호출.
 
-    // send_shout(ob, msg): 외쳐. 검사 후 Shout(formatted) 설정. 오류 시 oc에 push.
-    let oc_sh = oc.clone();
-    let spec_sh = spec.clone();
-    let body_ptr_sh = body_ptr;
-    engine.register_fn("send_shout", move |_ob: &mut rhai::Map, msg: &str| {
-        let body = unsafe { &*body_ptr_sh };
-        if msg.trim().is_empty() {
-            if let Ok(mut o) = oc_sh.lock() {
-                o.push("☞ 사용법: [내용] 외침(,)".to_string());
+    let user_sends_clone = user_sends.clone();
+    engine.register_fn("send_to_user", move |name: &str, msg: &str| {
+        if !name.is_empty() && !msg.is_empty() {
+            if let Ok(mut u) = user_sends_clone.lock() {
+                u.push((name.to_string(), msg.to_string()));
             }
-            return;
-        }
-        if msg.len() > 160 {
-            if let Ok(mut o) = oc_sh.lock() {
-                o.push("☞ 너무 길어요. ^^".to_string());
-            }
-            return;
-        }
-        let config = body.get_string("설정상태");
-        if config.contains("외침거부 1") {
-            if let Ok(mut o) = oc_sh.lock() {
-                o.push("☞ 외침거부중엔 외칠 수 없어요. ^^".to_string());
-            }
-            return;
-        }
-        if body.act == crate::player::ActState::Rest {
-            if let Ok(mut o) = oc_sh.lock() {
-                o.push("☞ 운기조식중에 외치게 되면 기가 흐트러집니다.".to_string());
-            }
-            return;
-        }
-        let name = body.get_name();
-        let adm = body.get_int("관리자등급");
-        let personality = body.get_string("성격");
-        let shout_type = if adm >= 2000 {
-            "\x1b[0;35m사자후\x1b[0;37m"
-        } else if personality == "선인" {
-            "\x1b[1;36m창룡후\x1b[0;37m"
-        } else if personality == "기인" {
-            "\x1b[1;32m사자후\x1b[0;37m"
-        } else {
-            "\x1b[32m외 침\x1b[37m"
-        };
-        let formatted = format!("{}({}) : {}", name, shout_type, msg);
-        if let Ok(mut s) = spec_sh.lock() {
-            *s = Some(CommandResult::Shout(formatted));
         }
     });
 
-    // send_tell(ob, target, msg): 전음. 오류 시 oc에 push. self면 "중얼 중얼" push.
-    let oc_te = oc.clone();
+    // send_notice(ob, msg): 기능만. [공지] 이름 : 메시지 형식으로 접속 전원 전송. ""=성공, "usage"=빈 msg. 오류 메시지는 Rhai에서.
+    let spec_not = spec.clone();
+    let body_ptr_not = body_ptr;
+    engine.register_fn("send_notice", move |_ob: &mut rhai::Map, msg: &str| -> String {
+        if msg.trim().is_empty() {
+            return "usage".to_string();
+        }
+        let body = unsafe { &*body_ptr_not };
+        let name = body.get_string("이름");
+        let n = if name.is_empty() { "관리자" } else { name.as_str() };
+        let formatted = format!("[공지] {} : {}", n, msg);
+        if let Ok(mut s) = spec_not.lock() {
+            *s = Some(CommandResult::Notice(formatted));
+        }
+        "".to_string()
+    });
+
+    // send_broadcast_to_guild(ob, msg): 기능만. [방파] 이름 : 메시지. ""=성공, "usage"=빈 msg, "no_guild"=소속 없음. 오류 메시지는 Rhai에서.
+    let spec_bg = spec.clone();
+    engine.register_fn("send_broadcast_to_guild", move |ob: &mut rhai::Map, msg: &str| -> String {
+        if msg.trim().is_empty() {
+            return "usage".to_string();
+        }
+        let my_name = ob.get("이름").and_then(|v| v.clone().into_string().ok()).unwrap_or_default();
+        let guild = ob.get("소속").and_then(|v| v.clone().into_string().ok()).unwrap_or_default();
+        if guild.is_empty() {
+            return "no_guild".to_string();
+        }
+        let arr = get_precomputed_all_online();
+        let mut names: Vec<String> = Vec::new();
+        for d in arr {
+            if let Some(m) = d.clone().try_cast::<rhai::Map>() {
+                let s: String = m.get("소속").and_then(|v: &Dynamic| v.clone().into_string().ok()).unwrap_or_default();
+                if s == guild {
+                    if let Some(n) = m.get("이름").and_then(|v: &Dynamic| v.clone().into_string().ok()) {
+                        if !n.is_empty() {
+                            names.push(n);
+                        }
+                    }
+                }
+            }
+        }
+        let formatted = format!("\x1b[0;35m[방파]\x1b[0;37m {} : {}", my_name, msg);
+        if let Ok(mut s) = spec_bg.lock() {
+            *s = Some(CommandResult::BroadcastToPlayers(names, formatted));
+        }
+        "".to_string()
+    });
+
+    // send_tell(ob, target, msg): 기능만. ""=성공, "usage"|"tell_refuse"|"self_tell". 오류 메시지는 Rhai에서.
     let spec_te = spec.clone();
     let body_ptr_te = body_ptr;
-    engine.register_fn("send_tell", move |_ob: &mut rhai::Map, target: &str, msg: &str| {
+    engine.register_fn("send_tell", move |_ob: &mut rhai::Map, target: &str, msg: &str| -> String {
         let body = unsafe { &*body_ptr_te };
         if target.trim().is_empty() || msg.trim().is_empty() {
-            if let Ok(mut o) = oc_te.lock() {
-                o.push("☞ 사용법: [대상] [내용] 전음(/)".to_string());
-            }
-            return;
+            return "usage".to_string();
         }
         let config = body.get_string("설정상태");
         if config.contains("전음거부 1") {
-            if let Ok(mut o) = oc_te.lock() {
-                o.push("☞ 전음 거부중이에요. ^^".to_string());
-            }
-            return;
+            return "tell_refuse".to_string();
         }
         if target == body.get_name() {
-            if let Ok(mut o) = oc_te.lock() {
-                o.push("중얼 중얼 거립니다.".to_string());
-            }
-            return;
+            return "self_tell".to_string();
         }
         if let Ok(mut s) = spec_te.lock() {
             *s = Some(CommandResult::Tell(target.to_string(), msg.to_string()));
         }
+        "".to_string()
     });
 
-    // send_emotion(ob, action): 표현. to_self="당신이 {action}", to_room="{name}{iga} {action}".
-    let oc_em = oc.clone();
+    // send_emotion(ob, action): 기능만. to_self/to_room 설정. ""=성공, "usage"=빈 action. 오류 메시지는 Rhai에서.
     let spec_em = spec.clone();
     let body_ptr_em = body_ptr;
-    engine.register_fn("send_emotion", move |_ob: &mut rhai::Map, action: &str| {
+    engine.register_fn("send_emotion", move |_ob: &mut rhai::Map, action: &str| -> String {
         let body = unsafe { &*body_ptr_em };
         if action.trim().is_empty() {
-            if let Ok(mut o) = oc_em.lock() {
-                o.push("☞ 사용법: 표현 [동작] 또는 ' [동작]".to_string());
-            }
-            return;
+            return "usage".to_string();
         }
         let name = body.get_name();
         let iga = han_iga(&name);
@@ -2717,20 +3138,21 @@ pub fn create_engine_with_body_and_output(
         if let Ok(mut s) = spec_em.lock() {
             *s = Some(CommandResult::EmotionToRoom(to_self, to_room, None));
         }
+        "".to_string()
     });
 
-    // request_give_silver(ob, target, amt): 주다 은전. ""=성공(Shout설정), else 오류.
+    // request_give_silver(ob, target, amt): 기능만. ""=성공, "usage"|"no_money". 오류 메시지는 Rhai에서.
     let spec_gs = spec.clone();
     let body_ptr_gs = body_ptr;
     engine.register_fn("request_give_silver", move |_ob: &mut rhai::Map, target: &str, amt: i64| -> String {
         let body = unsafe { &*body_ptr_gs };
         if amt < 1 {
-            return "☞ 사용법: [대상] [물품] [개수] 주다".to_string();
+            return "usage".to_string();
         }
         let have = body.get_int("은전");
         let give = amt.min(have.max(0));
         if give < 1 {
-            return "☞ 돈이 모자라네요. ^^".to_string();
+            return "no_money".to_string();
         }
         if let Ok(mut s) = spec_gs.lock() {
             *s = Some(CommandResult::GiveToPlayer {
@@ -2745,18 +3167,18 @@ pub fn create_engine_with_body_and_output(
         String::new()
     });
 
-    // request_give_gold(ob, target, amt): 주다 금전.
+    // request_give_gold(ob, target, amt): 기능만. ""=성공, "usage"|"no_money". 오류 메시지는 Rhai에서.
     let spec_gg = spec.clone();
     let body_ptr_gg = body_ptr;
     engine.register_fn("request_give_gold", move |_ob: &mut rhai::Map, target: &str, amt: i64| -> String {
         let body = unsafe { &*body_ptr_gg };
         if amt < 1 {
-            return "☞ 사용법: [대상] [물품] [개수] 주다".to_string();
+            return "usage".to_string();
         }
         let have = body.get_int("금전");
         let give = amt.min(have.max(0));
         if give < 1 {
-            return "☞ 돈이 모자라네요. ^^".to_string();
+            return "no_money".to_string();
         }
         if let Ok(mut s) = spec_gg.lock() {
             *s = Some(CommandResult::GiveToPlayer {
@@ -2771,7 +3193,7 @@ pub fn create_engine_with_body_and_output(
         String::new()
     });
 
-    // request_give_item(ob, target, name, order, count): 주다 아이템. 검사 후 GiveToPlayer. 스택이면 give_item_stack.
+    // request_give_item(ob, target, name, order, count): 기능만. ""=성공, "no_item". 오류 메시지는 Rhai에서.
     let spec_gi = spec.clone();
     let body_ptr_gi = body_ptr;
     engine.register_fn("request_give_item", move |_ob: &mut rhai::Map, target: &str, item_name: &str, order: i64, count: i64| -> String {
@@ -2800,7 +3222,7 @@ pub fn create_engine_with_body_and_output(
         // 비스택: findObjInven
         let cnt_u = cnt as usize;
         if body.object.findObjInven(item_name, order).is_none() {
-            return "☞ 그런 아이템이 소지품에 없어요.".to_string();
+            return "no_item".to_string();
         }
         if let Ok(mut s) = spec_gi.lock() {
             *s = Some(CommandResult::GiveToPlayer {
@@ -2815,22 +3237,22 @@ pub fn create_engine_with_body_and_output(
         String::new()
     });
 
-    // item_equip(ob, name, order): 장비 착용. ""=성공, else 오류문자열. 계층 중복·종류(방어구/무기) 검사.
+    // item_equip(ob, name, order): 기능만. ""=성공, "usage"|"no_item"|"not_equippable"|"slot_used". 오류 메시지는 Rhai에서.
     let body_ptr_equip = body_ptr;
     engine.register_fn("item_equip", move |_ob: &mut rhai::Map, name: &str, order: i64| -> String {
-        if name.is_empty() { return "☞ 사용법: [아이템 이름] 입어".to_string(); }
+        if name.is_empty() { return "usage".to_string(); }
         let order = order.max(1) as usize;
         let body = unsafe { &mut *body_ptr_equip };
         let arc = match body.object.findObjInven(name, order) {
             Some(a) => a,
-            None => return "☞ 그런 아이템이 소지품에 없어요.".to_string(),
+            None => return "no_item".to_string(),
         };
         let (kind, slot, arm, att) = {
             let o = arc.lock().unwrap();
             let k = o.getString("종류");
             let s = o.getString("계층");
             if k != "방어구" && k != "무기" {
-                return "☞ 착용할 수 있는것이 아니에요.".to_string();
+                return "not_equippable".to_string();
             }
             (k, s, o.getInt("방어력") as i32, o.getInt("공격력") as i32)
         };
@@ -2839,7 +3261,7 @@ pub fn create_engine_with_body_and_output(
             obj.lock().map(|x| x.getBool("inUse") && x.getString("계층") == slot).unwrap_or(false)
         });
         if slot_used && !slot.is_empty() {
-            return "☞ 더 이상 착용이 불가능해요.".to_string();
+            return "slot_used".to_string();
         }
         { let mut o = arc.lock().unwrap(); o.set("inUse", 1i64); }
         body.armor += arm;
@@ -2850,15 +3272,15 @@ pub fn create_engine_with_body_and_output(
         String::new()
     });
 
-    // item_unequip(ob, name, order): 장비 해제. ""=성공, else 오류. order 1-based.
+    // item_unequip(ob, name, order): 기능만. ""=성공, "usage"|"no_item". 오류 메시지는 Rhai에서.
     let body_ptr_ue = body_ptr;
     engine.register_fn("item_unequip", move |_ob: &mut rhai::Map, name: &str, order: i64| -> String {
-        if name.is_empty() { return "☞ 사용법: [아이템 이름] 벗어  또는  [모두/전부] 벗어".to_string(); }
+        if name.is_empty() { return "usage".to_string(); }
         let order = order.max(1) as usize;
         let body = unsafe { &mut *body_ptr_ue };
         let arc = match body.object.findObjInUse(name, order) {
             Some(a) => a,
-            None => return "☞ 그런 아이템이 소지품에 없어요.".to_string(),
+            None => return "no_item".to_string(),
         };
         let (arm, att, is_weapon) = {
             let mut o = arc.lock().unwrap();
@@ -2887,26 +3309,26 @@ pub fn create_engine_with_body_and_output(
         n as i64
     });
 
-    // item_use_consumable(ob, name, order): 소모품 사용(먹어). {err: "", name: "아이템이름"} 또는 {err: "오류", name: ""}.
+    // item_use_consumable(ob, name, order): 기능만. {err: ""|"usage"|"bad_state"|"no_item"|"not_consumable", name}. 오류 메시지는 Rhai에서.
     let body_ptr_cons = body_ptr;
     engine.register_fn("item_use_consumable", move |_ob: &mut rhai::Map, name: &str, order: i64| -> Dynamic {
         let mut m = rhai::Map::new();
         if name.is_empty() {
-            m.insert("err".into(), Dynamic::from("☞ 사용법: [아이템 이름] 먹어".to_string()));
+            m.insert("err".into(), Dynamic::from("usage".to_string()));
             m.insert("name".into(), Dynamic::from(String::new()));
             return Dynamic::from(m);
         }
         let order = order.max(1) as usize;
         let body = unsafe { &mut *body_ptr_cons };
         if body.act == crate::player::ActState::Rest {
-            m.insert("err".into(), Dynamic::from("☞ 먹을 수 있는 상황이 아니네요. ^_^".to_string()));
+            m.insert("err".into(), Dynamic::from("bad_state".to_string()));
             m.insert("name".into(), Dynamic::from(String::new()));
             return Dynamic::from(m);
         }
         let arc = match body.object.findObjInven(name, order) {
             Some(a) => a,
             None => {
-                m.insert("err".into(), Dynamic::from("☞ 그런 아이템이 소지품에 없어요.".to_string()));
+                m.insert("err".into(), Dynamic::from("no_item".to_string()));
                 m.insert("name".into(), Dynamic::from(String::new()));
                 return Dynamic::from(m);
             }
@@ -2914,7 +3336,7 @@ pub fn create_engine_with_body_and_output(
         let (item_name, hp, mp) = {
             let o = arc.lock().unwrap();
             if o.getString("종류") != "먹는것" {
-                m.insert("err".into(), Dynamic::from("☞ 먹을 수 있는것이 아니에요. ^_^".to_string()));
+                m.insert("err".into(), Dynamic::from("not_consumable".to_string()));
                 m.insert("name".into(), Dynamic::from(String::new()));
                 return Dynamic::from(m);
             }
@@ -2945,6 +3367,22 @@ pub fn create_engine_with_body_and_output(
         let path = format!("data/user/{}.json", body.get_name());
         save_body_to_json(body, &path)
     });
+
+    // ONEITEM (단일아이템/기연) 시스템. Python ONEITEM과 동일.
+    engine.register_fn("oneitem_get_name", crate::oneitem::oneitem_get_name);
+    engine.register_fn("oneitem_get", crate::oneitem::oneitem_get);
+    engine.register_fn("oneitem_have", crate::oneitem::oneitem_have);
+    engine.register_fn("oneitem_drop", crate::oneitem::oneitem_drop);
+    engine.register_fn("oneitem_drop2", crate::oneitem::oneitem_drop2);
+    engine.register_fn("oneitem_keep", crate::oneitem::oneitem_keep);
+    engine.register_fn("oneitem_destroy", crate::oneitem::oneitem_destroy);
+    engine.register_fn("oneitem_check_name", crate::oneitem::oneitem_check_name);
+    engine.register_fn("oneitem_check_index", crate::oneitem::oneitem_check_index);
+    engine.register_fn("oneitem_list", crate::oneitem::oneitem_list);
+    engine.register_fn("oneitem_clear", crate::oneitem::oneitem_clear);
+    engine.register_fn("oneitem_attr_keys", crate::oneitem::oneitem_attr_keys);
+    engine.register_fn("oneitem_get_index_by_name", crate::oneitem::oneitem_get_index_by_name);
+    engine.register_fn("oneitem_list_index_entries", crate::oneitem::oneitem_list_index_entries);
 
     // call_out / call_later / remove_call_out — 점프 2초 후 착지 등. script_name이 있을 때만 등록(지연 시 스크립트 함수 실행).
     if let (Some(sched), Some(sn)) = (call_out_scheduler, script_name) {
@@ -3255,6 +3693,7 @@ impl ScriptStorage {
         let output_collector = Arc::new(Mutex::new(Vec::new()));
         let output_clone = output_collector.clone();
         let special_collector = Arc::new(Mutex::new(None));
+        let user_sends = Arc::new(Mutex::new(Vec::new()));
 
         let engine = create_engine_with_body_and_output(
             player,
@@ -3262,6 +3701,7 @@ impl ScriptStorage {
             get_other_players_desc,
             get_other_players_map,
             special_collector.clone(),
+            user_sends.clone(),
             call_out_scheduler,
             Some(name),
         );
@@ -3282,7 +3722,11 @@ impl ScriptStorage {
             .into_iter()
             .map(|s| expand_abbreviated_ansi(&s))
             .collect();
-        let special = special_collector.lock().unwrap().take();
+        let mut special = special_collector.lock().unwrap().take();
+        let to_send = user_sends.lock().unwrap().drain(..).collect::<Vec<_>>();
+        if special.is_none() && !to_send.is_empty() {
+            special = Some(CommandResult::SendToUsers(to_send));
+        }
         Ok((expanded, special))
     }
 
@@ -3335,6 +3779,8 @@ fn build_ob_from_body(body: &Body) -> rhai::Map {
     m.insert("act".into(), (body.act.to_i32() as i64).into());
     m.insert("성격".into(), body.get_string("성격").into());
     m.insert("소속".into(), body.get_string("소속").into());
+    m.insert("설정상태".into(), body.get_string("설정상태").into());
+    m.insert("운기조식".into(), (body.act == crate::player::ActState::Rest).into());
     m.insert("env".into(), "".into());
     m.insert("objs".into(), rhai::Dynamic::from(rhai::Array::new()));
     // 숙련도.rhai: 검/도/창/기타/맨손
@@ -3366,12 +3812,14 @@ pub fn create_call_out_script_runner(
             .with_player_body_by_name(target, |body| {
                 let output_collector = Arc::new(Mutex::new(Vec::new()));
                 let special_collector = Arc::new(Mutex::new(None));
+                let user_sends = Arc::new(Mutex::new(Vec::new()));
                 let engine = create_engine_with_body_and_output(
                     body,
                     output_collector.clone(),
                     None,
                     None,
                     special_collector,
+                    user_sends,
                     None,
                     None,
                 );
@@ -3500,7 +3948,7 @@ mod tests {
         // 플레이어 위치를 낙양성:1로 설정 (버리기/가져오기에 필요)
         {
             let mut w = get_world_state().write().unwrap();
-            w.set_player_position("item_test_player", PlayerPosition::new("낙양성".to_string(), 1));
+            w.set_player_position("item_test_player", PlayerPosition::new("낙양성".to_string(), "1".to_string()));
         }
 
         let storage = ScriptStorage::default();
@@ -3526,7 +3974,7 @@ mod tests {
         assert_eq!(body.object.objs.len(), 0, "버린 후 인벤 비어있음");
         {
             let mut w = get_world_state().write().unwrap();
-            let ro = w.get_room_objs_mut("낙양성", 1);
+            let ro = w.get_room_objs_mut("낙양성", "1");
             assert_eq!(ro.len(), 1, "방 바닥에 1개");
             assert_eq!(ro[0].lock().unwrap().getName(), "철퇴");
         }
@@ -3537,7 +3985,7 @@ mod tests {
         assert_eq!(body.object.objs.len(), 1, "가져온 후 인벤 1개");
         {
             let mut w = get_world_state().write().unwrap();
-            let ro = w.get_room_objs_mut("낙양성", 1);
+            let ro = w.get_room_objs_mut("낙양성", "1");
             assert_eq!(ro.len(), 0, "가져온 후 방 바닥 비어있음");
         }
 

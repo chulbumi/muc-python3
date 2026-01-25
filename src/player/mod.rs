@@ -6,7 +6,7 @@
 pub mod body;
 pub mod player;
 
-pub use body::{ActState, Body, SendLine, SkillLevel, SkillTraining, ActiveSkill};
+pub use body::{ActState, Body, MemoRecord, SendLine, SkillLevel, SkillTraining, ActiveSkill};
 pub use player::{Player, Party, Channel, STATE_INACTIVE, STATE_DOUMI, STATE_NOTICE, STATE_ACTIVE, CFG_OPTIONS};
 
 /// Configuration constants for game mechanics

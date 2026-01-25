@@ -91,11 +91,11 @@ impl MovementDirection {
     }
 }
 
-/// Display room information to player (이동 시). 파이썬 viewMapData 레이아웃·ANSI 적용.
-fn display_room(player: &mut Body, zone: &str, room_id: i64) -> CommandResult {
+/// Display room information to player (이동 시). 파이썬 viewMapData 레이아웃·ANSI 적용. room_id는 "1" 또는 사용자맵 "이름".
+fn display_room(player: &mut Body, zone: &str, room_id: &str) -> CommandResult {
     let world = get_world_state().read().unwrap();
 
-    let room_arc = world.room_cache.get_room_cached(zone, &room_id.to_string());
+    let room_arc = world.room_cache.get_room_cached(zone, room_id);
 
     let (header, desc_lines, exits_str, mob_str) = if let Some(room) = room_arc {
         let room_read = room.read().unwrap();
@@ -166,7 +166,7 @@ pub fn try_move_by_exit_name(player: &mut Body, exit_name: &str) -> Option<Comma
     match world.move_player_by_name(&name, exit_name) {
         Ok((new_zone, new_room, _)) => {
             drop(world);
-            Some(display_room(player, &new_zone, new_room))
+            Some(display_room(player, &new_zone, &new_room))
         }
         Err(_) => None,
     }
@@ -191,16 +191,16 @@ fn return_command(player: &mut Body, _args: &[&str]) -> CommandResult {
 
     let mut world = get_world_state().write().unwrap();
     let (cur_zone, cur_room) = match world.get_player_position(&player_name) {
-        Some(p) => (p.zone.clone(), p.room),
+        Some(p) => (p.zone.clone(), p.room.clone()),
         None => {
             world.set_player_position(&player_name, PlayerPosition::start());
             let p = world.get_player_position(&player_name).unwrap();
-            (p.zone.clone(), p.room)
+            (p.zone.clone(), p.room.clone())
         }
     };
 
     // 귀환금지: 현재 방 맵속성에 있으면 불가
-    if let Ok(room_arc) = world.room_cache.get_room(&cur_zone, &cur_room.to_string()) {
+    if let Ok(room_arc) = world.room_cache.get_room(&cur_zone, &cur_room) {
         if let Ok(r) = room_arc.read() {
             if r.properties.iter().any(|p| p == "귀환금지") {
                 return CommandResult::Error("☞ 이곳에선 귀환하실 수 없어요. ^^".to_string());
@@ -210,25 +210,25 @@ fn return_command(player: &mut Body, _args: &[&str]) -> CommandResult {
 
     let dest = player.get_string("귀환지맵");
     let (dest_zone, dest_room) = if dest.is_empty() {
-        ("낙양성".to_string(), 42i64)
+        ("낙양성".to_string(), "42".to_string())
     } else {
         match dest.split_once(':') {
-            Some((z, r)) => (z.to_string(), r.trim().parse().unwrap_or(42)),
-            None => ("낙양성".to_string(), 42),
+            Some((z, r)) => (z.to_string(), r.trim().to_string()),
+            None => ("낙양성".to_string(), "42".to_string()),
         }
     };
 
-    if world.room_cache.get_room(&dest_zone, &dest_room.to_string()).is_err() {
+    if world.room_cache.get_room(&dest_zone, &dest_room).is_err() {
         return CommandResult::Error("귀환지맵이 없습니다. 관리자에게 연락하세요.".to_string());
     }
     if dest_zone == cur_zone && dest_room == cur_room {
         return CommandResult::Error("☞ 같은 자리에요. ^^".to_string());
     }
 
-    world.set_player_position(&player_name, PlayerPosition::new(dest_zone.clone(), dest_room));
-    world.spawn_mobs_for_room(&dest_zone, dest_room);
+    world.set_player_position(&player_name, PlayerPosition::new(dest_zone.clone(), dest_room.clone()));
+    world.spawn_mobs_for_room(&dest_zone, &dest_room);
     drop(world);
-    display_room(player, &dest_zone, dest_room)
+    display_room(player, &dest_zone, &dest_room)
 }
 
 /// Creates a movement command for a specific direction
@@ -257,11 +257,11 @@ fn move_command(direction: MovementDirection) -> CommandFn {
         match world.move_player(&player_name, world_dir) {
             Ok((new_zone, new_room)) => {
                 // Spawn mobs for the new room
-                world.spawn_mobs_for_room(&new_zone, new_room);
+                world.spawn_mobs_for_room(&new_zone, &new_room);
 
                 // Display the new room
                 drop(world); // Release lock before displaying
-                display_room(player, &new_zone, new_room)
+                display_room(player, &new_zone, &new_room)
             }
             Err(e) => CommandResult::Error(e),
         }

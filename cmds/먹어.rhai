@@ -9,10 +9,12 @@ fn cmd(ob, line) {
     let ord = arr[0];
     let nm = arr[1];
     let r = item_use_consumable(ob, nm, ord);
-    if r["err"] != "" {
-        send_line(ob, r["err"]);
-        return;
-    }
+    let e = r["err"];
+    if e == "usage" { send_line(ob, "☞ 사용법: [아이템 이름] 먹어"); return; }
+    if e == "bad_state" { send_line(ob, "☞ 먹을 수 있는 상황이 아니네요. ^_^"); return; }
+    if e == "no_item" { send_line(ob, "☞ 그런 아이템이 소지품에 없어요."); return; }
+    if e == "not_consumable" { send_line(ob, "☞ 먹을 수 있는것이 아니에요. ^_^"); return; }
+    if e != "" { return; }
     let name = r["name"];
     let eul = han_eul(name);
     send_line(ob, "당신이 \x1b[36m" + name + eul + "\x1b[37m 먹습니다.");

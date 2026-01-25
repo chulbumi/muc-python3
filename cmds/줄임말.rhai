@@ -2,8 +2,14 @@
 // Python: cmds/줄임말.py
 
 fn cmd(ob, line) {
-
-    send_line(ob, "☞ 아직 준비 중입니다.");
+    let v = if is_empty(line) { 1 } else { max(0, min(1, to_int(trim(line)))) };
+    set_value(ob, "줄임말", v);
+    body_save(ob);
+    if v == 1 {
+        send_line(ob, "☞ 줄임말이 켜졌습니다.");
+    } else {
+        send_line(ob, "☞ 줄임말이 꺼졌습니다.");
+    }
 }
 
 fn main(ob, line) {

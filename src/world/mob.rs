@@ -4,6 +4,13 @@
 //! Mobs are loaded from JSON files in the data/mob/ directory.
 
 use serde_json::Value as JsonValue;
+
+/// 이벤트 스크립트: 배열(legacy)이거나 Rhai 파일명(문자열).
+#[derive(Debug, Clone)]
+pub enum EventScript {
+    Legacy(Vec<String>),
+    Rhai(String),
+}
 use std::collections::HashMap;
 use std::path::{Path, PathBuf};
 use std::sync::{Arc, RwLock};
@@ -49,8 +56,8 @@ pub struct RawMobData {
     pub safe_zone: bool,
     /// Auto scripts (자동스크립)
     pub auto_scripts: Vec<String>,
-    /// Events map (이벤트:...)
-    pub events: HashMap<String, Vec<String>>,
+    /// Events map (이벤트:...). 값이 배열이면 Legacy, 문자열이면 Rhai 스크립트 경로(예: "83_편지.rhai").
+    pub events: HashMap<String, EventScript>,
     /// Items for sale (물건판매)
     pub items_for_sale: Vec<(String, i64)>,
     /// Sale menu script lines (물건판매스크립)
@@ -124,8 +131,8 @@ pub struct MobInstance {
     pub mob_key: String,
     /// Current zone
     pub zone: String,
-    /// Current room index
-    pub room: i64,
+    /// Current room id ("1" or 사용자맵 "이름")
+    pub room: String,
     /// Instance name (might have customization)
     pub name: String,
     /// Current HP
@@ -143,12 +150,12 @@ pub struct MobInstance {
 }
 
 impl MobInstance {
-    /// Create a new mob instance
-    pub fn new(mob_key: String, zone: String, room: i64, data: &RawMobData) -> Self {
+    /// Create a new mob instance. room은 "1" 또는 사용자맵 "이름" 등.
+    pub fn new(mob_key: String, zone: String, room: impl ToString, data: &RawMobData) -> Self {
         Self {
             mob_key,
             zone,
-            room,
+            room: room.to_string(),
             name: data.name.clone(),
             hp: data.hp,
             max_hp: data.max_hp,
@@ -438,14 +445,16 @@ impl MobCache {
             }
         }
 
-        // Parse events (이벤트:...)
+        // Parse events (이벤트:...). 배열=Legacy, 문자열=Rhai 스크립트 파일명.
         for (key, value) in mob_info {
             if key.starts_with("이벤트") {
                 if let Some(arr) = value.as_array() {
                     let event_scripts: Vec<String> = arr.iter()
                         .filter_map(|v| v.as_str().map(|s| s.to_string()))
                         .collect();
-                    data.events.insert(key.clone(), event_scripts);
+                    data.events.insert(key.clone(), EventScript::Legacy(event_scripts));
+                } else if let Some(s) = value.as_str() {
+                    data.events.insert(key.clone(), EventScript::Rhai(s.to_string()));
                 }
             }
         }
@@ -584,8 +593,8 @@ impl MobCache {
         Ok(count)
     }
 
-    /// Spawn mobs for a room from map's `몹` list (on-demand load, no zone-wide preload).
-    pub fn spawn_mobs_for_room(&mut self, zone: &str, room: i64, mob_ids: &[String]) {
+    /// Spawn mobs for a room from map's `몹` list (on-demand load, no zone-wide preload). room은 "1" 또는 사용자맵 "이름".
+    pub fn spawn_mobs_for_room(&mut self, zone: &str, room: &str, mob_ids: &[String]) {
         let room_key = format!("{}:{}", zone, room);
 
         for mob_id in mob_ids {
@@ -615,7 +624,7 @@ impl MobCache {
     }
 
     /// Get active mobs in a room
-    pub fn get_mobs_in_room(&self, zone: &str, room: i64) -> Vec<&MobInstance> {
+    pub fn get_mobs_in_room(&self, zone: &str, room: &str) -> Vec<&MobInstance> {
         let room_key = format!("{}:{}", zone, room);
         self.instances.get(&room_key)
             .map(|instances| instances.iter().filter(|m| m.alive).collect())
@@ -625,6 +634,47 @@ impl MobCache {
     /// Get mob data for an instance
     pub fn get_instance_data(&self, instance: &MobInstance) -> Option<&RawMobData> {
         self.get_mob(&instance.mob_key)
+    }
+
+    /// 리젠: 시체(이름)를 즉시 리젠. 시체만 가능. room에 있는 dead 몹 중 name 매칭(이름 또는 반응이름).
+    pub fn do_regen(&mut self, zone: &str, room: &str, name: &str) -> bool {
+        let room_key = format!("{}:{}", zone, room);
+        let mut to_respawn = None::<(String, RawMobData)>;
+        {
+            let list = match self.instances.get(&room_key) {
+                Some(v) => v,
+                None => return false,
+            };
+            for inst in list.iter() {
+                if !inst.alive {
+                    let d = match self.get_mob(&inst.mob_key) {
+                        Some(x) => x.clone(),
+                        None => continue,
+                    };
+                    let ok = inst.name == name || inst.name.contains(name)
+                        || d.reaction_names.iter().any(|n| n == name || n.contains(name));
+                    if ok {
+                        to_respawn = Some((inst.mob_key.clone(), d));
+                        break;
+                    }
+                }
+            }
+        }
+        let (mob_key, data) = match to_respawn {
+            Some(x) => x,
+            None => return false,
+        };
+        let list = match self.instances.get_mut(&room_key) {
+            Some(v) => v,
+            None => return false,
+        };
+        for inst in list.iter_mut() {
+            if !inst.alive && inst.mob_key == mob_key {
+                inst.respawn(&data);
+                return true;
+            }
+        }
+        false
     }
 
     /// Update respawn state for all instances

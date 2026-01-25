@@ -2,7 +2,7 @@
 // Python: cmds/맵.py - 현재는 출구 나침반으로 연동
 
 fn cmd(ob, line) {
-    if !require_admin(ob, 2000) { return; }
+    if !require_admin(ob, 2000) { send_line(ob, "☞ 관리자만 사용할 수 있어요."); return; }
     let pos = get_my_position(ob);
     if length(pos["zone"]) == 0 {
         send_line(ob, "\r\n* 아무것도 보이지 않습니다.\r\n");

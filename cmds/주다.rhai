@@ -2,7 +2,7 @@
 // Python: cmds/줘.py. request_give_silver, request_give_gold, request_give_item → GiveToPlayer
 
 fn cmd(ob, line) {
-    if !require_arg(ob, line, "☞ 사용법: [대상] [물품] [개수] 주다") { return; }
+    if !require_arg(ob, line) { send_line(ob, "☞ 사용법: [대상] [물품] [개수] 주다"); return; }
     let args = line_args(line);
     let target = args[0];
     let thing = args[1];
@@ -20,12 +20,14 @@ fn cmd(ob, line) {
 
     if thing == "은전" {
         let err = request_give_silver(ob, target, cnt);
-        if length(err) > 0 { send_line(ob, err); }
+        if err == "usage" { send_line(ob, "☞ 사용법: [대상] [물품] [개수] 주다"); }
+        else if err == "no_money" { send_line(ob, "☞ 돈이 모자라네요. ^^"); }
         return;
     }
     if thing == "금전" {
         let err = request_give_gold(ob, target, cnt);
-        if length(err) > 0 { send_line(ob, err); }
+        if err == "usage" { send_line(ob, "☞ 사용법: [대상] [물품] [개수] 주다"); }
+        else if err == "no_money" { send_line(ob, "☞ 돈이 모자라네요. ^^"); }
         return;
     }
 
@@ -38,7 +40,7 @@ fn cmd(ob, line) {
     }
     let c = if iord > 1 { 1 } else { cnt };
     let err = request_give_item(ob, target, iname, iord, c);
-    if length(err) > 0 { send_line(ob, err); }
+    if err == "no_item" { send_line(ob, "☞ 그런 아이템이 소지품에 없어요."); }
 }
 
 fn main(ob, line) {

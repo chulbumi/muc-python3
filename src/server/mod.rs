@@ -137,7 +137,7 @@ impl MudServer {
                     Some(p) => p.clone(),
                     None => return vec![],
                 };
-                get_other_players_desc_in_room(bc.as_ref(), &pos.zone, pos.room, exclude)
+                get_other_players_desc_in_room(bc.as_ref(), &pos.zone, &pos.room, exclude)
             }
         });
         let get_other_players_map: Arc<dyn Fn() -> std::collections::HashMap<String, String> + Send + Sync> =

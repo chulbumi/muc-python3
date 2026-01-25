@@ -12,6 +12,31 @@ pub enum PendingInput {
     ChangePasswordOld,
     ChangePasswordNew,
     ChangePasswordConfirm { new_password: String },
+    /// $엔터$: 다음 입력 시 try_mob_event_resume( mob_key, event_key, words, line_num ) 호출.
+    EventEnter {
+        mob_key: String,
+        event_key: String,
+        words: Vec<String>,
+        line_num: usize,
+    },
+    /// $스크립트호출 무기강화 등: 다음 입력 시 run_script_chunk 또는 run_script_chunk_rhai.
+    Script {
+        name: String,
+        lines: Vec<String>,
+        line_num: usize,
+        temp_input: Option<String>,
+        from_confirm: bool,
+        /// Rhai용 ob. None이면 legacy.
+        script_ob: Option<std::collections::HashMap<String, String>>,
+        /// Rhai용 재개 op. None이면 legacy.
+        script_resume_op: Option<String>,
+    },
+    /// 쪽지 편집: 라인 누적, '.' 또는 10줄 시 저장 후 종료.
+    NoteEdit {
+        target_name: String,
+        title: String,
+        lines: Vec<String>,
+    },
 }
 
 /// Result type for command execution
@@ -35,6 +60,8 @@ pub enum CommandResult {
     SayToRoom(String, String),
     /// 외쳐(shout): 게임 접속 전체에 broadcast. 이름 없이 (외침타입) : 메시지. 외침거부 체크는 broadcast 쪽에서.
     Shout(String),
+    /// 공지(notice): 게임 접속 전체에 전송. 외침거부와 무관하게 전원에게. [공지] 이름 : 메시지.
+    Notice(String),
     /// 전음: 특정 대상에게 귓속말. (대상이름, 메시지). 전음거부·대상 검증은 handle에서.
     Tell(String, String),
     /// 셧다운: 서버 종료 요청. 전체 사용자에게 알리고 종료 시퀀스.
@@ -52,12 +79,35 @@ pub enum CommandResult {
         give_item: Option<(String, usize, usize)>, // (item_name, order, count) 비스택
         give_item_stack: Option<(String, i64)>,    // (인덱스, count) 스택
     },
+    /// 방파/길드 말: 특정 플레이어 이름 목록에게 메시지 전송. [방파] 발신자 : 메시지.
+    BroadcastToPlayers(Vec<String>, String),
+    /// 스크립트 send_to_user에서 수집한 (이름, 메시지) 목록. handler에서 각자에게 전송.
+    SendToUsers(Vec<(String, String)>),
+    /// NPC 이벤트 스크립트 결과: 출력 라인들, $위치이동 시 (zone, room). 클라이언트에서 set_position 적용·방 검증.
+    MobEvent {
+        output_lines: Vec<String>,
+        set_position: Option<(String, String)>,
+    },
+    /// $엔터$: 출력·이동 적용 후 엔터 대기. prompt 전송, PendingInput::EventEnter { mob_key, event_key, words, line_num }.
+    MobEventEnter {
+        output_lines: Vec<String>,
+        set_position: Option<(String, String)>,
+        mob_key: String,
+        event_key: String,
+        words: Vec<String>,
+        line_num: usize,
+        prompt: String,
+    },
+    /// $스크립트호출: data/script/ 무기강화 등. use_rhai면 run_script_chunk_rhai, 아니면 run_script_chunk.
+    StartScript { script_name: String, lines: Vec<String>, use_rhai: bool },
+    /// 쪽지: [이름] [제목] 후 편집 모드. 라인 단위 입력, '.' 또는 10줄이면 종료.
+    StartNoteEdit { target_name: String, title: String },
 }
 
 impl CommandResult {
     /// Returns true if the command succeeded
     pub fn is_ok(&self) -> bool {
-        matches!(self, CommandResult::Ok | CommandResult::Output(_) | CommandResult::Move(_) | CommandResult::Combat | CommandResult::NoPrompt | CommandResult::SayToRoom(_, _) | CommandResult::Shout(_) | CommandResult::Tell(_, _) | CommandResult::Shutdown | CommandResult::EmotionToRoom(_, _, _) | CommandResult::RequestInput { .. } | CommandResult::GiveToPlayer { .. })
+        matches!(self, CommandResult::Ok | CommandResult::Output(_) | CommandResult::Move(_) | CommandResult::Combat | CommandResult::NoPrompt | CommandResult::SayToRoom(_, _) | CommandResult::Shout(_) | CommandResult::Notice(_) | CommandResult::Tell(_, _) | CommandResult::Shutdown | CommandResult::EmotionToRoom(_, _, _) | CommandResult::RequestInput { .. } | CommandResult::GiveToPlayer { .. } | CommandResult::BroadcastToPlayers(_, _) | CommandResult::SendToUsers(_) | CommandResult::MobEvent { .. } | CommandResult::MobEventEnter { .. } | CommandResult::StartScript { .. } | CommandResult::StartNoteEdit { .. })
     }
 
     /// Returns true if the command should skip the prompt

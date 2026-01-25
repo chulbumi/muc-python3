@@ -8,7 +8,7 @@ fn jump_land(ob) {
 }
 
 fn cmd(ob, line) {
-    if !require_admin(ob, 1000) { return; }
+    if !require_admin(ob, 1000) { send_line(ob, "☞ 관리자만 사용할 수 있어요."); return; }
     let ct = get_body_int(ob, "cooltime");
     if ct == 1 {
         send_line(ob, "기술을 쓰기엔 너무도 바빠요~");

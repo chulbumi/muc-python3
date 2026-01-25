@@ -50,14 +50,14 @@ fn ANSI(msg, conv) {
 
 // 메인 명령어 함수
 fn cmd(ob, line) {
-    if !require_arg(ob, line, "\r\nSay What???") { return; }
+    if !require_arg(ob, line) { send_line(ob, "\r\nSay What???"); return; }
     let m1 = ANSI(line, true) + "\x1b[0;40;37m";
     let m2 = ANSI(line, false);
     let name = ob_name(ob);
     let particle = ob_iga(ob);
 
     send_line(ob, "당신이 말합니다 : '" + m1 + "'");
-    let room_msg = name + " " + particle + " 말합니다 : '" + m1 + "'";
+    let room_msg = name + particle + " 말합니다 : '" + m1 + "'";
     send_room(ob, room_msg);
 }
 

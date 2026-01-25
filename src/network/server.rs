@@ -77,7 +77,7 @@ pub async fn run_server(config: ServerConfig) -> Result<(), Box<dyn std::error::
                 Some(p) => p.clone(),
                 None => return vec![],
             };
-            get_other_players_desc_in_room(bc.as_ref(), &pos.zone, pos.room, exclude)
+            get_other_players_desc_in_room(bc.as_ref(), &pos.zone, &pos.room, exclude)
         }
     });
     let get_other_players_map: Arc<dyn Fn() -> std::collections::HashMap<String, String> + Send + Sync> =
@@ -131,7 +131,7 @@ pub async fn run_server_with_broadcaster(
                 Some(p) => p.clone(),
                 None => return vec![],
             };
-            get_other_players_desc_in_room(bc.as_ref(), &pos.zone, pos.room, exclude)
+            get_other_players_desc_in_room(bc.as_ref(), &pos.zone, &pos.room, exclude)
         }
     });
     let get_other_players_map: Arc<dyn Fn() -> std::collections::HashMap<String, String> + Send + Sync> =
@@ -184,7 +184,7 @@ pub async fn run_echo_server(port: u16) -> Result<(), Box<dyn std::error::Error>
                 Some(p) => p.clone(),
                 None => return vec![],
             };
-            get_other_players_desc_in_room(bc.as_ref(), &pos.zone, pos.room, exclude)
+            get_other_players_desc_in_room(bc.as_ref(), &pos.zone, &pos.room, exclude)
         }
     });
     let get_other_players_map: Arc<dyn Fn() -> std::collections::HashMap<String, String> + Send + Sync> =

@@ -2,7 +2,7 @@
 // 상인(물건구입)이 있는 방에서 [이름] [수량] 판매
 
 fn cmd(ob, line) {
-    if !require_arg(ob, line, "☞ 사용법: [아이템 이름] [수량] 판매") { return; }
+    if !require_arg(ob, line) { send_line(ob, "☞ 사용법: [아이템 이름] [수량] 판매"); return; }
     let args = line_args(line);
     let parsed = parse_order_name(args[0]);
     let order = parsed[0];

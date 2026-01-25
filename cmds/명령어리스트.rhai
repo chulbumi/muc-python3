@@ -10,7 +10,7 @@ fn cmd(ob, line) {
             send_line(ob, "☞ 도움말 명령으로 확인하세요.");
         }
     } else {
-        send_line(ob, "☞ 무슨 말인지 모르겠어요. *^_^*");
+        send_line(ob, "☞ 관리자만 사용할 수 있어요.");
     }
 }
 

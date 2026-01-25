@@ -16,11 +16,12 @@ fn cmd(ob, line) {
         let z = spec["zone"];
         let r = spec["room"];
         let err = set_my_position(ob, z, r);
-        if err != "" {
-            send_line(ob, err);
-            return;
-        }
-        view_map_data(ob);
+        if err == "fail" { send_line(ob, "* 이동 실패!!!"); return; }
+        if err == "same_place" { send_line(ob, "☞ 같은 자리에요. ^^"); return; }
+        if err != "" { return; }
+        let r = view_map_data(ob);
+        if r["ok"] { send_line(ob, r["text"]); }
+        else { if r["err"] == "no_position" { send_line(ob, "\x1b[1;31m위치 정보가 없습니다.\x1b[0;37m"); } else if r["err"] == "room_error" { send_line(ob, "\x1b[1;31m방 정보를 읽을 수 없습니다.\x1b[0;37m"); } else if r["err"] == "unknown_room" { send_line(ob, "\x1b[1;37m[" + r["zone"] + ":" + int_to_str(r["room"]) + "]\x1b[0;37m\r\n알 수 없는 곳입니다.\r\n"); } }
         return;
     }
     send_line(ob, "☞ 어디로 이동하시려구요?");

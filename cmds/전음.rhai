@@ -9,7 +9,10 @@ fn cmd(ob, line) {
     }
     let target = parts[0];
     let msg = join_after(parts, 1);
-    send_tell(ob, target, trim(msg));
+    let r = send_tell(ob, target, trim(msg));
+    if r == "usage" { send_line(ob, "☞ 사용법: [대상] [내용] 전음(/)"); }
+    else if r == "tell_refuse" { send_line(ob, "☞ 전음 거부중이에요. ^^"); }
+    else if r == "self_tell" { send_line(ob, "중얼 중얼 거립니다."); }
 }
 
 fn join_after(arr, from) {

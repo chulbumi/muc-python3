@@ -12,7 +12,7 @@ fn cmd(ob, line) {
         return;
     }
     // ob.env.findObjName, is_box, box.addMoney/objs 등 서버 연동 필요
-    send_line(ob, "☞ 아직 준비 중입니다.");
+    send_line(ob, "☞ 이 기능은 현재 지원되지 않습니다.");
 }
 
 fn main(ob, line) {

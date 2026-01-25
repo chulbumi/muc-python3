@@ -10,6 +10,7 @@ pub mod script;
 pub mod system;
 pub mod give;
 pub mod update;
+pub mod note;
 
 pub use movement::*;
 pub use info::*;
@@ -19,6 +20,7 @@ pub use script::*;
 pub use system::*;
 pub use give::*;
 pub use update::*;
+pub use note::*;
 
 use std::sync::Arc;
 use crate::command::{CommandResult, CommandFn};
@@ -34,6 +36,7 @@ pub fn register_basic_commands(registry: &mut CommandRegistry) {
     register_system_commands(registry);
     register_give_commands(registry);
     register_update_commands(registry);
+    register_note_commands(registry);
 }
 
 /// Helper to create a command function wrapper

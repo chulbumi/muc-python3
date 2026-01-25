@@ -11,7 +11,7 @@ fn cmd(ob, line) {
         }
         return;
     }
-    send_line(ob, "☞ 당신은 그런 비전을 배운적이 없습니다. (비전이름 연동 예정)");
+    send_line(ob, "☞ 이 기능은 현재 지원되지 않습니다.");
 }
 
 fn main(ob, line) {

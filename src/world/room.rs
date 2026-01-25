@@ -82,8 +82,8 @@ pub struct Exit {
     pub display_name: String,
     /// 방향(있으면 나침반·방향이동에 사용). 고유명만 있는 출구는 None.
     pub direction: Option<Direction>,
-    /// 목적지 (zone, room_index). 없으면 출구 없음(방향만 표시).
-    pub destination: Option<(String, i64)>,
+    /// 목적지 (zone, room_id). room_id는 "1" 또는 사용자맵 "이름". 없으면 출구 없음.
+    pub destination: Option<(String, String)>,
     /// 숨겨진 출구(표시 안 함, 이름으로는 이동 가능). JSON에서 이름 끝 `$`.
     pub hidden: bool,
 }
@@ -99,8 +99,8 @@ impl Exit {
         self.destination.is_some()
     }
 
-    /// Get the destination as a tuple of (zone, room_index)
-    pub fn destination(&self, _current_zone: &str) -> Option<(String, i64)> {
+    /// Get the destination as (zone, room_id). room_id는 "1" 또는 사용자맵 "이름".
+    pub fn destination(&self, _current_zone: &str) -> Option<(String, String)> {
         self.destination.clone()
     }
 
@@ -238,6 +238,31 @@ impl Room {
     /// Remove a player from this room
     pub fn remove_player(&mut self, player_name: &str) {
         self.players.retain(|p| p != player_name);
+    }
+
+    /// 출구숨김: 출구의 hidden 플래그 설정. true=숨김, false=드러냄. 있으면 true.
+    pub fn set_exit_hidden(&mut self, name: &str, hidden: bool) -> bool {
+        if let Some(e) = self.exits.get_mut(name) {
+            e.hidden = hidden;
+            true
+        } else {
+            false
+        }
+    }
+
+    /// 출구제거: 출구 삭제. 있으면 true.
+    pub fn remove_exit(&mut self, name: &str) -> bool {
+        self.exits.remove(name).is_some()
+    }
+
+    /// 맴돌이: 출구 목적지를 (zone, room_id)로 변경. room_id는 "1" 또는 사용자맵 "이름".
+    pub fn set_exit_destination(&mut self, name: &str, zone: &str, room: &str) -> bool {
+        if let Some(e) = self.exits.get_mut(name) {
+            e.destination = Some((zone.to_string(), room.to_string()));
+            true
+        } else {
+            false
+        }
     }
 }
 
@@ -430,22 +455,19 @@ impl RoomCache {
             let display_name = raw_name.trim_end_matches('$').to_string();
             let direction = Direction::from_korean(display_name.as_str());
 
-            let destination: Option<(String, i64)> = if parts.len() == 1 {
+            let destination: Option<(String, String)> = if parts.len() == 1 {
                 None
             } else if parts.len() >= 2 && parts[1].contains(':') {
                 let zone_parts: Vec<&str> = parts[1].splitn(2, ':').collect();
                 if zone_parts.len() == 2 {
                     let zone = zone_parts[0].trim().to_string();
-                    let room_index = zone_parts[1].trim().parse::<i64>()
-                        .map_err(|_| RoomError::ParseError(format!("Invalid room index: {}", parts[1])))?;
-                    Some((zone, room_index))
+                    let room_id = zone_parts[1].trim().to_string();
+                    Some((zone, room_id))
                 } else {
                     return Err(RoomError::ParseError(format!("Invalid zone format: {}", parts[1])));
                 }
             } else {
-                let room_index = parts[1].parse::<i64>()
-                    .map_err(|_| RoomError::ParseError(format!("Invalid exit format: {}", exit_str)))?;
-                Some((current_zone.to_string(), room_index))
+                Some((current_zone.to_string(), parts[1].to_string()))
             };
 
             let exit = Exit {
@@ -825,18 +847,18 @@ mod tests {
 
     #[test]
     fn test_exit_local() {
-        let exit = Exit { display_name: "남".into(), direction: Some(Direction::South), destination: Some(("test_zone".into(), 5)), hidden: false };
+        let exit = Exit { display_name: "남".into(), direction: Some(Direction::South), destination: Some(("test_zone".into(), "5".into())), hidden: false };
         assert_eq!(exit.direction(), Some(Direction::South));
         assert!(exit.has_destination());
-        assert_eq!(exit.destination("test_zone"), Some(("test_zone".to_string(), 5)));
+        assert_eq!(exit.destination("test_zone"), Some(("test_zone".to_string(), "5".to_string())));
     }
 
     #[test]
     fn test_exit_remote() {
-        let exit = Exit { display_name: "동".into(), direction: Some(Direction::East), destination: Some(("other_zone".into(), 10)), hidden: false };
+        let exit = Exit { display_name: "동".into(), direction: Some(Direction::East), destination: Some(("other_zone".into(), "10".into())), hidden: false };
         assert_eq!(exit.direction(), Some(Direction::East));
         assert!(exit.has_destination());
-        assert_eq!(exit.destination("test_zone"), Some(("other_zone".to_string(), 10)));
+        assert_eq!(exit.destination("test_zone"), Some(("other_zone".to_string(), "10".to_string())));
     }
 
     #[test]
@@ -883,8 +905,8 @@ mod tests {
         assert_eq!(exits.len(), 3);
         let north = exits.get("북").unwrap();
         assert!(north.destination.is_none());
-        assert_eq!(exits.get("동").unwrap().destination, Some(("test_zone".into(), 2)));
-        assert_eq!(exits.get("남").unwrap().destination, Some(("test_zone".into(), 24)));
+        assert_eq!(exits.get("동").unwrap().destination, Some(("test_zone".into(), "2".into())));
+        assert_eq!(exits.get("남").unwrap().destination, Some(("test_zone".into(), "24".into())));
     }
 
     #[test]
@@ -892,7 +914,7 @@ mod tests {
         let mut room = Room::new("test_zone".to_string(), "test_room".to_string());
         room.display_name = "Test Room".to_string();
         room.description = vec!["A nice room.".to_string()];
-        room.exits.insert("북".into(), Exit { display_name: "북".into(), direction: Some(Direction::North), destination: Some(("test_zone".into(), 1)), hidden: false });
+        room.exits.insert("북".into(), Exit { display_name: "북".into(), direction: Some(Direction::North), destination: Some(("test_zone".into(), "1".into())), hidden: false });
 
         let messages = handle_player_enter(&mut room, "TestPlayer", EnterMode::Walk);
 

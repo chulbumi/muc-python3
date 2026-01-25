@@ -7,9 +7,9 @@ fn cmd(ob, line) {
             send_line(ob, "☞ 사용법: [사용자명] 정리");
             return;
         }
-        send_line(ob, "☞ (channel.players/loseConnection 연동 예정)");
+        send_line(ob, "☞ 이 기능은 현재 지원되지 않습니다.");
     } else {
-        send_line(ob, "☞ 무슨 말인지 모르겠어요. *^_^*");
+        send_line(ob, "☞ 관리자만 사용할 수 있어요.");
     }
 }
 

@@ -3,9 +3,9 @@
 
 fn cmd(ob, line) {
     if require_admin(ob, 1000) {
-        send_line(ob, "* 청소중입니다. (gc 연동 예정)");
+        send_line(ob, "☞ 이 기능은 현재 지원되지 않습니다.");
     } else {
-        send_line(ob, "☞ 무슨 말인지 모르겠어요. *^_^*");
+        send_line(ob, "☞ 관리자만 사용할 수 있어요.");
     }
 }
 

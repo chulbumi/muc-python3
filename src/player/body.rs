@@ -203,6 +203,19 @@ pub struct Body {
     pub skill_list: Vec<String>,
     /// Item skill training map
     pub item_skill_map: HashMap<String, u32>,
+    /// 범용 스크립트: 아이템확인에서 설정, 옵션출력/옵션확인 등에서 사용. Complete 시 클리어.
+    pub script_temp_item: Option<Arc<Mutex<Object>>>,
+    /// 도착 쪽지. 키 "메모:발신자이름", 값 MemoRecord. load/save 시 JSON 루트의 "메모:xxx"와 연동.
+    pub memos: HashMap<String, MemoRecord>,
+}
+
+/// 쪽지 한 통. 파이썬 memo[키] = {제목,시간,작성자,내용}.
+#[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
+pub struct MemoRecord {
+    pub 제목: String,
+    pub 시간: String,
+    pub 작성자: String,
+    pub 내용: String,
 }
 
 impl Default for Body {
@@ -242,6 +255,8 @@ impl Body {
             skill_map: HashMap::new(),
             skill_list: Vec::new(),
             item_skill_map: HashMap::new(),
+            script_temp_item: None,
+            memos: HashMap::new(),
         }
     }
 

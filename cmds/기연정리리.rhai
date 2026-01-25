@@ -1,16 +1,34 @@
-// 기연정리리.rhai - 기연정리리. Python: cmds/기연정리리.py
-// 기연정리와 동일 + ONEITEM.attr.__delitem__(index).
+// 기연정리리.rhai - Python: cmds/기연정리리.py
+// 기연정리와 유사. len==3(보관): who,where 출력 후 oneitem_destroy. len==1: Player/objs 제거는 미지원. 관리자 2000.
 
 fn cmd(ob, line) {
-    if require_admin(ob, 2000) {
-        if line == "" || is_empty(line) {
-            send_line(ob, "☞ 사용법: [기연이름] 기연정리");
-            return;
-        }
-        send_line(ob, "☞ 기연 정리(상세): ONEITEM 연동 후 지원 예정.");
-    } else {
-        send_line(ob, "☞ 무슨 말인지 모르겠어요. *^_^*");
+    if !require_admin(ob, 2000) {
+        send_line(ob, "☞ 관리자만 사용할 수 있어요.");
+        return;
     }
+    if line == "" || is_empty(line) {
+        send_line(ob, "☞ 사용법: [기연이름] 기연정리");
+        return;
+    }
+    let idx = oneitem_get_index_by_name(trim(line));
+    if idx == "" {
+        send_line(ob, "☞ 그런 아이템은 없습니다.!");
+        return;
+    }
+    let owner = oneitem_get(idx);
+    let words = split(owner, " ");
+    if len(words) == 1 {
+        send_line(ob, "☞ 오프라인 사용자 인벤·3일·제거는 아직 지원하지 않습니다.");
+        return;
+    }
+    if len(words) == 3 {
+        let who = words[0];
+        let where = words[1];
+        send_line(ob, who + " " + where);
+        oneitem_destroy(idx);
+        return;
+    }
+    send_line(ob, "아무도 소지하고 있지 않습니다.!");
 }
 
 fn main(ob, line) {

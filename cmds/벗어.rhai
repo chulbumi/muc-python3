@@ -19,10 +19,9 @@ fn cmd(ob, line) {
     let ord = arr[0];
     let nm = arr[1];
     let err = item_unequip(ob, nm, ord);
-    if err != "" {
-        send_line(ob, err);
-        return;
-    }
+    if err == "usage" { send_line(ob, "☞ 사용법: [아이템 이름] 벗어  또는  [모두/전부] 벗어"); return; }
+    if err == "no_item" { send_line(ob, "☞ 그런 아이템이 소지품에 없어요."); return; }
+    if err != "" { return; }
     let eul = han_eul(nm);
     send_line(ob, "당신이 \x1b[36m" + nm + eul + "\x1b[37m 착용해제 합니다.");
 }

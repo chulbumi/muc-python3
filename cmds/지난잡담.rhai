@@ -2,7 +2,7 @@
 // ob.chatHistory 순회.
 
 fn cmd(ob, line) {
-    send_line(ob, "☞ (chatHistory 연동 예정)");
+    send_line(ob, "☞ 이 기능은 현재 지원되지 않습니다.");
 }
 
 fn main(ob, line) {

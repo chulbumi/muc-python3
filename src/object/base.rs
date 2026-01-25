@@ -409,6 +409,48 @@ impl Object {
         self.set(key, result);
     }
 
+    /// getOption: "옵션" 속성 파싱 → HashMap<이름, 수치>. Python item.getOption().
+    pub fn get_option(&self) -> Option<std::collections::HashMap<String, i64>> {
+        let s = self.getString("옵션");
+        if s.is_empty() {
+            return None;
+        }
+        let mut map = std::collections::HashMap::new();
+        for line in s.split('\n') {
+            let w: Vec<&str> = line.split_whitespace().collect();
+            if w.len() >= 2 {
+                if let Ok(v) = w[1].parse::<i64>() {
+                    map.insert(w[0].to_string(), v);
+                }
+            }
+        }
+        if map.is_empty() {
+            None
+        } else {
+            Some(map)
+        }
+    }
+
+    /// setOption: HashMap → "옵션" 속성. Python item.setOption(option).
+    pub fn set_option(&mut self, option: &std::collections::HashMap<String, i64>) {
+        let s: Vec<String> = option
+            .iter()
+            .map(|(k, v)| format!("{} {}", k, v))
+            .collect();
+        self.set("옵션", s.join("\n"));
+    }
+
+    /// getOptionStr: "힘(10), 민첩성(5)" 형식. Python item.getOptionStr().
+    pub fn get_option_str(&self) -> String {
+        let Some(opt) = self.get_option() else {
+            return String::new();
+        };
+        opt.iter()
+            .map(|(k, v)| format!("{}({})", k, v))
+            .collect::<Vec<_>>()
+            .join(", ")
+    }
+
     /// Finds a child object by name or reaction name
     ///
     /// # Arguments
@@ -451,6 +493,18 @@ impl Object {
                     if n == order {
                         return Some(obj.clone());
                     }
+                }
+            }
+        }
+        None
+    }
+
+    /// 인덱스(아이템 키)로 objs에서 찾기. Python getItemIndex(index).
+    pub fn find_by_index(&self, index: &str) -> Option<Arc<Mutex<Object>>> {
+        for obj in &self.objs {
+            if let Ok(o) = obj.lock() {
+                if o.getString("인덱스") == index {
+                    return Some(obj.clone());
                 }
             }
         }

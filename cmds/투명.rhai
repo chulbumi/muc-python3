@@ -12,7 +12,7 @@ fn cmd(ob, line) {
             send_line(ob, "☞ 투명상태가 해제되었습니다");
         }
     } else {
-        send_line(ob, "☞ 무슨 말인지 모르겠어요. *^_^*");
+        send_line(ob, "☞ 관리자만 사용할 수 있어요.");
     }
 }
 

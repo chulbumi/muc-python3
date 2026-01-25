@@ -7,7 +7,7 @@ fn cmd(ob, line) {
         set_value(ob, "mp", get_int(ob, "max_mp"));
         send_line(ob, "* 회복되었습니다.");
     } else {
-        send_line(ob, "☞ 무슨 말인지 모르겠어요. *^_^*");
+        send_line(ob, "☞ 관리자만 사용할 수 있어요.");
     }
 }
 

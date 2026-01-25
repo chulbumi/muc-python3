@@ -11,7 +11,7 @@ fn cmd(ob, line) {
         }
         return;
     }
-    send_line(ob, "☞ 그런 무공을 습득한 적이 없습니다. (skillList/MUGONG 연동 예정)");
+    send_line(ob, "☞ 이 기능은 현재 지원되지 않습니다.");
 }
 
 fn main(ob, line) {

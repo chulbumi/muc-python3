@@ -6,6 +6,9 @@
 pub mod room;
 pub mod mob;
 pub mod item;
+pub mod guild;
+pub mod rank;
+pub mod event;
 
 // Re-export commonly used types
 pub use room::{
@@ -16,7 +19,7 @@ pub use room::{
 };
 
 pub use mob::{
-    MobCache, MobInstance, RawMobData, MobError,
+    MobCache, MobInstance, RawMobData, MobError, EventScript,
     get_mob_cache,
 };
 
@@ -35,15 +38,15 @@ use crate::object::Object;
 pub struct PlayerPosition {
     /// Zone name
     pub zone: String,
-    /// Room index
-    pub room: i64,
+    /// Room id (숫자 "1","42" 또는 사용자맵 "이름")
+    pub room: String,
     /// Last movement timestamp
     pub last_move: i64,
 }
 
 impl PlayerPosition {
-    /// Create a new position
-    pub fn new(zone: String, room: i64) -> Self {
+    /// Create a new position. room은 숫자 문자열("1") 또는 사용자맵 방 이름("도토리") 등.
+    pub fn new(zone: String, room: String) -> Self {
         Self {
             zone,
             room,
@@ -53,7 +56,7 @@ impl PlayerPosition {
 
     /// Create starting position (낙양성:1)
     pub fn start() -> Self {
-        Self::new("낙양성".to_string(), 1)
+        Self::new("낙양성".to_string(), "1".to_string())
     }
 
     /// Get the position key for room lookup
@@ -77,6 +80,8 @@ pub struct WorldState {
     pub room_objs: HashMap<String, Vec<Arc<Mutex<Object>>>>,
     /// Stackable items on room floor: "zone:room" -> (인덱스 -> 수량)
     pub room_inv_stack: HashMap<String, HashMap<String, i64>>,
+    /// 방별 임의 속성 (값설정 "방" 키 값). key = "zone:room", value = attr map.
+    pub room_attrs: HashMap<String, HashMap<String, String>>,
 }
 
 impl WorldState {
@@ -89,29 +94,36 @@ impl WorldState {
             item_cache: ItemCache::new(),
             room_objs: HashMap::new(),
             room_inv_stack: HashMap::new(),
+            room_attrs: HashMap::new(),
         }
     }
 
+    /// 방 속성 (값설정 "방"용). key = "zone:room". room은 "1" 또는 사용자맵 "이름" 등.
+    pub fn get_room_attrs_mut(&mut self, zone: &str, room: &str) -> &mut HashMap<String, String> {
+        let key = format!("{}:{}", zone, room);
+        self.room_attrs.entry(key).or_default()
+    }
+
     /// Get or create the list of objects on a room's floor. Key: "zone:room".
-    pub fn get_room_objs_mut(&mut self, zone: &str, room: i64) -> &mut Vec<Arc<Mutex<Object>>> {
+    pub fn get_room_objs_mut(&mut self, zone: &str, room: &str) -> &mut Vec<Arc<Mutex<Object>>> {
         let key = format!("{}:{}", zone, room);
         self.room_objs.entry(key).or_default()
     }
 
     /// Get a copy of the list of objects on a room's floor (for display). Key: "zone:room".
-    pub fn get_room_objs(&self, zone: &str, room: i64) -> Vec<Arc<Mutex<Object>>> {
+    pub fn get_room_objs(&self, zone: &str, room: &str) -> Vec<Arc<Mutex<Object>>> {
         let key = format!("{}:{}", zone, room);
         self.room_objs.get(&key).cloned().unwrap_or_default()
     }
 
     /// Get or create stackable items on a room's floor. Key: "zone:room", inner: 인덱스 -> 수량.
-    pub fn get_room_objs_stack_mut(&mut self, zone: &str, room: i64) -> &mut HashMap<String, i64> {
+    pub fn get_room_objs_stack_mut(&mut self, zone: &str, room: &str) -> &mut HashMap<String, i64> {
         let key = format!("{}:{}", zone, room);
         self.room_inv_stack.entry(key).or_default()
     }
 
     /// Get stackable counts on a room's floor (for display).
-    pub fn get_room_objs_stack(&self, zone: &str, room: i64) -> HashMap<String, i64> {
+    pub fn get_room_objs_stack(&self, zone: &str, room: &str) -> HashMap<String, i64> {
         let key = format!("{}:{}", zone, room);
         self.room_inv_stack.get(&key).cloned().unwrap_or_default()
     }
@@ -144,12 +156,12 @@ impl WorldState {
         &mut self,
         player_name: &str,
         direction: Direction,
-    ) -> Result<(String, i64), String> {
+    ) -> Result<(String, String), String> {
         let current_pos = self.player_positions.get(player_name)
             .ok_or("Player not in world")?;
 
         // Get current room
-        let room = self.room_cache.get_room(&current_pos.zone, &current_pos.room.to_string())
+        let room = self.room_cache.get_room(&current_pos.zone, &current_pos.room)
             .map_err(|e| format!("Failed to get room: {}", e))?;
 
         let room_read = room.read().unwrap();
@@ -159,8 +171,8 @@ impl WorldState {
         let dest = exit.destination(&current_pos.zone)
             .ok_or("Invalid exit destination")?;
 
-        // Update player position
-        let new_pos = PlayerPosition::new(dest.0.clone(), dest.1);
+        // Update player position. Exit.destination is (zone, room_id: String).
+        let new_pos = PlayerPosition::new(dest.0.clone(), dest.1.clone());
         self.player_positions.insert(player_name.to_string(), new_pos.clone());
 
         Ok((dest.0, dest.1))
@@ -172,11 +184,11 @@ impl WorldState {
         &mut self,
         player_name: &str,
         exit_name: &str,
-    ) -> Result<(String, i64, String), String> {
+    ) -> Result<(String, String, String), String> {
         let current_pos = self.player_positions.get(player_name)
             .ok_or("Player not in world")?;
 
-        let room = self.room_cache.get_room(&current_pos.zone, &current_pos.room.to_string())
+        let room = self.room_cache.get_room(&current_pos.zone, &current_pos.room)
             .map_err(|e| format!("Failed to get room: {}", e))?;
 
         let (dest, msg_name) = {
@@ -187,23 +199,23 @@ impl WorldState {
             (d, exit.exit_message_name().to_string())
         };
 
-        let new_pos = PlayerPosition::new(dest.0.clone(), dest.1);
+        let new_pos = PlayerPosition::new(dest.0.clone(), dest.1.clone());
         self.player_positions.insert(player_name.to_string(), new_pos);
-        self.spawn_mobs_for_room(&dest.0, dest.1);
+        self.spawn_mobs_for_room(&dest.0, &dest.1);
         Ok((dest.0, dest.1, msg_name))
     }
 
     /// Get mobs in a player's current room
     pub fn get_mobs_for_player(&self, player_name: &str) -> Vec<&MobInstance> {
         if let Some(pos) = self.player_positions.get(player_name) {
-            self.mob_cache.get_mobs_in_room(&pos.zone, pos.room)
+            self.mob_cache.get_mobs_in_room(&pos.zone, &pos.room)
         } else {
             Vec::new()
         }
     }
 
     /// 같은 방에 있는 플레이어 이름 목록. 파이썬 room.objs 중 is_player, 봐/이동 시 다른 유저 표시용.
-    pub fn get_players_in_room(&self, zone: &str, room: i64) -> Vec<String> {
+    pub fn get_players_in_room(&self, zone: &str, room: &str) -> Vec<String> {
         self.player_positions
             .iter()
             .filter(|(_, pos)| pos.zone == zone && pos.room == room)
@@ -211,11 +223,11 @@ impl WorldState {
             .collect()
     }
 
-    /// Spawn mobs for a room from 맵정보.몹 (called when player enters, on-demand load).
-    pub fn spawn_mobs_for_room(&mut self, zone: &str, room: i64) {
+    /// Spawn mobs for a room from 맵정보.몹 (called when player enters, on-demand load). room은 "1" 또는 사용자맵 "이름".
+    pub fn spawn_mobs_for_room(&mut self, zone: &str, room: &str) {
         let mob_ids = self
             .room_cache
-            .get_room(zone, &room.to_string())
+            .get_room(zone, room)
             .ok()
             .and_then(|r| r.read().ok().map(|g| g.mob_ids.clone()))
             .unwrap_or_default();
