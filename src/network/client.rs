@@ -91,8 +91,10 @@ struct LoginSession {
     doumi_script_path: String,
     /// Rhai 도우미 ob (get_name/get_password/get_sex 결과 등). Send 요구로 HashMap<String,String>로 보관.
     doumi_ob: Option<HashMap<String, String>>,
-    /// suspend 시 대기 op (get_name, get_password, get_sex, get_enter 등). resume 시 (op, input)으로 전달.
+    /// suspend 시 대기 op (get_name, get_password, get_sex, get_enter, get_key_input 등). resume 시 (op, input)으로 전달.
     doumi_resume_op: Option<String>,
+    /// get_key_input용. suspend.expected와 일치하는 입력만 통과.
+    doumi_resume_expected: Option<String>,
 }
 
 impl LoginSession {
@@ -113,6 +115,7 @@ impl LoginSession {
             doumi_script_path: String::new(),
             doumi_ob: None,
             doumi_resume_op: None,
+            doumi_resume_expected: None,
         }
     }
 
@@ -487,6 +490,7 @@ async fn process_login_state(
                     };
                     session.doumi_ob = None;
                     session.doumi_resume_op = None;
+                    session.doumi_resume_expected = None;
                     LoginAction::StartScript
                 } else {
                     session.state = LoginState::Password;
@@ -983,6 +987,24 @@ fn process_script_line(
         }
     }
 
+    // get_key_input 검증: expected와 일치할 때만 통과
+    if session.doumi_resume_op.as_deref() == Some("get_key_input") {
+        if let Some(ref exp) = session.doumi_resume_expected {
+            if input.trim() != exp.as_str() {
+                session.doumi_ob = Some(doumi_ob_to_hashmap(ob));
+                return (
+                    session.script_mode,
+                    0,
+                    None,
+                    Some(format!("잘못된 입력입니다. 『{}』를(을) 입력해 주세요.\r\n> ", exp)),
+                    true,
+                    false,
+                    0,
+                );
+            }
+        }
+    }
+
     let res = session.doumi_resume_op.take();
     let resume = res.as_ref().map(|o| (o.as_str(), input));
     let result = run_doumi_to_result(&session.doumi_script_path, &mut ob, resume);
@@ -991,6 +1013,7 @@ fn process_script_line(
         DoumiRunResult::Suspend { lines, delay_ms, suspend } => {
             session.doumi_ob = Some(doumi_ob_to_hashmap(ob));
             session.doumi_resume_op = Some(suspend.op.clone());
+            session.doumi_resume_expected = suspend.expected.clone();
             let output = format!("{}{}\r\n", lines.join(""), suspend.prompt);
             (
                 session.script_mode,
@@ -1016,6 +1039,7 @@ fn process_script_line(
             session.doumi_script_path.clear();
             session.doumi_ob = None;
             session.doumi_resume_op = None;
+            session.doumi_resume_expected = None;
             (0, 0, None, None, false, true, 0)
         }
     }
@@ -1919,7 +1943,7 @@ async fn handle_pending_change_password(
                     (None, msg, true)
                 }
             }
-            PendingInput::EventEnter { mob_key, event_key, words, line_num } => {
+            PendingInput::EventEnter { mob_key, event_key, words, line_num, resume_func } => {
                 let (zone, room) = get_world_state()
                     .read()
                     .unwrap()
@@ -1927,7 +1951,7 @@ async fn handle_pending_change_password(
                     .map(|p| (p.zone.clone(), p.room.clone()))
                     .unwrap_or((String::new(), "0".to_string()));
                 let result = crate::world::event::try_mob_event_resume(
-                    body, &zone, &room, &mob_key, &event_key, words, line_num,
+                    body, &zone, &room, &mob_key, &event_key, words, line_num, resume_func,
                 );
                 match result {
                     Some(CommandResult::MobEvent { output_lines, set_position }) => {
@@ -2347,6 +2371,7 @@ async fn handle_game_command(
                         words,
                         line_num,
                         prompt,
+                        resume_func,
                     }) => {
                         let mut out = output_lines.join("\r\n");
                         if let Some((z, r)) = set_position {
@@ -2366,6 +2391,7 @@ async fn handle_game_command(
                             event_key,
                             words,
                             line_num,
+                            resume_func,
                         });
                         skip_normal_prompt = true;
                         out.push_str(&prompt);

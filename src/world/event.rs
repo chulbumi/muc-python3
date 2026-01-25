@@ -7,7 +7,7 @@ use std::collections::HashMap;
 use std::path::Path;
 use std::sync::{Arc, Mutex};
 
-use rhai::{Dynamic, Engine, EvalAltResult, Map, Scope};
+use rhai::{Dynamic, Engine, EvalAltResult, Map, Position, Scope};
 
 use crate::command::CommandResult;
 use crate::hangul::han_iga;
@@ -167,8 +167,8 @@ fn parse_room_spec(s: &str) -> (String, String) {
 }
 
 /// doEvent 스타일 $함수 처리. 스크립트 한 줄씩 실행.
-/// mob_key: $엔터$ 재개 시 사용. start_from_line: 1-based, 이하 스킵 (재개용).
-/// 이벤트 값이 문자열(예: "83_편지.rhai")이면 do_event_rhai로 위임.
+/// mob_key: $엔터$ 재개 시 사용. start_from_line: Legacy 재개 시 1-based 이하 스킵.
+/// resume_for_rhai: Rhai wait_enter 재개 시 Some("step1") 등. 이벤트 값이 문자열이면 do_event_rhai로 위임.
 pub fn do_event(
     body: &mut Body,
     data: &RawMobData,
@@ -176,11 +176,12 @@ pub fn do_event(
     words: &[String],
     mob_key: &str,
     start_from_line: Option<usize>,
+    resume_for_rhai: Option<String>,
 ) -> CommandResult {
     let script = match data.events.get(event_key) {
         None => return CommandResult::Output("(이벤트 스크립트 없음)".to_string()),
         Some(EventScript::Rhai(path)) => {
-            return do_event_rhai(body, data, event_key, words, mob_key, path, start_from_line);
+            return do_event_rhai(body, data, event_key, words, mob_key, path, resume_for_rhai);
         }
         Some(EventScript::Legacy(lines)) => lines,
     };
@@ -248,6 +249,7 @@ pub fn do_event(
                         words: words.to_vec(),
                         line_num,
                         prompt: next_words,
+                        resume_func: None,
                     };
                 }
                 "$이벤트확인!" => {
@@ -371,15 +373,16 @@ pub fn do_event(
     }
 }
 
-/// Rhai 이벤트 스크립트 실행. data/script/{존이름}/{path}.rhai. start_from_line은 1단계에서 미지원(항상 처음부터).
+/// Rhai 이벤트 스크립트 실행. data/script/{존이름}/{path}.rhai.
+/// resume_func: wait_enter 재개 시 Some("step1") 등. None이면 event() 호출, 없으면 top-level만 실행 후 MobEvent.
 pub fn do_event_rhai(
     body: &mut Body,
     data: &RawMobData,
-    _event_key: &str,
+    event_key: &str,
     words: &[String],
-    _mob_key: &str,
+    mob_key: &str,
     path: &str,
-    _start_from_line: Option<usize>,
+    resume_func: Option<String>,
 ) -> CommandResult {
     let player_name = body.get_name().to_string();
     let words_vec = words.to_vec();
@@ -503,33 +506,78 @@ pub fn do_event_rhai(
             .cloned()
             .unwrap_or_default()
     });
+    engine.register_fn("wait_enter", move |next_func: &str, prompt: &str| -> Result<(), Box<EvalAltResult>> {
+        let mut m = Map::new();
+        m.insert("type".into(), Dynamic::from("event_enter"));
+        m.insert("next_func".into(), Dynamic::from(next_func.to_string()));
+        m.insert("prompt".into(), Dynamic::from(prompt.to_string()));
+        Err(Box::new(EvalAltResult::ErrorRuntime(
+            Dynamic::from(m),
+            Position::default(),
+        )))
+    });
 
+    let ast = match engine.compile(&src) {
+        Ok(a) => a,
+        Err(e) => return CommandResult::Output(format!("(이벤트 스크립트 컴파일 오류: {})", e)),
+    };
     let mut scope = Scope::new();
-    let r = engine.eval_with_scope::<Dynamic>(&mut scope, &src);
+    let entry = resume_func
+        .clone()
+        .unwrap_or_else(|| "event".to_string());
+    let r = engine.call_fn::<Dynamic>(&mut scope, &ast, &entry, ());
 
-    // end_event() throw 또는 정상 종료 모두 MobEvent 반환
-    if let Err(e) = r {
-        if let EvalAltResult::ErrorRuntime(ref err, _) = &*e {
-            if let Some(m) = err.clone().try_cast::<Map>() {
-                let t: String = m
-                    .get("type")
-                    .and_then(|v: &Dynamic| v.clone().into_string().ok())
-                    .unwrap_or_default();
-                if t == "event_complete" {
+    match r {
+        Ok(_) => CommandResult::MobEvent {
+            output_lines: out_lines,
+            set_position: out_set_position,
+        },
+        Err(e) => {
+            let err = &*e;
+            if let EvalAltResult::ErrorRuntime(d, _) = err {
+                if let Some(m) = d.clone().try_cast::<Map>() {
+                    let t: String = m
+                        .get("type")
+                        .and_then(|v: &Dynamic| v.clone().into_string().ok())
+                        .unwrap_or_default();
+                    if t == "event_enter" {
+                        let next_func: String = m
+                            .get("next_func")
+                            .and_then(|v: &Dynamic| v.clone().into_string().ok())
+                            .unwrap_or_default();
+                        let prompt: String = m
+                            .get("prompt")
+                            .and_then(|v: &Dynamic| v.clone().into_string().ok())
+                            .unwrap_or_default();
+                        return CommandResult::MobEventEnter {
+                            output_lines: out_lines,
+                            set_position: out_set_position,
+                            mob_key: mob_key.to_string(),
+                            event_key: event_key.to_string(),
+                            words: words.to_vec(),
+                            line_num: 0,
+                            prompt,
+                            resume_func: Some(next_func),
+                        };
+                    }
+                    if t == "event_complete" {
+                        return CommandResult::MobEvent {
+                            output_lines: out_lines,
+                            set_position: out_set_position,
+                        };
+                    }
+                }
+            }
+            if let EvalAltResult::ErrorFunctionNotFound(name, _) = err {
+                if name == "event" && resume_func.is_none() {
                     return CommandResult::MobEvent {
                         output_lines: out_lines,
                         set_position: out_set_position,
                     };
                 }
             }
+            CommandResult::Output(format!("(이벤트 스크립트 오류: {})", e))
         }
-        // 그 외 런타임 에러는 출력으로
-        return CommandResult::Output(format!("(이벤트 스크립트 오류: {})", e));
-    }
-
-    CommandResult::MobEvent {
-        output_lines: out_lines,
-        set_position: out_set_position,
     }
 }
 
@@ -565,6 +613,7 @@ pub fn try_mob_event(
             &event_key,
             &words,
             &inst.mob_key,
+            None,
             None,
         ));
     }
@@ -949,7 +998,8 @@ pub fn run_script_chunk_rhai(
     (out, ScriptNext::Complete)
 }
 
-/// $엔터$ 재개: mob_key로 데이터 조회 후 do_event( start_from_line = line_num ).
+/// $엔터$ 재개: mob_key로 데이터 조회 후 do_event( start_from_line, resume_for_rhai ).
+/// resume_func: Rhai wait_enter 시 Some("step1") 등. Legacy면 None.
 pub fn try_mob_event_resume(
     body: &mut Body,
     zone: &str,
@@ -958,6 +1008,7 @@ pub fn try_mob_event_resume(
     event_key: &str,
     words: Vec<String>,
     line_num: usize,
+    resume_func: Option<String>,
 ) -> Option<CommandResult> {
     let world = get_world_state().read().ok()?;
     let data = world.mob_cache.get_mob(mob_key)?;
@@ -968,5 +1019,6 @@ pub fn try_mob_event_resume(
         &words,
         mob_key,
         Some(line_num),
+        resume_func,
     ))
 }

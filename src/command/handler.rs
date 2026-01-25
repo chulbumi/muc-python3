@@ -12,12 +12,14 @@ pub enum PendingInput {
     ChangePasswordOld,
     ChangePasswordNew,
     ChangePasswordConfirm { new_password: String },
-    /// $엔터$: 다음 입력 시 try_mob_event_resume( mob_key, event_key, words, line_num ) 호출.
+    /// $엔터$: 다음 입력 시 try_mob_event_resume( mob_key, event_key, words, line_num, resume_func ) 호출.
+    /// resume_func: Rhai wait_enter 재개용. Some("step1")이면 do_event_rhai에서 step1() 호출. Legacy면 None.
     EventEnter {
         mob_key: String,
         event_key: String,
         words: Vec<String>,
         line_num: usize,
+        resume_func: Option<String>,
     },
     /// $스크립트호출 무기강화 등: 다음 입력 시 run_script_chunk 또는 run_script_chunk_rhai.
     Script {
@@ -88,7 +90,8 @@ pub enum CommandResult {
         output_lines: Vec<String>,
         set_position: Option<(String, String)>,
     },
-    /// $엔터$: 출력·이동 적용 후 엔터 대기. prompt 전송, PendingInput::EventEnter { mob_key, event_key, words, line_num }.
+    /// $엔터$: 출력·이동 적용 후 엔터 대기. prompt 전송, PendingInput::EventEnter { ... }.
+    /// resume_func: Rhai wait_enter(next_func, prompt) 시 Some(next_func). Legacy면 None.
     MobEventEnter {
         output_lines: Vec<String>,
         set_position: Option<(String, String)>,
@@ -97,6 +100,7 @@ pub enum CommandResult {
         words: Vec<String>,
         line_num: usize,
         prompt: String,
+        resume_func: Option<String>,
     },
     /// $스크립트호출: data/script/ 무기강화 등. use_rhai면 run_script_chunk_rhai, 아니면 run_script_chunk.
     StartScript { script_name: String, lines: Vec<String>, use_rhai: bool },

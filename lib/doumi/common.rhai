@@ -29,3 +29,11 @@ fn get_enter() {
     }
     throw #{ type: "doumi_suspend", op: "get_enter", prompt: "【엔터키를 누르세요】" };
 }
+
+// 특정 문자열 입력 대기. expected와 일치할 때까지 재입력. throw에 expected 넣어 클라이언트가 검증.
+fn get_key_input(expected) {
+    if _doumi_resume_op == "get_key_input" {
+        return;
+    }
+    throw #{ type: "doumi_suspend", op: "get_key_input", prompt: "", expected: expected };
+}

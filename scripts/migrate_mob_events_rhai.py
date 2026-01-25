@@ -9,8 +9,8 @@ from pathlib import Path
 SCRIPT_BASE = Path("data/script")
 MOB_BASE = Path("data/mob")
 
-# 변환 시 스킵할 지시어 (아직 Rhai efun 미지원)
-SKIP_IF_CONTAINS = ["$스크립트호출", "$엔터$"]
+# 변환 시 스킵할 지시어 (아직 Rhai efun 미지원). $엔터$는 wait_enter/event/stepN 구조로 변환하므로 제외.
+SKIP_IF_CONTAINS = ["$스크립트호출"]
 
 
 def esc(s: str) -> str:
@@ -37,6 +37,23 @@ def suffix_from_key(key: str) -> str:
 def parse_get_next_words(line: str) -> str:
     parts = line.split(None, 1)
     return parts[1].strip() if len(parts) > 1 else ""
+
+
+def split_by_enter(lines: list) -> list:
+    """$엔터$로 구획. (블록, 그 다음 엔터의 prompt) 쌍 리스트. 마지막 블록은 None."""
+    segments = []
+    current = []
+    for line in lines:
+        s = line.strip()
+        if s.startswith("$엔터$"):
+            # " $엔터$ [엔터키를 누르세요]" 또는 "$엔터$[엔터키를 누르세요]" 모두 처리
+            prompt = s[len("$엔터$"):].strip() or parse_get_next_words(s)
+            segments.append((current, prompt))
+            current = []
+        else:
+            current.append(line)
+    segments.append((current, None))
+    return segments
 
 
 def get_str_cnt(line: str) -> tuple[str, int]:
@@ -272,7 +289,39 @@ def migrate_file(zone: str, mob_path: Path) -> tuple[int, int]:
             script_name = "기본" + script_name
 
         try:
-            body = convert_lines(arr)
+            has_enter = any(line.strip().startswith("$엔터$") for line in arr)
+            if has_enter:
+                segments = split_by_enter(arr)
+                body = []
+                for i, (block, prompt_after) in enumerate(segments):
+                    blk = convert_lines(block)
+                    if i == 0:
+                        body.append("fn event() {")
+                        body.extend("    " + ln for ln in blk)
+                        if prompt_after is not None:
+                            body.append(f'    wait_enter("step1", "{esc(prompt_after)}");')
+                        body.append("}")
+                        body.append("")
+                    else:
+                        step_name = f"step{i}"
+                        body.append(f"fn {step_name}() {{")
+                        body.extend("    " + ln for ln in blk)
+                        if prompt_after is not None:
+                            next_step = f"step{i+1}"
+                            body.append(f'    wait_enter("{next_step}", "{esc(prompt_after)}");')
+                        else:
+                            if "end_event()" not in "\n".join(blk):
+                                body.append("    end_event();")
+                        body.append("}")
+                        body.append("")
+                if body and body[-1] == "":
+                    body.pop()
+            else:
+                # $엔터$ 없어도 fn event() { ... } 형태로 통일
+                blk = convert_lines(arr)
+                body = ["fn event() {"]
+                body.extend("    " + ln for ln in blk)
+                body.append("}")
         except Exception as e:
             print(f"  convert err {zone}/{mob_path.name} [{key[:40]}]: {e}")
             skipped += 1
@@ -281,13 +330,17 @@ def migrate_file(zone: str, mob_path: Path) -> tuple[int, int]:
         if not body:
             body = ['output("");', "end_event();"]
 
-        if "end_event()" not in "\n".join(body):
-            body.append("end_event();")
+        # $엔터$ 구조(event/stepN)가 아니고, fn event() 안에 end_event() 없으면 보충
+        if not has_enter and "end_event()" not in "\n".join(body):
+            # "fn event() {" 다음부터 "}" 전 마지막에 삽입. body가 ["fn event() {", "    ...", "}"] 형태.
+            idx = len(body) - 1  # "}" 바로 앞
+            if idx >= 1:
+                body.insert(idx, "    end_event();")
 
         out_dir = SCRIPT_BASE / zone
         out_dir.mkdir(parents=True, exist_ok=True)
         out_path = out_dir / script_name
-        header = f"// {key}\n// efun: output, set_event, del_event, delete_item, give_item, set_position, check_event, has_item, get_tendency, tendency_switch, set_giin, words, end_event\n\n"
+        header = f"// {key}\n// efun: output, set_event, del_event, delete_item, give_item, set_position, check_event, has_item, get_tendency, tendency_switch, set_giin, words, wait_enter, end_event\n\n"
         with open(out_path, "w", encoding="utf-8") as f:
             f.write(header + "\n".join(body) + "\n")
         written += 1
@@ -303,7 +356,41 @@ def migrate_file(zone: str, mob_path: Path) -> tuple[int, int]:
     return written, skipped
 
 
+def wrap_existing_rhai_in_event() -> int:
+    """이미 존재하는 .rhai 중 fn event()가 없으면 fn event() { ... }로 감쌈. 감싼 파일 수 반환."""
+    import sys
+    wrapped = 0
+    for zone_dir in sorted(SCRIPT_BASE.iterdir()):
+        if not zone_dir.is_dir():
+            continue
+        for rhai_path in sorted(zone_dir.glob("*.rhai")):
+            try:
+                raw = rhai_path.read_text(encoding="utf-8")
+            except Exception as e:
+                print(f"  read err {rhai_path}: {e}", file=sys.stderr)
+                continue
+            lines = raw.split("\n")
+            if any(ln.strip().startswith("fn event") for ln in lines):
+                continue
+            new_lines = ["fn event() {"] + ["    " + ln for ln in lines] + ["}"]
+            try:
+                rhai_path.write_text("\n".join(new_lines) + "\n", encoding="utf-8")
+            except Exception as e:
+                print(f"  write err {rhai_path}: {e}", file=sys.stderr)
+                continue
+            wrapped += 1
+            print(f"  wrap: {zone_dir.name}/{rhai_path.name}")
+    return wrapped
+
+
 def main():
+    import sys
+    wrap_only = "--wrap-event" in sys.argv
+    if wrap_only:
+        n = wrap_existing_rhai_in_event()
+        print(f"Total: {n} .rhai wrapped in fn event().")
+        return
+
     total_w = 0
     total_s = 0
     for zone in sorted(MOB_BASE.iterdir()):
