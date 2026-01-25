@@ -852,4 +852,25 @@ mod tests {
         let cache = MobCache::with_data_dir("/custom/path");
         assert_eq!(cache.data_dir, PathBuf::from("/custom/path"));
     }
+
+    /// 83.json 로드 시 "이벤트: $대화 $대 편지" 키가 data.events에 포함되는지 확인.
+    /// "왕대협 편지 대화" 입력 시 83_편지.rhai가 선택되려면 이 키가 있어야 함.
+    #[test]
+    fn test_load_83_has_편지_event_key() {
+        let data_dir = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("data").join("mob");
+        let mut cache = MobCache::with_data_dir(data_dir);
+        let data = match cache.load_mob("낙양성", "83") {
+            Ok(d) => d,
+            Err(e) => {
+                eprintln!("test_load_83_has_편지_event_key: load_mob failed (skip if data not present): {}", e);
+                return;
+            }
+        };
+        let ev_keys: Vec<&String> = data.events.keys().filter(|k| k.starts_with("이벤트")).collect();
+        assert!(
+            data.events.contains_key("이벤트: $대화 $대 편지"),
+            "83.json must have '이벤트: $대화 $대 편지', event keys: {:?}",
+            ev_keys
+        );
+    }
 }

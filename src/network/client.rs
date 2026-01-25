@@ -24,7 +24,7 @@ use crate::world::item::{get_item_display_name, get_item_weight_by_key};
 use crate::world::{get_world_state, PlayerPosition, RoomCache};
 use crate::world::event::{run_script_chunk, run_script_chunk_rhai, try_mob_event, ScriptNext};
 use std::collections::HashMap;
-use crate::script::{build_room_objs_grouped, format_room_objs_display, set_precomputed_all_online, clear_precomputed_all_online, save_body_to_json, load_body_from_json, password_hash, password_verify, load_user_password_hash};
+use crate::script::{build_room_objs_grouped, build_room_lines, format_room_objs_display, set_precomputed_all_online, clear_precomputed_all_online, save_body_to_json, load_body_from_json, password_hash, password_verify, load_user_password_hash};
 
 /// Client connection state
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -1886,7 +1886,8 @@ async fn handle_pending_change_password(
     input: &str,
 ) -> Result<(), Box<dyn std::error::Error>> {
     let input = input.trim();
-    let (next_state, msg, done) = {
+    let mut room_append: Option<(String, String, String)> = None;
+    let (next_state, mut msg, done) = {
         let mut clients = broadcaster.clients.lock();
         let client = match clients.get_mut(&addr) {
             Some(c) => c,
@@ -1959,9 +1960,10 @@ async fn handle_pending_change_password(
                         if let Some((z, r)) = set_position {
                             let mut w = get_world_state().write().unwrap();
                             if w.room_cache.get_room(&z, &r).is_ok() {
-                                let pname = body.get_name();
+                                let pname = body.get_name().to_string();
                                 w.set_player_position(&pname, PlayerPosition::new(z.clone(), r.clone()));
                                 w.spawn_mobs_for_room(&z, &r);
+                                room_append = Some((z, r, pname));
                             } else {
                                 out.push_str("\r\n어느곳으로도 위치이동 할 수 없습니다.");
                             }
@@ -2054,6 +2056,13 @@ async fn handle_pending_change_password(
             }
         }
     };
+    if let Some((z, r, pname)) = room_append {
+        let others = get_other_players_desc_in_room(broadcaster.as_ref(), &z, &r, &pname);
+        if let Ok(room_str) = build_room_lines(&pname, &others) {
+            msg.push_str("\r\n");
+            msg.push_str(&room_str);
+        }
+    }
     if let Some(s) = next_state {
         let mut clients = broadcaster.clients.lock();
         if let Some(c) = clients.get_mut(&addr) {
@@ -2149,6 +2158,7 @@ async fn handle_game_command(
     let mut tell_pending: Option<(String, String, String)> = None; // (target, message, sender_name)
     let mut set_pending: Option<PendingInput> = None;
     let mut skip_normal_prompt = false;
+    let mut room_append: Option<(String, String, String)> = None;
     {
         let mut clients = broadcaster.clients.lock();
         let world = get_world_state().read().unwrap();
@@ -2234,13 +2244,20 @@ async fn handle_game_command(
                         emotion_target,
                     ))
                 } else {
-                    // [인수] [명령] 한글 어순: 마지막 단어가 미등록이면 첫 단어를 명령으로 시도 (예: 기연삭제 x, 값설정 a b)
-                    let (cmd_lookup, args): (Option<&crate::command::registry::CommandInfo>, Vec<&str>) = {
-                        if let Some(c) = command_registry.get(parsed.command.as_str()) {
-                            (Some(c), parsed.tokens.iter().map(|s| s.as_str()).collect())
-                        } else {
-                            let w: Vec<&str> = parsed.raw.split_whitespace().collect();
-                            if w.len() >= 2 {
+                    // [대상] [명령] [인자]: 2단어 이상이면 몹 이벤트를 명령 조회보다 먼저 시도 (예: "왕 대" → 대화, "대"가 말 별칭이어도 몹 이벤트 우선)
+                    let w: Vec<&str> = parsed.raw.split_whitespace().collect();
+                    let mob_first = (w.len() >= 2)
+                        .then(|| try_mob_event(&mut player.body, &zone, &room, &parsed.raw))
+                        .flatten();
+                    if let Some(r) = mob_first {
+                        info!("[CMD] Mob event: {} -> {:?}", parsed.raw, std::mem::discriminant(&r));
+                        Some(r)
+                    } else {
+                        // [인수] [명령] 한글 어순: 마지막 단어가 미등록이면 첫 단어를 명령으로 시도 (예: 기연삭제 x, 값설정 a b)
+                        let (cmd_lookup, args): (Option<&crate::command::registry::CommandInfo>, Vec<&str>) = {
+                            if let Some(c) = command_registry.get(parsed.command.as_str()) {
+                                (Some(c), parsed.tokens.iter().map(|s| s.as_str()).collect())
+                            } else if w.len() >= 2 {
                                 if let Some(c) = command_registry.get(w[0]) {
                                     (Some(c), w[1..].to_vec())
                                 } else {
@@ -2249,19 +2266,18 @@ async fn handle_game_command(
                             } else {
                                 (None, vec![])
                             }
+                        };
+                        if let Some(cmd) = cmd_lookup {
+                            info!("[CMD] Executing: {}", cmd.name);
+                            Some((cmd.handler)(&mut player.body, &args))
+                        } else if let Some(r) = try_mob_event(&mut player.body, &zone, &room, &parsed.raw) {
+                            info!("[CMD] Mob event: {} -> {:?}", parsed.raw, std::mem::discriminant(&r));
+                            Some(r)
+                        } else {
+                            info!("[CMD] Command not found, trying as exit name: {}", parsed.command);
+                            try_move_by_exit_name(&mut player.body, &parsed.command)
                         }
-                    };
-                    let result = if let Some(cmd) = cmd_lookup {
-                        info!("[CMD] Executing: {}", cmd.name);
-                        Some((cmd.handler)(&mut player.body, &args))
-                    } else if let Some(r) = try_mob_event(&mut player.body, &zone, &room, &parsed.raw) {
-                        info!("[CMD] Mob event: {} -> {:?}", parsed.raw, std::mem::discriminant(&r));
-                        Some(r)
-                    } else {
-                        info!("[CMD] Command not found, trying as exit name: {}", parsed.command);
-                        try_move_by_exit_name(&mut player.body, &parsed.command)
-                    };
-                    result
+                    }
                 };
 
                 response = match result {
@@ -2354,6 +2370,7 @@ async fn handle_game_command(
                             if w.room_cache.get_room(&z, &r).is_ok() {
                                 w.set_player_position(&player_name, PlayerPosition::new(z.clone(), r.clone()));
                                 w.spawn_mobs_for_room(&z, &r);
+                                room_append = Some((z, r, player_name.clone()));
                             } else {
                                 out.push_str("\r\n어느곳으로도 위치이동 할 수 없습니다.");
                             }
@@ -2379,6 +2396,7 @@ async fn handle_game_command(
                             if w.room_cache.get_room(&z, &r).is_ok() {
                                 w.set_player_position(&player_name, PlayerPosition::new(z.clone(), r.clone()));
                                 w.spawn_mobs_for_room(&z, &r);
+                                room_append = Some((z, r, player_name.clone()));
                             } else {
                                 out.push_str("\r\n어느곳으로도 위치이동 할 수 없습니다.");
                             }
@@ -2444,6 +2462,14 @@ async fn handle_game_command(
                     }
                 };
             }
+        }
+    }
+
+    if let Some((z, r, pname)) = room_append {
+        let others = get_other_players_desc_in_room(broadcaster.as_ref(), &z, &r, &pname);
+        if let Ok(room_str) = build_room_lines(&pname, &others) {
+            response.push_str("\r\n");
+            response.push_str(&room_str);
         }
     }
 

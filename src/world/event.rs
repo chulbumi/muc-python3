@@ -7,6 +7,7 @@ use std::collections::HashMap;
 use std::path::Path;
 use std::sync::{Arc, Mutex};
 
+use log::info;
 use rhai::{Dynamic, Engine, EvalAltResult, Map, Position, Scope};
 
 use crate::command::CommandResult;
@@ -17,7 +18,7 @@ use crate::script::{
     format_event_string, load_script_file, object_from_item_json, parse_event_string,
     save_body_to_json,
 };
-use crate::world::{get_world_state, EventScript, RawMobData};
+use crate::world::{get_world_state, EventScript, MobInstance, RawMobData};
 
 /// getNextWords: 첫 토큰 제외한 나머지. "이벤트 $대화 $대" -> "$대화 $대"
 fn get_next_words(key: &str) -> String {
@@ -52,14 +53,15 @@ fn parse_int(s: &str) -> i64 {
 }
 
 /// 몹 이벤트 키 목록에서 words(사용자 입력 토큰)와 매칭되는 키를 찾습니다.
-/// 파이썬 mob.checkEvent(words)와 동일 로직.
+/// last가 cmd_list에 있고, issue_list가 있으면 prev도 일치해야 함.
+/// 여러 키가 매칭되면, (cmd_list+issue_list) 중 words에 등장하는 수가 가장 많은 쪽(가장 구체적)을 반환.
 pub fn check_event_key(data: &RawMobData, words: &[&str]) -> Option<String> {
     if words.is_empty() {
         return None;
     }
     let last = words[words.len() - 1];
 
-    let mut noissue: Option<String> = None;
+    let mut best: Option<(String, usize)> = None;
 
     for key in data.events.keys() {
         if !key.starts_with("이벤트") {
@@ -82,20 +84,24 @@ pub fn check_event_key(data: &RawMobData, words: &[&str]) -> Option<String> {
             continue;
         }
 
-        if issue_list.is_empty() {
-            noissue = Some(key.clone());
-        }
-        if !issue_list.is_empty() && words.len() > 2 {
-            let prev = words[words.len() - 2];
-            if issue_list.contains(&prev) {
-                return Some(key.clone());
+        if !issue_list.is_empty() {
+            if words.len() <= 2 {
+                continue;
             }
-        } else if !issue_list.is_empty() && words.len() == 2 {
-            continue;
+            let prev = words[words.len() - 2];
+            if !issue_list.contains(&prev) {
+                continue;
+            }
+        }
+
+        let all: Vec<&str> = cmd_list.iter().chain(issue_list.iter()).copied().collect();
+        let score = all.iter().filter(|k| words.contains(&k)).count();
+        if best.as_ref().map_or(true, |(_, s)| *s < score) {
+            best = Some((key.clone(), score));
         }
     }
 
-    noissue
+    best.map(|(k, _)| k)
 }
 
 /// 플레이어의 이벤트설정리스트에 키가 있는지. 파이썬 checkEvent(e).
@@ -407,11 +413,9 @@ pub fn do_event_rhai(
 
     let mut engine = Engine::new();
 
-    // end_event()는 Rhai에서 throw로 종료. 프리앰블에 정의.
+    // end_event()는 Rhai에서 throw로 종료. 사용자 스크립트와 같은 컴파일 단위에 넣어야 call_fn 시 노출됨.
     const END_EVENT_PREAMBLE: &str = r#"fn end_event() { throw #{ type: "event_complete" }; }"#;
-    if engine.run(END_EVENT_PREAMBLE).is_err() {
-        return CommandResult::Output("(이벤트 엔진 초기화 실패)".to_string());
-    }
+    let src_with_preamble = format!("{}\n\n{}", END_EVENT_PREAMBLE, src);
 
     engine.register_fn("output", move |msg: &str| {
         let line = event_substitute(msg, &player_name_out);
@@ -517,7 +521,7 @@ pub fn do_event_rhai(
         )))
     });
 
-    let ast = match engine.compile(&src) {
+    let ast = match engine.compile(&src_with_preamble) {
         Ok(a) => a,
         Err(e) => return CommandResult::Output(format!("(이벤트 스크립트 컴파일 오류: {})", e)),
     };
@@ -533,7 +537,11 @@ pub fn do_event_rhai(
             set_position: out_set_position,
         },
         Err(e) => {
-            let err = &*e;
+            // end_event()의 throw는 ErrorInFunctionCall로 감싸져 올 수 있음. 안쪽 ErrorRuntime까지 풀어서 확인.
+            let mut err: &EvalAltResult = &*e;
+            while let EvalAltResult::ErrorInFunctionCall(_, _, inner, _) = err {
+                err = inner.as_ref();
+            }
             if let EvalAltResult::ErrorRuntime(d, _) = err {
                 if let Some(m) = d.clone().try_cast::<Map>() {
                     let t: String = m
@@ -582,7 +590,8 @@ pub fn do_event_rhai(
 }
 
 /// [대상] [명령] [인자] 로 해석되어, 같은 방 NPC 이벤트와 매칭되면 do_event 실행 후 Some(CommandResult).
-/// 그렇지 않으면 None.
+/// 대상은 정확히 일치하거나, 이름/반응이름의 접두사면 매칭(예: "왕", "왕대" → "왕대협").
+/// 여럿 매칭 시 이름이 가장 긴 것(가장 구체적)을 우선.
 pub fn try_mob_event(
     body: &mut Body,
     zone: &str,
@@ -597,16 +606,34 @@ pub fn try_mob_event(
     let world = get_world_state().read().ok()?;
     let name = words[0].as_str();
 
+    let mut candidates: Vec<(&MobInstance, &RawMobData)> = Vec::new();
     for inst in world.mob_cache.get_mobs_in_room(zone, room) {
-        let data = world.mob_cache.get_instance_data(inst)?;
-        let ok = inst.name == name || data.reaction_names.iter().any(|n| n == name);
-        if !ok {
-            continue;
+        let data = match world.mob_cache.get_instance_data(inst) {
+            Some(d) => d,
+            None => continue,
+        };
+        let ok = inst.name == name
+            || inst.name.starts_with(name)
+            || data.reaction_names.iter().any(|n| *n == name || n.starts_with(name));
+        if ok {
+            candidates.push((inst, data));
         }
+    }
+    candidates.sort_by_key(|(inst, _)| std::cmp::Reverse(inst.name.len()));
 
-        let words_ref: Vec<&str> = words.iter().map(|s| s.as_str()).collect();
-        let event_key = check_event_key(data, &words_ref)?;
-
+    let words_ref: Vec<&str> = words.iter().map(|s| s.as_str()).collect();
+    if candidates.is_empty() {
+        info!("[try_mob_event] no candidates words={:?} zone={} room={}", words_ref, zone, room);
+    }
+    for (inst, data) in candidates {
+        let event_key = match check_event_key(data, &words_ref) {
+            Some(k) => k,
+            None => {
+                let ev: Vec<&str> = data.events.keys().filter(|k| k.starts_with("이벤트")).map(String::as_str).collect();
+                info!("[try_mob_event] check_event_key=None words={:?} mob_key={} ev_keys={:?}", words_ref, inst.mob_key, ev);
+                return None;
+            }
+        };
         return Some(do_event(
             body,
             data,
@@ -1021,4 +1048,26 @@ pub fn try_mob_event_resume(
         Some(line_num),
         resume_func,
     ))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::check_event_key;
+    use crate::world::{EventScript, RawMobData};
+
+    #[test]
+    fn test_check_event_key_picks_편지_over_대화_for_왕대협_편지_대화() {
+        let mut data = RawMobData::new();
+        data.events.insert(
+            "이벤트 $대화 $대".to_string(),
+            EventScript::Rhai("83_대화_대.rhai".to_string()),
+        );
+        data.events.insert(
+            "이벤트: $대화 $대 편지".to_string(),
+            EventScript::Rhai("83_편지.rhai".to_string()),
+        );
+        let words = ["왕대협", "편지", "대화"];
+        let got = check_event_key(&data, &words);
+        assert_eq!(got.as_deref(), Some("이벤트: $대화 $대 편지"));
+    }
 }
