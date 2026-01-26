@@ -13,4 +13,5 @@ pkill -f murim_server 2>/dev/null || true
 sleep 1
 
 echo "=== cargo run --bin murim_server ==="
-exec cargo run --bin murim_server
+# 포트: ./run_murim.sh 9990 또는 MUD_PORT=9990 ./run_murim.sh
+exec cargo run --bin murim_server -- "$@"
