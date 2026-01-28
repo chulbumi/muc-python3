@@ -1,9 +1,13 @@
-// 반납.rhai - 반납 명령어
+// 반납.rhai - 대여 아이템 반납
 // Python: cmds/반납.py
 
 fn cmd(ob, line) {
-
-    send_line(ob, "☞ 이 기능은 현재 지원되지 않습니다.");
+    if line == "" || is_empty(line) {
+        send_line(ob, "☞ 명령: 반납 [아이템이름]");
+        return;
+    }
+    send_line(ob, "☞ 대여 아이템 반납 기능은 현재 구현 중입니다.");
+    send_line(ob, "   (아이템: '" + line + "')");
 }
 
 fn main(ob, line) {

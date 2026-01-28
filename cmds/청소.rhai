@@ -1,12 +1,13 @@
-// 청소.rhai - 청소. Python: cmds/청소.py
-// gc.collect. 관리자 1000 (원래 2000, 코드에 1000).
+// 청소.rhai - 메모리 청소 (관리자)
+// Python: cmds/청소.py
 
 fn cmd(ob, line) {
-    if require_admin(ob, 1000) {
-        send_line(ob, "☞ 이 기능은 현재 지원되지 않습니다.");
-    } else {
-        send_line(ob, "☞ 관리자만 사용할 수 있어요.");
+    let admin_level = get_int(ob, "관리자등급");
+    if admin_level < 1000 {
+        send_line(ob, "☞ 무슨 말인지 모르겠어요. *^^*");
+        return;
     }
+    send_line(ob, "☞ 메모리 청소 기능은 현재 구현 중입니다.");
 }
 
 fn main(ob, line) {

@@ -1,9 +1,13 @@
-// 자동무공삭제.rhai - 자동무공삭제 명령어
+// 자동무공삭제.rhai - 자동 무공 삭제
 // Python: cmds/자동무공삭제.py
 
 fn cmd(ob, line) {
-
-    send_line(ob, "☞ 이 기능은 현재 지원되지 않습니다.");
+    if line == "" || is_empty(line) {
+        send_line(ob, "☞ 운영자 명령: 자동무공삭제 [무공이름]");
+        return;
+    }
+    send_line(ob, "☞ 자동 무공 삭제 기능은 현재 구현 중입니다.");
+    send_line(ob, "   (자동 무공 목록에서 '" + line + "' 삭제)");
 }
 
 fn main(ob, line) {

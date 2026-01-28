@@ -428,6 +428,15 @@ pub fn save_body_to_json(body: &mut Body, path: &str) -> bool {
         }
     }
 
+    // 대화 기록 저장
+    if !body.talk_history.is_empty() {
+        let talk_arr: Vec<serde_json::Value> = body.talk_history
+            .iter()
+            .map(|s| serde_json::Value::String(s.clone()))
+            .collect();
+        root.insert("대화기록".to_string(), serde_json::Value::Array(talk_arr));
+    }
+
     let j = serde_json::Value::Object(root);
     match std::fs::write(path, serde_json::to_string_pretty(&j).unwrap_or_default()) {
         Ok(_) => true,
@@ -533,6 +542,16 @@ pub fn load_body_from_json(body: &mut Body, path: &str) -> bool {
                     내용: obj.get("내용").and_then(|x| x.as_str()).unwrap_or("").to_string(),
                 };
                 body.memos.insert(k.clone(), record);
+            }
+        }
+    }
+
+    // 대화 기록 로드
+    body.talk_history.clear();
+    if let Some(arr) = root.get("대화기록").and_then(|v| v.as_array()) {
+        for v in arr {
+            if let Some(s) = v.as_str() {
+                body.talk_history.push(s.to_string());
             }
         }
     }
@@ -3403,6 +3422,930 @@ pub fn create_engine_with_body_and_output(
             s3.remove_call_out_by_name(target, function)
         });
     }
+
+    // ============================================================
+    // TALK HISTORY FUNCTIONS (대화 기록)
+    // ============================================================
+
+    // get_talk_history(ob) -> 배열
+    // NPC와의 대화 기록을 가져옵니다.
+    engine.register_fn("get_talk_history", move |_obj: &mut rhai::Map| -> rhai::Array {
+        let body = unsafe { &mut *body_ptr };
+        let arr: rhai::Array = body.talk_history.iter()
+            .map(|s| rhai::Dynamic::from(s.as_str()))
+            .collect();
+        arr
+    });
+
+    // add_talk_history(ob, key) - 대화 기록 추가
+    engine.register_fn("add_talk_history", move |_obj: &mut rhai::Map, key: &str| {
+        let body = unsafe { &mut *body_ptr };
+        if !body.talk_history.contains(&key.to_string()) {
+            body.talk_history.push(key.to_string());
+        }
+    });
+
+    // clear_talk_history(ob) - 대화 기록 초기화
+    engine.register_fn("clear_talk_history", move |_obj: &mut rhai::Map| {
+        let body = unsafe { &mut *body_ptr };
+        body.talk_history.clear();
+    });
+
+    // ============================================================
+    // BOX / STORAGE FUNCTIONS (보관함)
+    // ============================================================
+
+    // is_box(obj) -> bool - 오브젝트가 보관함인지 확인
+    // obj는 방에서 찾은 오브젝트의 Map 형태
+    engine.register_fn("is_box", move |obj: &mut rhai::Map| -> bool {
+        let obj_type = obj.get("종류");
+        if let Some(t) = obj_type {
+            if let Some(type_str) = t.clone().into_string().ok() {
+                return type_str == "보관함" || type_str == "상자" || type_str == "가방";
+            }
+        }
+        false
+    });
+
+    // find_box_in_room(ob) -> String - 방에서 보관함 찾기 (이름 반환)
+    engine.register_fn("find_box_in_room", move |_obj: &mut rhai::Map| -> String {
+        let body = unsafe { &mut *body_ptr };
+        let (zone, room) = if let Ok(w) = crate::world::get_world_state().try_read() {
+            if let Some(pos) = w.get_player_position(body.get_name().as_str()) {
+                (pos.zone.clone(), pos.room.clone())
+            } else {
+                return String::new();
+            }
+        } else {
+            return String::new();
+        };
+
+        if let Ok(w) = crate::world::get_world_state().try_read() {
+            let room_objs = w.get_room_objs(&zone, &room);
+            for arc in &room_objs {
+                if let Ok(item) = arc.lock() {
+                    let item_type = item.getString("종류");
+                    if item_type == "보관함" || item_type == "상자" || item_type == "가방" {
+                        return item.getName();
+                    }
+                }
+            }
+        }
+        String::new()
+    });
+
+    // get_box_capacity(box_obj) -> int - 보관함 용량 가져오기
+    engine.register_fn("get_box_capacity", move |box_obj: &mut rhai::Map| -> i64 {
+        let capacity = box_obj.get("보관용량");
+        if let Some(c) = capacity {
+            if let Ok(n) = c.clone().as_int() {
+                return n;
+            }
+        }
+        0
+    });
+
+    // box_deposit_money(ob, box_name, amount) -> bool - 보관함에 돈 입금
+    engine.register_fn("box_deposit_money", move |_ob: &mut rhai::Map, box_name: &str, amount: i64| -> bool {
+        if amount <= 0 || box_name.is_empty() {
+            return false;
+        }
+
+        let body = unsafe { &mut *body_ptr };
+
+        let player_money = body.get_int("은전");
+        if player_money < amount {
+            return false;
+        }
+
+        // 보관함 돈 추가 - 방에서 오브젝트 찾아서 수정
+        let (zone, room) = if let Ok(w) = crate::world::get_world_state().try_read() {
+            if let Some(pos) = w.get_player_position(body.get_name().as_str()) {
+                (pos.zone.clone(), pos.room.clone())
+            } else {
+                return false;
+            }
+        } else {
+            return false;
+        };
+
+        let mut found = false;
+        if let Ok(w) = crate::world::get_world_state().try_read() {
+            let room_objs = w.get_room_objs(&zone, &room);
+            for arc in &room_objs {
+                if let Ok(item) = arc.lock() {
+                    let item_name = item.getName();
+                    if item_name == box_name {
+                        drop(item);
+                        if let Ok(mut box_lock) = arc.lock() {
+                            let current_money = box_lock.getInt("은전");
+                            box_lock.set("은전", crate::object::Value::Int(current_money + amount));
+                        }
+                        found = true;
+                        break;
+                    }
+                }
+            }
+        }
+
+        if !found {
+            return false;
+        }
+
+        // 플레이어 돈 차감
+        body.set("은전", player_money - amount);
+
+        true
+    });
+
+    // box_withdraw_money(ob, box_name, amount) -> bool - 보관함에서 돈 출금
+    engine.register_fn("box_withdraw_money", move |_ob: &mut rhai::Map, box_name: &str, amount: i64| -> bool {
+        if amount <= 0 || box_name.is_empty() {
+            return false;
+        }
+
+        let body = unsafe { &mut *body_ptr };
+
+        // 보관함 돈 확인
+        let (zone, room) = if let Ok(w) = crate::world::get_world_state().try_read() {
+            if let Some(pos) = w.get_player_position(body.get_name().as_str()) {
+                (pos.zone.clone(), pos.room.clone())
+            } else {
+                return false;
+            }
+        } else {
+            return false;
+        };
+
+        let mut box_money = 0i64;
+        let mut found_arc: Option<std::sync::Arc<std::sync::Mutex<crate::object::Object>>> = None;
+
+        if let Ok(w) = crate::world::get_world_state().try_read() {
+            let room_objs = w.get_room_objs(&zone, &room);
+            for arc in &room_objs {
+                if let Ok(item) = arc.lock() {
+                    let item_name = item.getName();
+                    if item_name == box_name {
+                        box_money = item.getInt("은전");
+                        found_arc = Some(arc.clone());
+                        break;
+                    }
+                }
+            }
+        }
+
+        if found_arc.is_none() {
+            return false;
+        }
+
+        if box_money < amount {
+            return false;
+        }
+
+        // 보관함 돈 차감
+        if let Some(arc) = found_arc {
+            if let Ok(mut box_lock) = arc.lock() {
+                let new_money = box_money - amount;
+                box_lock.set("은전", crate::object::Value::Int(new_money));
+            }
+        }
+
+        // 플레이어 돈 추가
+        let player_money = body.get_int("은전");
+        body.set("은전", player_money + amount);
+
+        true
+    });
+
+    // get_box_money(box_obj) -> int - 보관함의 돈 확인
+    engine.register_fn("get_box_money", move |box_obj: &mut rhai::Map| -> i64 {
+        let money = box_obj.get("은전");
+        if let Some(m) = money {
+            if let Ok(n) = m.clone().as_int() {
+                return n;
+            }
+        }
+        0
+    });
+
+    // ============================================================
+    // 몹/오브젝트 관련 efun (스크립트용)
+    // ============================================================
+
+    // find_mob_in_room(ob, mob_name) - 현재 방에서 몹 찾기
+    // 몹이 있으면 몹 데이터를 반환, 없으면 UNIT
+    let body_ptr_mob = body_ptr;
+    engine.register_fn("find_mob_in_room", move |_ob: &mut rhai::Map, mob_name: &str| -> Dynamic {
+        let _body = unsafe { &*body_ptr_mob };
+        // TODO: 현재 방의 몹 목록에서 mob_name 찾기
+        // 현재는 스텁: 몹 이름을 포함한 Map 반환
+        let mut mob_data = rhai::Map::new();
+        mob_data.insert("이름".into(), Dynamic::from(mob_name.to_string()));
+        mob_data.insert("표시".into(), Dynamic::from(mob_name.to_string()));
+        Dynamic::from(mob_data)
+    });
+
+    // get_mob_by_name(ob, mob_name) - 데이터베이스에서 몹 정보 조회
+    // 몹 데이터베이스(Mobs)에서 몹 정보를 가져옴
+    let body_ptr_get_mob = body_ptr;
+    engine.register_fn("get_mob_by_name", move |_ob: &mut rhai::Map, mob_name: &str| -> Dynamic {
+        let _body = unsafe { &*body_ptr_get_mob };
+        // 기존 get_mob_data 함수와 동일하게 동작
+        let full_path = format!("data/mob/{}.json", mob_name);
+        match std::fs::read_to_string(&full_path) {
+            Ok(content) => {
+                match serde_json::from_str::<serde_json::Value>(&content) {
+                    Ok(value) => {
+                        if let Some(obj) = value.get("몹정보") {
+                            json_value_to_dynamic(obj.clone())
+                        } else {
+                            Dynamic::UNIT
+                        }
+                    }
+                    Err(_) => Dynamic::UNIT,
+                }
+            }
+            Err(_) => Dynamic::UNIT,
+        }
+    });
+
+    // kill_mob(ob, mob_name) - 몹 처치
+    let body_ptr_kill = body_ptr;
+    engine.register_fn("kill_mob", move |_ob: &mut rhai::Map, mob_name: &str| -> bool {
+        let _body = unsafe { &*body_ptr_kill };
+        // TODO: 몹 찾아서 처치 로직 구현 필요
+        // 현재는 로그만 출력하고 true 반환
+        println!("[SCRIPT] kill_mob called for: {}", mob_name);
+        true
+    });
+
+    // create_mob(ob, mob_name, zone, room) - 새 몹 생성
+    let body_ptr_create = body_ptr;
+    engine.register_fn("create_mob", move |_ob: &mut rhai::Map, mob_name: &str, zone: &str, room: &str| -> String {
+        let _body = unsafe { &*body_ptr_create };
+        // TODO: 실제 몹 생성 로직 구현 필요
+        // 몹 데이터 파일 확인
+        let full_path = format!("data/mob/{}.json", mob_name);
+        match std::fs::read_to_string(&full_path) {
+            Ok(_) => {
+                println!("[SCRIPT] create_mob: {} at {}:{}", mob_name, zone, room);
+                String::new() // 성공 시 빈 문자열 반환
+            }
+            Err(_) => {
+                format!("몹 데이터를 찾을 수 없습니다: {}", mob_name)
+            }
+        }
+    });
+
+    // mob_say(mob_name, message) - 몹이 말하기
+    let body_ptr_say = body_ptr;
+    engine.register_fn("mob_say", move |_mob_name: &str, _message: &str| -> bool {
+        let _body = unsafe { &*body_ptr_say };
+        // TODO: 실제 mob_say 로직 구현 필요
+        // 현재는 로그만 출력하고 true 반환
+        println!("[SCRIPT] mob_say: {} says '{}'", _mob_name, _message);
+        true
+    });
+
+    // mob_follow(mob_name, target_name) - 몹이 대상 따라가기
+    let body_ptr_follow = body_ptr;
+    engine.register_fn("mob_follow", move |_mob_name: &str, _target_name: &str| -> bool {
+        let _body = unsafe { &*body_ptr_follow };
+        // TODO: 실제 mob_follow 로직 구현 필요
+        // 현재는 로그만 출력하고 true 반환
+        println!("[SCRIPT] mob_follow: {} following {}", _mob_name, _target_name);
+        true
+    });
+
+    // get_mob_hp(ob, mob_name) - 몹의 현재 HP 조회
+    let body_ptr_get_hp = body_ptr;
+    engine.register_fn("get_mob_hp", move |_ob: &mut rhai::Map, mob_name: &str| -> i64 {
+        let _body = unsafe { &*body_ptr_get_hp };
+        // TODO: 실제 몹 HP 조회 로직 구현 필요
+        // 현재는 몹 데이터 파일에서 HP 읽기
+        let full_path = format!("data/mob/{}.json", mob_name);
+        match std::fs::read_to_string(&full_path) {
+            Ok(content) => {
+                match serde_json::from_str::<serde_json::Value>(&content) {
+                    Ok(value) => {
+                        if let Some(mob_info) = value.get("몹정보") {
+                            if let Some(hp) = mob_info.get("hp") {
+                                if let Some(n) = hp.as_i64() {
+                                    return n;
+                                }
+                            }
+                        }
+                        100 // 기본값
+                    }
+                    Err(_) => 100,
+                }
+            }
+            Err(_) => 100,
+        }
+    });
+
+    // set_mob_hp(ob, mob_name, hp) - 몹의 HP 설정
+    let body_ptr_set_hp = body_ptr;
+    engine.register_fn("set_mob_hp", move |_ob: &mut rhai::Map, mob_name: &str, hp: i64| -> bool {
+        let _body = unsafe { &*body_ptr_set_hp };
+        // TODO: 실제 몹 HP 설정 로직 구현 필요
+        // 현재는 로그만 출력하고 true 반환
+        println!("[SCRIPT] set_mob_hp: {} HP set to {}", mob_name, hp);
+        true
+    });
+
+    // ============================================================
+    // Room/Zone 관련 efun
+    // ============================================================
+
+    // get_room(ob, zone:room_id) - 특정 zone:room의 방 데이터 조회
+    let body_ptr_get_room = body_ptr;
+    engine.register_fn("get_room", move |_ob: &mut rhai::Map, zone: &str, room_id: &str| -> Dynamic {
+        let _body = unsafe { &*body_ptr_get_room };
+        let w = match get_world_state().read() {
+            Ok(g) => g,
+            Err(_) => return Dynamic::UNIT,
+        };
+        let room_key = format!("{}:{}", zone, room_id);
+        if let Some(arc) = w.room_cache.get_room_cached(zone, room_id) {
+            if let Ok(room_ref) = arc.read() {
+                let mut m = rhai::Map::new();
+                m.insert("zone".into(), Dynamic::from(room_ref.zone.clone()));
+                m.insert("room".into(), Dynamic::from(room_ref.name.clone()));
+                m.insert("name".into(), Dynamic::from(room_ref.display_name.clone()));
+                m.insert("desc".into(), Dynamic::from(room_ref.description.join("\n")));
+                // 출구 배열: [{direction, display_name, destination_zone, destination_room}, ...]
+                let mut exits_arr = rhai::Array::new();
+                for (display_name, exit) in &room_ref.exits {
+                    let mut exit_map = rhai::Map::new();
+                    exit_map.insert("display_name".into(), Dynamic::from(display_name.clone()));
+                    if let Some(dir) = &exit.direction {
+                        exit_map.insert("direction".into(), Dynamic::from(dir.korean_name()));
+                    } else {
+                        exit_map.insert("direction".into(), Dynamic::from(""));
+                    }
+                    if let Some((dest_zone, dest_room)) = &exit.destination {
+                        exit_map.insert("destination_zone".into(), Dynamic::from(dest_zone.clone()));
+                        exit_map.insert("destination_room".into(), Dynamic::from(dest_room.clone()));
+                    }
+                    exit_map.insert("hidden".into(), Dynamic::from(exit.hidden));
+                    exits_arr.push(Dynamic::from(exit_map));
+                }
+                m.insert("exits".into(), Dynamic::from(exits_arr));
+                // 맵속성 배열
+                let mut props_arr = rhai::Array::new();
+                for prop in &room_ref.properties {
+                    props_arr.push(Dynamic::from(prop.clone()));
+                }
+                m.insert("properties".into(), Dynamic::from(props_arr));
+                return Dynamic::from(m);
+            }
+        }
+        Dynamic::UNIT
+    });
+
+    // get_current_room(ob) - 현재 플레이어의 방 데이터 조회
+    let body_ptr_cur_room = body_ptr;
+    engine.register_fn("get_current_room", move |_ob: &mut rhai::Map| -> Dynamic {
+        let body = unsafe { &*body_ptr_cur_room };
+        let name = body.get_name();
+        let w = match get_world_state().read() {
+            Ok(g) => g,
+            Err(_) => return Dynamic::UNIT,
+        };
+        let pos = match w.get_player_position(&name) {
+            Some(p) => p,
+            None => return Dynamic::UNIT,
+        };
+        if let Some(arc) = w.room_cache.get_room_cached(&pos.zone, &pos.room) {
+            if let Ok(room_ref) = arc.read() {
+                let mut m = rhai::Map::new();
+                m.insert("zone".into(), Dynamic::from(room_ref.zone.clone()));
+                m.insert("room".into(), Dynamic::from(room_ref.name.clone()));
+                m.insert("name".into(), Dynamic::from(room_ref.display_name.clone()));
+                m.insert("desc".into(), Dynamic::from(room_ref.description.join("\n")));
+                // 출구 배열
+                let mut exits_arr = rhai::Array::new();
+                for (display_name, exit) in &room_ref.exits {
+                    let mut exit_map = rhai::Map::new();
+                    exit_map.insert("display_name".into(), Dynamic::from(display_name.clone()));
+                    if let Some(dir) = &exit.direction {
+                        exit_map.insert("direction".into(), Dynamic::from(dir.korean_name()));
+                    } else {
+                        exit_map.insert("direction".into(), Dynamic::from(""));
+                    }
+                    if let Some((dest_zone, dest_room)) = &exit.destination {
+                        exit_map.insert("destination_zone".into(), Dynamic::from(dest_zone.clone()));
+                        exit_map.insert("destination_room".into(), Dynamic::from(dest_room.clone()));
+                    }
+                    exit_map.insert("hidden".into(), Dynamic::from(exit.hidden));
+                    exits_arr.push(Dynamic::from(exit_map));
+                }
+                m.insert("exits".into(), Dynamic::from(exits_arr));
+                return Dynamic::from(m);
+            }
+        }
+        Dynamic::UNIT
+    });
+
+    // find_obj_in_room(ob, obj_name) - 현재 방에서 아이템으로 이름 찾기
+    let body_ptr_find_obj = body_ptr;
+    engine.register_fn("find_obj_in_room", move |_ob: &mut rhai::Map, obj_name: &str| -> Dynamic {
+        let body = unsafe { &*body_ptr_find_obj };
+        let name = body.get_name();
+        let w = match get_world_state().read() {
+            Ok(g) => g,
+            Err(_) => return Dynamic::UNIT,
+        };
+        let pos = match w.get_player_position(&name) {
+            Some(p) => p,
+            None => return Dynamic::UNIT,
+        };
+        // 바닥 아이템 검색
+        let room_objs = w.get_room_objs(&pos.zone, &pos.room);
+        for arc in room_objs {
+            if let Ok(o) = arc.lock() {
+                let item_name = o.getName();
+                // 정확히 일치하거나 접두사 일치
+                if item_name == obj_name || item_name.starts_with(obj_name) {
+                    let mut m = rhai::Map::new();
+                    m.insert("name".into(), Dynamic::from(item_name));
+                    m.insert("name_a".into(), Dynamic::from(o.getNameA()));
+                    m.insert("desc1".into(), Dynamic::from(o.getString("설명1")));
+                    m.insert("count".into(), Dynamic::from(1i64));
+                    return Dynamic::from(m);
+                }
+            }
+        }
+        // 쌓을 수 있는 아이템 검색
+        let room_stack = w.get_room_objs_stack(&pos.zone, &pos.room);
+        for (key, count) in room_stack {
+            if *count > 0 {
+                if let Some((item_name, _, _, _)) = crate::data::item::get_item_info(&key) {
+                    if item_name == obj_name || item_name.starts_with(obj_name) {
+                        let mut m = rhai::Map::new();
+                        m.insert("name".into(), Dynamic::from(item_name.clone()));
+                        m.insert("name_a".into(), Dynamic::from(crate::data::item::get_item_name_a(&key)));
+                        m.insert("desc1".into(), Dynamic::from(crate::data::item::get_item_desc1(&key)));
+                        m.insert("count".into(), Dynamic::from(*count));
+                        m.insert("key".into(), Dynamic::from(key));
+                        return Dynamic::from(m);
+                    }
+                }
+            }
+        }
+        Dynamic::UNIT
+    });
+
+    // get_room_exits(ob) - 현재 방의 출구 방향 배열
+    let body_ptr_exits = body_ptr;
+    engine.register_fn("get_room_exits", move |_ob: &mut rhai::Map| -> rhai::Array {
+        let body = unsafe { &*body_ptr_exits };
+        let name = body.get_name();
+        let w = match get_world_state().read() {
+            Ok(g) => g,
+            Err(_) => return rhai::Array::new(),
+        };
+        let pos = match w.get_player_position(&name) {
+            Some(p) => p,
+            None => return rhai::Array::new(),
+        };
+        let mut exits = rhai::Array::new();
+        if let Some(arc) = w.room_cache.get_room_cached(&pos.zone, &pos.room) {
+            if let Ok(room_ref) = arc.read() {
+                // 방향이 있는 출구만 (방향 이동용)
+                for exit in room_ref.exits.values() {
+                    if let Some(dir) = &exit.direction {
+                        exits.push(Dynamic::from(dir.korean_name()));
+                    }
+                }
+            }
+        }
+        exits
+    });
+
+    // get_room_players(ob) - 현재 방의 플레이어 목록 (실제 구현)
+    let body_ptr_players = body_ptr;
+    engine.register_fn("get_room_players", move |_ob: &mut rhai::Map| -> rhai::Array {
+        let body = unsafe { &*body_ptr_players };
+        let name = body.get_name();
+        let w = match get_world_state().read() {
+            Ok(g) => g,
+            Err(_) => return rhai::Array::new(),
+        };
+        let pos = match w.get_player_position(&name) {
+            Some(p) => p,
+            None => return rhai::Array::new(),
+        };
+        let players = w.get_players_in_room(&pos.zone, &pos.room);
+        let mut arr = rhai::Array::new();
+        for player_name in players {
+            arr.push(Dynamic::from(player_name));
+        }
+        arr
+    });
+
+    // get_room_mobs(ob) - 현재 방의 몹 목록 (실제 구현)
+    let body_ptr_room_mobs = body_ptr;
+    engine.register_fn("get_room_mobs", move |_ob: &mut rhai::Map| -> rhai::Array {
+        let body = unsafe { &*body_ptr_room_mobs };
+        let name = body.get_name();
+        let w = match get_world_state().read() {
+            Ok(g) => g,
+            Err(_) => return rhai::Array::new(),
+        };
+        let pos = match w.get_player_position(&name) {
+            Some(p) => p,
+            None => return rhai::Array::new(),
+        };
+        let mobs = w.mob_cache.get_mobs_in_room(&pos.zone, &pos.room);
+        let mut arr = rhai::Array::new();
+        for mob in mobs {
+            if let Some(mob_data) = w.mob_cache.get_mob(&mob.mob_key) {
+                let mut m = rhai::Map::new();
+                m.insert("name".into(), Dynamic::from(mob_data.name.clone()));
+                m.insert("desc1".into(), Dynamic::from(mob_data.desc1.clone()));
+                m.insert("alive".into(), Dynamic::from(mob.alive));
+                m.insert("hp".into(), Dynamic::from(mob.hp));
+                m.insert("max_hp".into(), Dynamic::from(mob.max_hp));
+                m.insert("mob_key".into(), Dynamic::from(mob.mob_key.clone()));
+                arr.push(Dynamic::from(m));
+            }
+        }
+        arr
+    });
+
+    // look_room(ob) - 현재 방 설명 (look 명령용)
+    let body_ptr_look = body_ptr;
+    engine.register_fn("look_room", move |_ob: &mut rhai::Map| -> String {
+        let body = unsafe { &*body_ptr_look };
+        let name = body.get_name();
+        let w = match get_world_state().read() {
+            Ok(g) => g,
+            Err(_) => return "방 정보를 가져올 수 없습니다.".to_string(),
+        };
+        let pos = match w.get_player_position(&name) {
+            Some(p) => p,
+            None => return "위치 정보가 없습니다.".to_string(),
+        };
+        if let Some(arc) = w.room_cache.get_room_cached(&pos.zone, &pos.room) {
+            if let Ok(room_ref) = arc.read() {
+                let room_name_formatted = format_room_header(&room_ref.display_name);
+                let exits_str = format_exits_long(&*room_ref);
+                let mobs = w.mob_cache.get_mobs_in_room(&pos.zone, &pos.room);
+                let mob_str = if mobs.is_empty() {
+                    String::new()
+                } else {
+                    let mut mob_msgs = Vec::new();
+                    for mob in mobs {
+                        if let Some(mob_data) = w.mob_cache.get_mob(&mob.mob_key) {
+                            if !mob_data.desc1.is_empty() {
+                                mob_msgs.push(mob_data.desc1.clone());
+                            }
+                        }
+                    }
+                    if mob_msgs.is_empty() {
+                        String::new()
+                    } else {
+                        format!("\r\n{}", mob_msgs.join("\r\n"))
+                    }
+                };
+                let room_objs = w.get_room_objs(&pos.zone, &pos.room);
+                let room_stack = w.get_room_objs_stack(&pos.zone, &pos.room);
+                let item_str = build_room_objs_grouped(&room_objs, &room_stack);
+                let mut out = String::new();
+                out.push_str("\r\n");
+                out.push_str(&room_name_formatted);
+                out.push_str("\r\n\r\n");
+                out.push_str(&room_ref.description.join("\r\n"));
+                out.push_str("\r\n\r\n");
+                out.push_str(&exits_str);
+                out.push_str("\r\n");
+                if !mob_str.is_empty() {
+                    out.push_str(&mob_str);
+                    out.push_str("\r\n");
+                }
+                if !item_str.is_empty() {
+                    out.push_str(&item_str);
+                    out.push_str("\r\n");
+                }
+                return out;
+            }
+        }
+        "방 정보를 가져올 수 없습니다.".to_string()
+    });
+
+    // move_player(ob, direction) - 플레이어 이동
+    let body_ptr_move = body_ptr;
+    engine.register_fn("move_player", move |_ob: &mut rhai::Map, direction: &str| -> String {
+        let body = unsafe { &*body_ptr_move };
+        let name = body.get_name();
+        if name.is_empty() {
+            return "플레이어 정보가 없습니다.".to_string();
+        }
+        // 방향 문자열을 Direction으로 변환
+        let dir = match crate::world::Direction::from_korean(direction) {
+            Some(d) => d,
+            None => return format!("{}쪽은 없습니다.", direction),
+        };
+        let mut w = match get_world_state().write() {
+            Ok(g) => g,
+            Err(_) => return "이동할 수 없습니다.".to_string(),
+        };
+        match w.move_player(&name, dir) {
+            Ok(_) => String::new(), // 성공 시 빈 문자열
+            Err(e) => e,
+        }
+    });
+
+    // ============================================================
+    // 플레이어 간 상호작용 efun (관리자용)
+    // ============================================================
+
+    // get_player_by_name(name) - 이름으로 플레이어 데이터 조회
+    // 다른 플레이어의 데이터를 조회할 때 사용 (관리자 기능)
+    // 현재는 제한적 구현 - 자기 자신만 가능
+    let body_ptr_get = body_ptr;
+    engine.register_fn("get_player_by_name", move |name: &str| -> Dynamic {
+        let body = unsafe { &*body_ptr_get };
+        if body.get_name() == name {
+            // 자기 자신의 데이터 반환
+            let mut m = rhai::Map::new();
+            m.insert("이름".into(), Dynamic::from(body.get_name()));
+            m.insert("레벨".into(), Dynamic::from(body.get_int("레벨")));
+            m.insert("hp".into(), Dynamic::from(body.get_hp()));
+            m.insert("max_hp".into(), Dynamic::from(body.get_max_hp()));
+            m.insert("은전".into(), Dynamic::from(body.get_int("은전")));
+            m.insert("무림별호".into(), Dynamic::from(body.get_string("무림별호")));
+            Dynamic::from(m)
+        } else {
+            // 다른 플레이어는 현재 조회 불가
+            Dynamic::UNIT
+        }
+    });
+
+    // give_silver_to_player(from_ob, to_name, amount) - 은전 전송
+    let body_ptr_give = body_ptr;
+    engine.register_fn("give_silver_to_player", move |_from_ob: &mut rhai::Map, to_name: &str, _amount: i64| -> String {
+        let body = unsafe { &*body_ptr_give };
+        if body.get_name() == to_name {
+            return "self".to_string();
+        }
+        // TODO: 다른 플레이어 찾아서 전송
+        // 현재는 "not_found" 반환
+        "not_found".to_string()
+    });
+
+    // teach_skill_to_player(teacher_ob, student_name, skill_name) - 무공 전수
+    let body_ptr_teach = body_ptr;
+    engine.register_fn("teach_skill_to_player", move |_teacher_ob: &mut rhai::Map, student_name: &str, skill_name: &str| -> String {
+        let _body = unsafe { &*body_ptr_teach };
+        // TODO: 학생 찾아서 스킬 추가
+        // 현재는 "not_found" 또는 "not_implemented" 반환
+        println!("[SCRIPT] teach_skill: {} -> {}", student_name, skill_name);
+        if _body.get_name() == student_name {
+            return "self".to_string();
+        }
+        "not_implemented".to_string()
+    });
+
+    // check_player_skill(player_name, skill_name) - 플레이어 스킬 보유 확인
+    let body_ptr_check = body_ptr;
+    engine.register_fn("check_player_skill", move |player_name: &str, skill_name: &str| -> bool {
+        let body = unsafe { &*body_ptr_check };
+        if body.get_name() == player_name {
+            // 자기 자신의 스킬만 확인 가능
+            return body.skill_list.contains(&skill_name.to_string());
+        }
+        false
+    });
+
+    // ============================================================
+    // 파티/팔로우 시스템 efun
+    // ============================================================
+
+    // add_follower(ob, leader_name) - 팔로우 시작. 성공 시 "", 실패 시 에러 문자열
+    let body_ptr_af = body_ptr;
+    engine.register_fn("add_follower", move |_ob: &mut rhai::Map, leader_name: &str| -> String {
+        let body = unsafe { &mut *body_ptr_af };
+        let my_name = body.get_name();
+
+        // 자기 자신은 팔로우 불가
+        if my_name == leader_name {
+            return "자기 자신을 팔로우할 수 없습니다.".to_string();
+        }
+
+        // 이미 팔로우 중인지 확인
+        let current_leader = body.get_string("팔로우_리더");
+        if !current_leader.is_empty() {
+            return format!("이미 {}을(를) 팔로우 중입니다.", current_leader);
+        }
+
+        // 리더 존재 확인 (접속 중인 플레이어)
+        let leader_exists = if let Ok(w) = get_world_state().try_read() {
+            w.player_positions.contains_key(leader_name)
+        } else {
+            false
+        };
+
+        if !leader_exists {
+            return "대상이 접속 중이 아닙니다.".to_string();
+        }
+
+        // 팔로우 관계 저장
+        body.set("팔로우_리더", leader_name.to_string());
+
+        "".to_string()
+    });
+
+    // remove_follower(ob) - 팔로우 중지. 성공 시 true
+    let body_ptr_rf = body_ptr;
+    engine.register_fn("remove_follower", move |_ob: &mut rhai::Map| -> bool {
+        let body = unsafe { &mut *body_ptr_rf };
+
+        let current_leader = body.get_string("팔로우_리더");
+        if current_leader.is_empty() {
+            return false;
+        }
+
+        // 팔로우 관계 제거
+        body.set("팔로우_리더", "");
+        true
+    });
+
+    // get_followers(ob) - 내 팔로워 목록 반환 (Array of names)
+    let body_ptr_gf = body_ptr;
+    engine.register_fn("get_followers", move |_ob: &mut rhai::Map| -> rhai::Array {
+        let _body = unsafe { &*body_ptr_gf };
+
+        // TODO: 전역 팔로워 맵 구현 필요
+        // 현재는 다른 플레이어의 Body 데이터에 접근할 방법이 없음
+        rhai::Array::new()
+    });
+
+    // get_leader(ob) - 내가 팔로우 중인 리더 이름 반환
+    let body_ptr_gl = body_ptr;
+    engine.register_fn("get_leader", move |_ob: &mut rhai::Map| -> String {
+        let body = unsafe { &*body_ptr_gl };
+        body.get_string("팔로우_리더")
+    });
+
+    // create_party(ob, party_name) - 파티 생성. 성공 시 "", 실패 시 에러 문자열
+    let body_ptr_cp = body_ptr;
+    engine.register_fn("create_party", move |_ob: &mut rhai::Map, party_name: &str| -> String {
+        let body = unsafe { &mut *body_ptr_cp };
+        let my_name = body.get_name();
+
+        if party_name.trim().is_empty() {
+            return "파티 이름을 입력해주세요.".to_string();
+        }
+
+        // 이미 파티에 소속되어 있는지 확인
+        let current_party = body.get_string("소속파티");
+        if !current_party.is_empty() {
+            return format!("이미 {} 파티에 소속되어 있습니다.", current_party);
+        }
+
+        // 파티 이름 생성 (플레이어명_파티명 형식으로 고유화)
+        let full_party_name = format!("{}_{}", my_name, party_name);
+
+        // 파티 소속 설정
+        body.set("소속파티", full_party_name.clone());
+        body.set("파티장", 1i64);
+        body.set("파티이름", party_name.to_string());
+
+        "".to_string()
+    });
+
+    // join_party(ob, party_name) - 파티 가입. 성공 시 "", 실패 시 에러 문자열
+    let body_ptr_jp = body_ptr;
+    engine.register_fn("join_party", move |_ob: &mut rhai::Map, party_name: &str| -> String {
+        let body = unsafe { &mut *body_ptr_jp };
+        let my_name = body.get_name();
+
+        if party_name.trim().is_empty() {
+            return "파티 이름을 입력해주세요.".to_string();
+        }
+
+        // 이미 파티에 소속되어 있는지 확인
+        let current_party = body.get_string("소속파티");
+        if !current_party.is_empty() {
+            return format!("이미 {} 파티에 소속되어 있습니다.", current_party);
+        }
+
+        // 파티장(생성자) 확인
+        // party_name 형식: "파티장명_파티명" 또는 그냥 "파티명"
+        let leader_name = if party_name.contains('_') {
+            party_name.split('_').next().unwrap_or("").to_string()
+        } else {
+            return "존재하지 않는 파티입니다.".to_string();
+        };
+
+        let leader_exists = if let Ok(w) = get_world_state().try_read() {
+            w.player_positions.contains_key(&leader_name)
+        } else {
+            false
+        };
+
+        if !leader_exists {
+            return "파티장이 접속 중이 아닙니다.".to_string();
+        }
+
+        // 파티 소속 설정
+        body.set("소속파티", party_name.to_string());
+        body.set("파티장", 0i64);
+
+        "".to_string()
+    });
+
+    // leave_party(ob) - 파티 탈퇴. 성공 시 true
+    let body_ptr_lp = body_ptr;
+    engine.register_fn("leave_party", move |_ob: &mut rhai::Map| -> bool {
+        let body = unsafe { &mut *body_ptr_lp };
+
+        let current_party = body.get_string("소속파티");
+        if current_party.is_empty() {
+            return false;
+        }
+
+        // 파티 정보 제거
+        body.set("소속파티", "");
+        body.set("파티장", 0i64);
+        body.set("파티이름", "");
+        true
+    });
+
+    // get_party_members(ob) - 파티 멤버 목록 반환 (Array of names)
+    let body_ptr_gpm = body_ptr;
+    engine.register_fn("get_party_members", move |ob: &mut rhai::Map| -> rhai::Array {
+        let body = unsafe { &*body_ptr_gpm };
+        let mut members = rhai::Array::new();
+
+        let my_party = body.get_string("소속파티");
+        if my_party.is_empty() {
+            return members;
+        }
+
+        // 일단 자기 자신 추가
+        let my_name = body.get_name();
+        members.push(Dynamic::from(my_name));
+
+        // TODO: 전역 파티 맵에서 다른 멤버 찾기
+        members
+    });
+
+    // send_party_message(ob, message) - 파티 메시지 전송. 성공 시 true
+    let spec_pm = spec.clone();
+    let body_ptr_pm = body_ptr;
+    engine.register_fn("send_party_message", move |ob: &mut rhai::Map, msg: &str| -> bool {
+        let body = unsafe { &*body_ptr_pm };
+        let my_name = body.get_name();
+        let my_party = body.get_string("소속파티");
+
+        if my_party.is_empty() || msg.trim().is_empty() {
+            return false;
+        }
+
+        // 파티 멤버 목록 수집
+        let mut member_names: Vec<String> = Vec::new();
+        if let Ok(w) = get_world_state().try_read() {
+            for (player_name, _pos) in &w.player_positions {
+                // TODO: 실제 파티 소속 여부 확인 필요
+                // 현재는 같은 파티인지 확인할 방법이 없으므로
+                // 접속 중인 모든 플레이어에게 전송 (임시)
+                member_names.push(player_name.clone());
+            }
+        }
+
+        let formatted = format!("\x1b[0;36m[파티]\x1b[0;37m {} : {}", my_name, msg);
+        if let Ok(mut s) = spec_pm.lock() {
+            *s = Some(CommandResult::BroadcastToPlayers(member_names, formatted));
+        }
+
+        true
+    });
+
+    // is_same_party(ob1_name, ob2_name) - 두 플레이어가 같은 파티인지 확인
+    let body_ptr_isp = body_ptr;
+    engine.register_fn("is_same_party", move |ob1_name: &str, ob2_name: &str| -> bool {
+        let body = unsafe { &*body_ptr_isp };
+        let my_name = body.get_name();
+
+        // 둘 다 내 이름이면 true
+        if ob1_name == my_name && ob2_name == my_name {
+            return true;
+        }
+
+        // 내 파티 확인
+        let my_party = body.get_string("소속파티");
+        if my_party.is_empty() {
+            return false;
+        }
+
+        // TODO: 다른 플레이어의 파티 확인 방법 필요
+        // 현재는 항상 false 반환
+        false
+    });
 
     engine
 }

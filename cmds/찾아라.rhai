@@ -1,9 +1,8 @@
-// 찾아라.rhai - 찾아라 명령어
+// 찾아라.rhai - 오브젝트 찾기
 // Python: cmds/찾아라.py
 
 fn cmd(ob, line) {
-
-    send_line(ob, "☞ 이 기능은 현재 지원되지 않습니다.");
+    send_line(ob, "☞ 찾기 기능은 현재 구현 중입니다.");
 }
 
 fn main(ob, line) {

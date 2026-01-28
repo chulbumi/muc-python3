@@ -1,5 +1,5 @@
-// 정렬.rhai - Python: cmds/정렬.py
-// [보관함] [특성치] → 사용법, 특성치 화이트리스트, 은전 10만 검사. findObjName/is_box/보관함.objs.sort 미지원.
+// 정렬.rhai - 보관함 아이템 정렬
+// Python: cmds/정렬.py
 
 fn cmd(ob, line) {
     if line == "" || is_empty(line) {
@@ -20,8 +20,7 @@ fn cmd(ob, line) {
         send_line(ob, "☞ 은전이 부족해요.");
         return;
     }
-    // findObjName(line)→보관함, is_box, obj.objs.sort(특성치), set_value(ob,"은전",은전-100000) (미지원)
-    send_line(ob, "☞ 이 기능은 현재 지원되지 않습니다.");
+    send_line(ob, "☞ 보관함 정렬 기능은 현재 구현 중입니다.");
 }
 
 fn main(ob, line) {

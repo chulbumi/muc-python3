@@ -1,9 +1,8 @@
-// ${cmd}.rhai - ${cmd} 명령어
-// Python: cmds/${cmd}.py
+// 옵랜덤.rhai - 아이템 옵션 랜덤
+// Python: cmds/옵랜덤.py
 
 fn cmd(ob, line) {
-
-    send_line(ob, "☞ 이 기능은 현재 지원되지 않습니다.");
+    send_line(ob, "☞ 아이템 옵션 랜덤 기능은 현재 구현 중입니다.");
 }
 
 fn main(ob, line) {

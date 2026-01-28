@@ -1,9 +1,8 @@
-// 분해.rhai - 분해 명령어
+// 분해.rhai - 아이템 분해
 // Python: cmds/분해.py
 
 fn cmd(ob, line) {
-
-    send_line(ob, "☞ 이 기능은 현재 지원되지 않습니다.");
+    send_line(ob, "☞ 아이템 분해 기능은 현재 구현 중입니다.");
 }
 
 fn main(ob, line) {

@@ -207,6 +207,8 @@ pub struct Body {
     pub script_temp_item: Option<Arc<Mutex<Object>>>,
     /// 도착 쪽지. 키 "메모:발신자이름", 값 MemoRecord. load/save 시 JSON 루트의 "메모:xxx"와 연동.
     pub memos: HashMap<String, MemoRecord>,
+    /// 대화 기록 (NPC와의 대화 내용)
+    pub talk_history: Vec<String>,
 }
 
 /// 쪽지 한 통. 파이썬 memo[키] = {제목,시간,작성자,내용}.
@@ -257,6 +259,7 @@ impl Body {
             item_skill_map: HashMap::new(),
             script_temp_item: None,
             memos: HashMap::new(),
+            talk_history: Vec::new(),
         }
     }
 
