@@ -95,6 +95,8 @@ struct LoginSession {
     doumi_resume_op: Option<String>,
     /// get_key_input용. suspend.expected와 일치하는 입력만 통과.
     doumi_resume_expected: Option<String>,
+    /// suspend 시 현재까지 실행된 위치 (resume 시 스크립트를 이 위치부터 계속 실행)
+    doumi_resume_position: usize,
 }
 
 impl LoginSession {
@@ -116,6 +118,7 @@ impl LoginSession {
             doumi_ob: None,
             doumi_resume_op: None,
             doumi_resume_expected: None,
+            doumi_resume_position: 0,
         }
     }
 
@@ -457,9 +460,42 @@ async fn process_login_state(
         // Return what action to take after releasing the lock
         match state {
             LoginState::Logo => {
-                // Should not receive input in Logo state
+                // If input is received in Logo state, transition to Name and process the input
                 session.state = LoginState::Name;
-                LoginAction::None
+                // Fall through to Name state processing by returning a special action
+                // that will re-process the input in the new state
+                // For now, directly process the input here
+                let input_name = input.to_string();
+                session.name = input_name.clone();
+                let is_korean = crate::hangul::is_han(&input_name);
+                let is_special = input_name == "손님" || input_name == "무명객" || input_name == "나만바라바";
+
+                info!("Name validation (from Logo): name='{}', is_korean={}, is_special={}",
+                    input_name, is_korean, is_special);
+
+                if input_name.is_empty() {
+                    LoginAction::AskName
+                } else if !is_korean {
+                    session.state = LoginState::Name;
+                    LoginAction::NameError(input_name)
+                } else if is_special {
+                    session.state = LoginState::ScriptMode;
+                    session.script_mode = if input_name == "나만바라바" { 1 } else { 2 };
+                    session.script_position = 0;
+                    session.doumi_script_path = if session.script_mode == 1 {
+                        "lib/doumi/빠른도우미".to_string()
+                    } else {
+                        "lib/doumi/초기도우미".to_string()
+                    };
+                    session.doumi_ob = None;
+                    session.doumi_resume_op = None;
+                    session.doumi_resume_expected = None;
+                    session.doumi_resume_position = 0;
+                    LoginAction::StartScript
+                } else {
+                    session.state = LoginState::Password;
+                    LoginAction::AskPassword(input_name)
+                }
             }
             LoginState::Name => {
                 let input_name = input.to_string();
@@ -491,6 +527,7 @@ async fn process_login_state(
                     session.doumi_ob = None;
                     session.doumi_resume_op = None;
                     session.doumi_resume_expected = None;
+                    session.doumi_resume_position = 0;
                     LoginAction::StartScript
                 } else {
                     session.state = LoginState::Password;
@@ -961,17 +998,10 @@ fn process_script_line(
                 0,
             );
         }
-        if t == "무명객" || t == "나만바라바" {
-            session.doumi_ob = Some(doumi_ob_to_hashmap(ob));
-            return (
-                session.script_mode,
-                0,
-                None,
-                Some("☞ 사용할 수 없는 존함입니다. 한글로 입력해주세요.\r\n무림존함ː\r\n".to_string()),
-                true,
-                false,
-                0,
-            );
+        if t == "무명객" || t == "나만바바바" {
+            // Skip the old error - this is handled by the is_special branch above (lines 481-491)
+            // The is_special check: `let is_special = input_name == "손님" || input_name == "무명객" || input_name == "나만바바";`
+            // So this code block is now redundant - removed the error return
         }
         if PathBuf::from("data/user").join(format!("{}.json", t)).exists() {
             session.doumi_ob = Some(doumi_ob_to_hashmap(ob));
@@ -1006,7 +1036,8 @@ fn process_script_line(
     }
 
     let res = session.doumi_resume_op.take();
-    let resume = res.as_ref().map(|o| (o.as_str(), input));
+    let position = session.doumi_resume_position;
+    let resume = res.as_ref().map(|o| (o.as_str(), input, position));
     let result = run_doumi_to_result(&session.doumi_script_path, &mut ob, resume);
 
     match result {
@@ -1014,7 +1045,20 @@ fn process_script_line(
             session.doumi_ob = Some(doumi_ob_to_hashmap(ob));
             session.doumi_resume_op = Some(suspend.op.clone());
             session.doumi_resume_expected = suspend.expected.clone();
-            let output = format!("{}{}\r\n", lines.join(""), suspend.prompt);
+            session.doumi_resume_position = suspend.position;
+            // Don't duplicate the prompt if it's already in the lines
+            // The script may send the prompt with ANSI codes, while suspend.prompt is plain text
+            let joined = lines.join("");
+            // Check if the core prompt text is already in the output
+            // The script might send "【\x1b[1m엔터키를 누르세요\x1b[0;37;40m】" while suspend.prompt is "【엔터키를 누르세요】"
+            let has_prompt = joined.contains(&suspend.prompt) ||
+                             joined.contains("엔터키를 누르세요") ||
+                             joined.contains("엔터키를 누르세요】");
+            let output = if has_prompt {
+                format!("{}\r\n", joined)
+            } else {
+                format!("{}{}\r\n", joined, suspend.prompt)
+            };
             (
                 session.script_mode,
                 0,
@@ -1040,6 +1084,7 @@ fn process_script_line(
             session.doumi_ob = None;
             session.doumi_resume_op = None;
             session.doumi_resume_expected = None;
+            session.doumi_resume_position = 0;
             (0, 0, None, None, false, true, 0)
         }
     }
@@ -1321,7 +1366,7 @@ async fn send_game_prompt(
                 let max_hp = p.body.get_max_hp();
                 let mp = p.body.get_mp();
                 let max_mp = p.body.get_max_mp();
-                format!("\x1b[0;37;40m[ {}/{} , {}/{} ] ", hp, max_hp, mp, max_mp)
+                format!("\x1b[0;37;40m[ {}/{}, {}/{} ] ", hp, max_hp, mp, max_mp)
             })
             .unwrap_or_else(|| ">> ".to_string())
     };
@@ -2156,6 +2201,8 @@ async fn handle_game_command(
     let mut send_to_users: Option<Vec<(String, String)>> = None; // 스크립트 send_to_user 수집분
     let mut broadcast_to_players: Option<(Vec<String>, String)> = None; // (names, msg) 방파말 등
     let mut tell_pending: Option<(String, String, String)> = None; // (target, message, sender_name)
+    let mut kick_pending: Option<(String, String)> = None; // (target_name, reason)
+    let mut ban_pending: Option<(String, i64, String)> = None; // (target_name, duration, reason)
     let mut set_pending: Option<PendingInput> = None;
     let mut skip_normal_prompt = false;
     let mut room_append: Option<(String, String, String)> = None;
@@ -2299,7 +2346,61 @@ async fn handle_game_command(
                         String::new()  // Movement is handled elsewhere
                     }
                     Some(CommandResult::Combat) => {
-                        String::new()  // Combat is handled elsewhere
+                        // Process PvM combat
+                        use crate::combat;
+                        use crate::player::ActState;
+
+                        // Get attack target from player temp
+                        let target_name = player.body.temp().get("_attack_target")
+                            .and_then(|v| match v {
+                                crate::object::Value::String(s) => Some(s.as_str()),
+                                _ => None,
+                            })
+                            .unwrap_or("");
+
+                        if !target_name.is_empty() {
+                            // First find the mob
+                            let world = get_world_state().read().unwrap();
+                            if let Some((mob_instance, mob_data)) =
+                                combat::find_mob_in_room(&player_name, target_name, &world) {
+
+                                // Process the attack round
+                                let round = combat::process_player_attack(
+                                    &mut player.body,
+                                    &mob_instance,
+                                    &mob_data
+                                );
+
+                                let mut messages = round.player_messages;
+                                messages.extend(round.room_messages);
+
+                                // Apply damage to mob in WorldState (drop read lock first)
+                                drop(world);
+                                if round.damage_dealt > 0 {
+                                    if let Ok(mut w) = get_world_state().write() {
+                                        w.damage_mob(&zone, &room, &mob_instance.mob_key, round.damage_dealt);
+                                    }
+                                }
+
+                                if round.player_died {
+                                    // Player died - handle death
+                                    player.body.act = ActState::Death;
+                                    // TODO: Handle death properly (respawn, etc.)
+                                } else if round.target_died {
+                                    // Mob died - already handled by damage_mob, but ensure it's killed
+                                    if let Ok(mut w) = get_world_state().write() {
+                                        w.kill_mob(&zone, &room, &mob_instance.mob_key);
+                                    }
+                                }
+
+                                format!("{}\r\n", messages.join("\r\n"))
+                            } else {
+                                // Target not found - might be player (PvP)
+                                format!("☞ {} 그런 상대가 없습니다.\r\n", target_name)
+                            }
+                        } else {
+                            String::new()
+                        }
                     }
                     Some(CommandResult::Ok) => {
                         String::new()
@@ -2456,6 +2557,14 @@ async fn handle_game_command(
                             "[{}]님에게 쪽지를 작성합니다. 끝내시려면 '.'를 치세요.\r\n분량 제한은 10줄입니다.\r\n:\r\n",
                             target_name
                         )
+                    }
+                    Some(CommandResult::Kick { target_name, reason }) => {
+                        kick_pending = Some((target_name, reason));
+                        String::new()
+                    }
+                    Some(CommandResult::Ban { target_name, duration, reason }) => {
+                        ban_pending = Some((target_name, duration, reason));
+                        String::new()
                     }
                     None => {
                         "\x1b[1;31m☞ 무슨 말인지 모르겠어요. *^_^*\x1b[0;37m\r\n".to_string()

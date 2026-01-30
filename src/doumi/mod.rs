@@ -3,7 +3,7 @@
 //! doumi.json 없이 lib/doumi/*.rhai 스크립트를 Rhai 언어로 실행합니다.
 //! - set_tick(n), send_line(ob, msg), get_name(), get_password(), get_sex(), get_enter(), start_script(ob), finish_script(ob)
 
-use rhai::{Engine, Scope, Dynamic, Map, EvalAltResult};
+use rhai::{Engine, Scope, Dynamic, Map, EvalAltResult, Module, Shared};
 use std::path::Path;
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::Arc;
@@ -38,6 +38,7 @@ pub struct DoumiSuspend {
     pub op: String,
     pub prompt: String,
     pub expected: Option<String>, // get_key_input용
+    pub position: usize, // 현재 실행된 suspend 위치 (0부터 시작)
 }
 
 /// 한 번의 run 결과: 출력 + 지연 + (끝남 | suspend)
@@ -57,14 +58,14 @@ pub enum DoumiRunResult {
 
 /// lib/doumi/common.rhai + 메인 스크립트를 실행.
 /// - `ob`: 도우미용 Map. get_name/get_password/get_sex 결과를 ob["이름"], ob["암호"], ob["성별"]에 적을 수 있음.
-/// - `resume`: Some((op, input))이면 해당 op에서 재개. get_name 등이 input을 반환함.
+/// - `resume`: Some((op, input, position))이면 해당 op에서 재개. get_name 등이 input을 반환함.
 /// - `output`: send_line으로 쌓을 버퍼 (호출자가 초기화 후 전달)
 /// - `delay_ms`: set_tick으로 설정할 값 (호출자가 0으로 초기화 후 전달, run 후 읽음)
 /// - 반환: Ok(Some((name,pass,gender))) = finish_script 호출됨, Ok(None) = 스크립트 종료만, Err(s) = suspend
 pub fn run_doumi(
     script_path: &str,
     ob: &mut Map,
-    resume: Option<(&str, &str)>,
+    resume: Option<(&str, &str, usize)>,
     output: &mut Vec<String>,
     delay_ms: &mut u64,
 ) -> Result<Option<(String, String, String)>, DoumiSuspend> {
@@ -72,6 +73,15 @@ pub fn run_doumi(
     let mut finished: Option<(String, String, String)> = None;
 
     let mut engine = Engine::new();
+
+    // Get resume parameters
+    let resume_op = resume.map(|(op, _, pos)| op.to_string()).unwrap_or_else(|| String::new());
+    let resume_input = resume.map(|(_, input, _)| input.to_string()).unwrap_or_else(|| String::new());
+    let resume_position = resume.map(|(_, _, pos)| pos).unwrap_or(0) as i64;
+
+    // Debug logging
+    eprintln!("DOUMI run: script_path={}, resume_op={:?}, resume_position={}, output.len={}",
+        script_path, resume_op, resume_position, output.len());
 
     // set_tick(n) — n*100 ms. delay_ms에 기록.
     let dms = Arc::new(AtomicU64::new(*delay_ms));
@@ -81,6 +91,7 @@ pub fn run_doumi(
     });
 
     // send_line(ob, msg) — [공] 치환 후 output에 push. \r\n 붙임.
+    // resume_position이 0이 아니면 화면 클리어 스킵
     let out_ptr = output as *mut Vec<String>;
     engine.register_fn("send_line", move |ob_val: Dynamic, msg: &str| {
         let name: String = ob_val.clone().try_cast::<Map>()
@@ -107,20 +118,39 @@ pub fn run_doumi(
         unsafe { *fin.get() = Some((n, p, g)) };
     });
 
-    // common.rhai 로드 (get_name, get_password, get_sex, get_enter, doumi_suspend)
-    let common_path = Path::new("lib/doumi/common.rhai");
-    if common_path.exists() {
-        let common_src = std::fs::read_to_string(common_path).unwrap_or_default();
-        if let Err(e) = engine.run(&common_src) {
-            // common.rhai 자체가 get_* 호출해 suspend할 수는 없으므로, 진짜 오류면 런타임에 나옴.
-            tracing::warn!("doumi common.rhai load/run: {:?}", e);
-        }
-    }
+    // _suspend_counter 관리를 위한 공유 상태 (각 스크립트 실행마다 0으로 시작)
+    let counter = Arc::new(AtomicU64::new(0));
+    let counter_get = counter.clone();
+    let counter_inc = counter.clone();
 
+    // _suspend_counter_get() - 현재 counter 값 반환
+    engine.register_fn("_suspend_counter_get", move || -> i64 {
+        counter_get.load(Ordering::SeqCst) as i64
+    });
+
+    // _suspend_counter_inc() - counter 증가 후 이전 값 반환
+    engine.register_fn("_suspend_counter_inc", move || -> i64 {
+        counter_inc.fetch_add(1, Ordering::SeqCst) as i64
+    });
+
+    // _doumi_resume_* 변수와 _doumi_position를 전역 모듈에 등록
+    let mut doumi_module = Module::new();
+    doumi_module.set_var("_doumi_resume_op", resume_op.clone());
+    doumi_module.set_var("_doumi_resume_input", resume_input.clone());
+    doumi_module.set_var("_doumi_position", resume_position);
+    engine.register_global_module(Shared::new(doumi_module));
+
+    // scope 생성
     let mut scope = Scope::new();
     scope.push("ob", ob.clone());
-    scope.push("_doumi_resume_op", resume.as_ref().map(|r| r.0.to_string()).unwrap_or_else(|| String::new()));
-    scope.push("_doumi_resume_input", resume.as_ref().map(|r| r.1.to_string()).unwrap_or_else(|| String::new()));
+
+    // common.rhai 로드
+    let common_path = Path::new("lib/doumi/common.rhai");
+    let common_src = if common_path.exists() {
+        std::fs::read_to_string(common_path).unwrap_or_default()
+    } else {
+        String::new()
+    };
 
     let path = Path::new(script_path);
     let ext = path.extension().and_then(|e| e.to_str()).unwrap_or("");
@@ -130,21 +160,26 @@ pub fn run_doumi(
         script_path.to_string()
     };
     let full = Path::new(&path_str);
-    let src = if full.exists() {
+    let main_src = if full.exists() {
         std::fs::read_to_string(full).map_err(|_| DoumiSuspend {
             op: "load".to_string(),
             prompt: format!("스크립트를 찾을 수 없습니다: {}", path_str),
             expected: None,
+            position: 0,
         })?
     } else {
         return Err(DoumiSuspend {
             op: "load".to_string(),
             prompt: format!("스크립트를 찾을 수 없습니다: {}", path_str),
             expected: None,
+            position: 0,
         });
     };
 
-    let result = engine.eval_with_scope::<Dynamic>(&mut scope, &src);
+    // common.rhai와 메인 스크립트를 합쳐서 실행
+    let combined_src = format!("{}\n{}", common_src, main_src);
+
+    let result = engine.eval_with_scope::<Dynamic>(&mut scope, &combined_src);
 
     *delay_ms = dms.load(Ordering::SeqCst);
 
@@ -159,28 +194,57 @@ pub fn run_doumi(
     }
 
     match result {
-        Ok(_) => return Ok(finished),
+        Ok(_) => {
+            eprintln!("DOUMI finished: script_path={}, finished={:?}", script_path, finished);
+            return Ok(finished);
+        },
         Err(e) => {
-            if let EvalAltResult::ErrorRuntime(err, _) = *e {
-                if let Some(m) = err.clone().try_cast::<Map>() {
+            // Extract the inner error value that contains our Map
+            // Handle ErrorInFunctionCall which wraps the actual error
+            fn extract_error_value(mut err: &EvalAltResult) -> Option<Dynamic> {
+                loop {
+                    match err {
+                        EvalAltResult::ErrorRuntime(v, _) => return Some(v.clone()),
+                        EvalAltResult::ErrorInFunctionCall(_, _, inner, _) => {
+                            err = inner;
+                        }
+                        _ => return None,
+                    }
+                }
+            }
+
+            if let Some(err_value) = extract_error_value(&e) {
+                if let Some(m) = err_value.clone().try_cast::<Map>() {
                     let t: String = m.get("type").and_then(|v: &Dynamic| v.clone().into_string().ok()).unwrap_or_default();
                     if t == "doumi_suspend" {
                         let op: String = m.get("op").and_then(|v: &Dynamic| v.clone().into_string().ok()).unwrap_or_default();
                         let prompt: String = m.get("prompt").and_then(|v: &Dynamic| v.clone().into_string().ok()).unwrap_or_default();
                         let expected: Option<String> = m.get("expected").and_then(|v: &Dynamic| v.clone().into_string().ok());
-                        return Err(DoumiSuspend { op, prompt, expected });
+                        // Sync ob before returning suspend
+                        if let Some(d) = scope.get_value::<Dynamic>("ob") {
+                            if let Some(ob_map) = d.try_cast::<Map>() {
+                                ob.clear();
+                                for (k, v) in ob_map {
+                                    ob.insert(k, v);
+                                }
+                            }
+                        }
+                        // Increment position for next resume
+                        let position = (resume_position + 1) as usize;
+                        eprintln!("DOUMI suspend: op={}, prompt={}, position={}, output_lines={}",
+                            op, prompt, position, output.len());
+                        return Err(DoumiSuspend { op, prompt, expected, position });
                     }
                 }
-                return Err(DoumiSuspend {
-                    op: "error".to_string(),
-                    prompt: err.to_string(),
-                    expected: None,
-                });
             }
+
+            // If not doumi_suspend or couldn't extract, return error
+            eprintln!("DOUMI error: script_path={}, error={:?}", script_path, e);
             return Err(DoumiSuspend {
                 op: "error".to_string(),
                 prompt: (*e).to_string(),
                 expected: None,
+                position: 0,
             });
         }
     }
@@ -190,7 +254,7 @@ pub fn run_doumi(
 pub fn run_doumi_to_result(
     script_path: &str,
     ob: &mut Map,
-    resume: Option<(&str, &str)>,
+    resume: Option<(&str, &str, usize)>,
 ) -> DoumiRunResult {
     let mut output = Vec::new();
     let mut delay_ms = 0u64;
