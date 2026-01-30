@@ -80,8 +80,11 @@ pub fn run_doumi(
     let resume_position = resume.map(|(_, _, pos)| pos).unwrap_or(0) as i64;
 
     // Debug logging
-    eprintln!("DOUMI run: script_path={}, resume_op={:?}, resume_position={}, output.len={}",
-        script_path, resume_op, resume_position, output.len());
+    eprintln!("DOUMI run: script_path={}, resume_op={:?}, resume_position={}, output.len={}, ob.len={}",
+        script_path, resume_op, resume_position, output.len(), ob.len());
+    if ob.len() > 0 {
+        eprintln!("  ob contents: {:?}", ob.iter().map(|(k,v)| (k, v.clone().into_string().unwrap_or_default())).collect::<Vec<_>>());
+    }
 
     // set_tick(n) — n*100 ms. delay_ms에 기록.
     let dms = Arc::new(AtomicU64::new(*delay_ms));
@@ -134,10 +137,32 @@ pub fn run_doumi(
     });
 
     // _doumi_resume_* 변수와 _doumi_position를 전역 모듈에 등록
+    // 각 입력 필드를 위한 개별 저장소 (ob에서 기존 값 읽어옴)
     let mut doumi_module = Module::new();
     doumi_module.set_var("_doumi_resume_op", resume_op.clone());
     doumi_module.set_var("_doumi_resume_input", resume_input.clone());
     doumi_module.set_var("_doumi_position", resume_position);
+
+    // ob에서 이미 저장된 값들을 읽어옴
+    let name_input: String = ob.get("이름").and_then(|v| v.clone().into_string().ok()).unwrap_or_default();
+    let password_input: String = ob.get("암호").and_then(|v| v.clone().into_string().ok()).unwrap_or_default();
+    let sex_input: String = ob.get("성별").and_then(|v| v.clone().into_string().ok()).unwrap_or_default();
+
+    // 현재 resume에 대한 새 값 추가 (ob에 아직 반영되지 않은 값)
+    let (final_name, final_password, final_sex) = if resume_op == "get_name" {
+        (resume_input.clone(), password_input, sex_input)
+    } else if resume_op == "get_password" {
+        (name_input, resume_input.clone(), sex_input)
+    } else if resume_op == "get_sex" {
+        (name_input, password_input, resume_input.clone())
+    } else {
+        (name_input, password_input, sex_input)
+    };
+
+    doumi_module.set_var("_saved_name", final_name);
+    doumi_module.set_var("_saved_password", final_password);
+    doumi_module.set_var("_saved_sex", final_sex);
+
     engine.register_global_module(Shared::new(doumi_module));
 
     // scope 생성
