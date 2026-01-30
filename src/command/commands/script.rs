@@ -51,6 +51,7 @@ pub fn create_script_command(
     call_out_scheduler: Option<Arc<CallOutScheduler>>,
 ) -> CommandFn {
     Arc::new(move |player: &mut Body, args: &[&str]| -> CommandResult {
+        println!("[DEBUG SCRIPT] Executing script command: {}, args: {:?}", script_name, args);
         let line = args.join(" ");
         let storage = script_storage.try_read();
         let storage = match storage {
@@ -62,12 +63,15 @@ pub fn create_script_command(
         };
         match storage.execute(&script_name, player, &line, get_other_players_desc.clone(), get_other_players_map.clone(), call_out_scheduler.clone()) {
             Ok((outputs, special)) => {
+                println!("[SCRIPT_CMD] Script {} executed, outputs.len()={}, special={:?}", script_name, outputs.len(), special);
                 if let Some(cr) = special {
                     return cr;
                 }
                 if outputs.is_empty() {
+                    println!("[SCRIPT_CMD] No outputs, returning Ok");
                     CommandResult::Ok
                 } else {
+                    println!("[SCRIPT_CMD] Returning {} output lines", outputs.len());
                     CommandResult::Output(outputs.join("\r\n"))
                 }
             }
@@ -96,7 +100,7 @@ pub async fn register_script_commands(
     let script_names = scripts.script_names();
     drop(scripts);
 
-    info!("[SCRIPT_CMD] Found {} scripts to register", script_names.len());
+    println!("[SCRIPT_CMD] Found {} scripts to register", script_names.len());
 
     for script_name in script_names {
         // Skip if command already exists (built-in commands take priority)

@@ -1,0 +1,146 @@
+#!/usr/bin/expect -f
+# MUD Systematic Test - CORRECTED
+# 1. Create NEW character with unique name
+# 2. Login with created character
+# 3. Test commands
+
+set timeout 5
+
+proc create_and_test_char {port char_name password} {
+    spawn nc localhost $port
+    expect "무림존함"
+
+    # Step 1: Create new character using 무명객
+    send "무명객\r"
+    expect "새로운"
+
+    send "$char_name\r"
+    expect {
+        "암호" {
+            # Set password for new character
+            send "$password\r"
+            expect "암호"
+            send "$password\r"
+            expect "보기"
+            puts "\n✓ Character '$char_name' CREATED"
+        }
+        timeout {
+            puts "\n✗ Character creation failed"
+            close
+            return
+        }
+    }
+
+    # Enter the game
+    send "\r"
+    expect "체력"
+    puts "✓ Entered game world"
+
+    # Test commands
+    send "보기\r"
+    expect {
+        "체력" { puts "✓ 보기: Shows room" }
+        timeout { puts "✗ 보기: Timeout" }
+    }
+
+    send "인벤토리\r"
+    expect {
+        "소지품" { puts "✓ 인벤토리: Works" }
+        "없습니다" { puts "✓ 인벤토리: Empty (expected)" }
+        timeout { puts "? 인벤토리: Unknown response" }
+    }
+
+    send "무공\r"
+    expect {
+        "무공" { puts "✓ 무공: Shows skills" }
+        "없습니다" { puts "✓ 무공: No skills (expected)" }
+        timeout { puts "? 무공: Timeout" }
+    }
+
+    send "비전\r"
+    expect {
+        "비전" { puts "✓ 비전: Shows vision" }
+        timeout { puts "✗ 비전: Timeout" }
+    }
+
+    send "상태\r"
+    expect {
+        "체력" { puts "✓ 상태: Shows stats" }
+        timeout { puts "✗ 상태: Timeout" }
+    }
+
+    send "who\r"
+    expect {
+        "접속" { puts "✓ who: Shows players" }
+        timeout { puts "✗ who: Timeout" }
+    }
+
+    send "8\r"
+    expect {
+        "체력" { puts "✓ 8 (북): Moved north" }
+        timeout { puts "✗ 8: Timeout" }
+    }
+
+    send "보기\r"
+    expect {
+        "출구" { puts "✓ 보기: Shows exits after move" }
+        timeout { puts "✗ 보기 after move: Timeout" }
+    }
+
+    send "2\r"
+    expect "체력"
+    send "보기\r"
+    expect "출구"
+    puts "✓ Movement (2/남) working"
+
+    send "말 테스트\r"
+    expect {
+        "당신" { puts "✓ 말: Speech works" }
+        timeout { puts "✗ 말: Timeout" }
+    }
+
+    send "외치기 테스트\r"
+    expect {
+        "외치기" { puts "✓ 외치기: Shout works" }
+        timeout { puts "✗ 외치기: Timeout" }
+    }
+
+    close
+    puts "\n"
+}
+
+# Use unique character names with timestamp to avoid conflicts
+set timestamp [clock seconds]
+set char1 "테스터_A_[expr $timestamp % 10000]"
+set char2 "테스터_B_[expr ($timestamp + 1) % 10000]"
+
+puts "=========================================="
+puts "MUD CHARACTER CREATION & COMMAND TEST"
+puts "=========================================="
+puts "Character 1: $char1"
+puts "Character 2: $char2"
+puts ""
+
+puts "=========================================="
+puts "Python MUD (port 9900) - Character 1"
+puts "=========================================="
+create_and_test_char 9900 $char1 "test1234"
+
+puts "=========================================="
+puts "Rust MUD (port 9990) - Character 2"
+puts "=========================================="
+create_and_test_char 9990 $char2 "test1234"
+
+puts "=========================================="
+puts "Python MUD (port 9900) - Character 2"
+puts "=========================================="
+create_and_test_char 9900 $char2 "test1234"
+
+puts "=========================================="
+puts "Rust MUD (port 9990) - Character 1"
+puts "=========================================="
+create_and_test_char 9990 $char1 "test1234"
+
+puts "\n=========================================="
+puts "TEST COMPLETE"
+puts "=========================================="

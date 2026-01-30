@@ -106,12 +106,16 @@ pub enum CommandResult {
     StartScript { script_name: String, lines: Vec<String>, use_rhai: bool },
     /// 쪽지: [이름] [제목] 후 편집 모드. 라인 단위 입력, '.' 또는 10줄이면 종료.
     StartNoteEdit { target_name: String, title: String },
+    /// 강제로그아웃: 관리자가 플레이어를 강제로 로그아웃시킴.
+    Kick { target_name: String, reason: String },
+    /// 계정정지: 관리자가 플레이어를 일정 기간 동안 접속 차단. duration은 초 단위.
+    Ban { target_name: String, duration: i64, reason: String },
 }
 
 impl CommandResult {
     /// Returns true if the command succeeded
     pub fn is_ok(&self) -> bool {
-        matches!(self, CommandResult::Ok | CommandResult::Output(_) | CommandResult::Move(_) | CommandResult::Combat | CommandResult::NoPrompt | CommandResult::SayToRoom(_, _) | CommandResult::Shout(_) | CommandResult::Notice(_) | CommandResult::Tell(_, _) | CommandResult::Shutdown | CommandResult::EmotionToRoom(_, _, _) | CommandResult::RequestInput { .. } | CommandResult::GiveToPlayer { .. } | CommandResult::BroadcastToPlayers(_, _) | CommandResult::SendToUsers(_) | CommandResult::MobEvent { .. } | CommandResult::MobEventEnter { .. } | CommandResult::StartScript { .. } | CommandResult::StartNoteEdit { .. })
+        matches!(self, CommandResult::Ok | CommandResult::Output(_) | CommandResult::Move(_) | CommandResult::Combat | CommandResult::NoPrompt | CommandResult::SayToRoom(_, _) | CommandResult::Shout(_) | CommandResult::Notice(_) | CommandResult::Tell(_, _) | CommandResult::Shutdown | CommandResult::EmotionToRoom(_, _, _) | CommandResult::RequestInput { .. } | CommandResult::GiveToPlayer { .. } | CommandResult::BroadcastToPlayers(_, _) | CommandResult::SendToUsers(_) | CommandResult::MobEvent { .. } | CommandResult::MobEventEnter { .. } | CommandResult::StartScript { .. } | CommandResult::StartNoteEdit { .. } | CommandResult::Kick { .. } | CommandResult::Ban { .. })
     }
 
     /// Returns true if the command should skip the prompt

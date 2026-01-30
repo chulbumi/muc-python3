@@ -653,3 +653,45 @@ mod tests {
         assert_eq!(han_un(""), "는");
     }
 }
+
+/// 한글 단어가 받침(종성)으로 끝나는지 확인합니다.
+///
+/// # Arguments
+///
+/// * `word` - 확인할 한글 단어
+///
+/// # Returns
+///
+/// 받침(종성)으로 끝나면 true, 없으면 false
+///
+/// # Examples
+///
+/// ```
+/// use muc_engine::hangul::ends_with_consonant;
+///
+/// assert!(ends_with_consonant("책")); // 책 ends with ㄱ (has 받침)
+/// assert!(!ends_with_consonant("책상")); // 상 ends with no 받침
+/// assert!(!ends_with_consonant(""));  // empty string
+/// ```
+pub fn ends_with_consonant(word: &str) -> bool {
+    if word.is_empty() {
+        return false;
+    }
+
+    // Get the last character
+    if let Some(last_char) = word.chars().last() {
+        // Check if it's a Korean syllable
+        if last_char >= HANGUL_SYLLABLE_START && last_char <= HANGUL_SYLLABLE_END {
+            // Calculate if it has 받침
+            // Unicode formula: (syllable - AC00) / 28 / 21
+            let offset = (last_char as u32 - HANGUL_SYLLABLE_START as u32) as u32;
+            let jongung_index = offset / 28; // 종성 인덱스
+
+            jongung_index > 0 // 0 means no 받침, 1-27 means has 받침
+        } else {
+            false
+        }
+    } else {
+        false
+    }
+}

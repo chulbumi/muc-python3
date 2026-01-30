@@ -147,11 +147,22 @@ pub struct MobInstance {
     pub alive: bool,
     /// Current targets
     pub targets: Vec<String>,
+    /// Current action state (ACT_STAND, ACT_FIGHT, ACT_REST, etc.)
+    pub act: i32,
+    /// Active skills (for 방어상태머리말 display)
+    pub skills: Vec<String>,
+    /// Mob type (for display filtering, e.g., type 7 is hidden)
+    pub mob_type: i64,
 }
 
 impl MobInstance {
     /// Create a new mob instance. room은 "1" 또는 사용자맵 "이름" 등.
     pub fn new(mob_key: String, zone: String, room: impl ToString, data: &RawMobData) -> Self {
+        // Load skill names from the skills Vec<(String, i64, i64)>
+        let skill_names: Vec<String> = data.skills.iter()
+            .map(|(name, _level, _prob)| name.clone())
+            .collect();
+
         Self {
             mob_key,
             zone,
@@ -163,6 +174,9 @@ impl MobInstance {
             death_time: 0,
             alive: true,
             targets: Vec::new(),
+            act: 0, // ACT_STAND
+            skills: skill_names,
+            mob_type: data.mob_type,
         }
     }
 
@@ -182,6 +196,8 @@ impl MobInstance {
         self.death_time = 0;
         self.spawn_time = chrono::Utc::now().timestamp();
         self.targets.clear();
+        self.act = 0; // Reset to ACT_STAND
+        self.skills.clear();
     }
 
     /// Kill the mob
@@ -189,6 +205,149 @@ impl MobInstance {
         self.alive = false;
         self.death_time = chrono::Utc::now().timestamp();
         self.hp = 0;
+    }
+
+    /// Handle mob death and calculate rewards (Python: die() in objs/mob.py:631)
+    ///
+    /// # Arguments
+    /// * `mob_data` - The mob template data
+    /// * `damage_map` - Damage dealt by each attacker
+    /// * `herb_list` - Available herbs to drop
+    ///
+    /// # Returns
+    /// A map of attacker_name -> (exp, gold, messages)
+    pub fn die(
+        &mut self,
+        mob_data: &RawMobData,
+        damage_map: &DamageMap,
+        herb_list: &[String],
+    ) -> HashMap<String, (i64, i64, Vec<String>)> {
+        use crate::hangul;
+
+        self.alive = false;
+        self.death_time = chrono::Utc::now().timestamp();
+        self.hp = 0;
+
+        let mut result = HashMap::new();
+
+        // Count attackers in same room and find max level
+        let mut attacker_count = 0;
+        let mut max_level = 0i64;
+        let mut max_level_attacker = String::new();
+
+        for attacker in damage_map.get_attackers() {
+            // In full implementation, would check if attacker is in same room
+            // For now, count all attackers
+            attacker_count += 1;
+            // In full implementation, would get actual level from attacker
+            // For now, use mob level as default
+            if mob_data.level > max_level {
+                max_level = mob_data.level;
+                max_level_attacker = attacker.clone();
+            }
+        }
+
+        if attacker_count == 0 {
+            return result;
+        }
+
+        // Calculate rewards for each attacker
+        let base_exp_per_attacker = mob_data.level; // Simplified
+        let base_gold_per_attacker = mob_data.level + 14;
+
+        for attacker in damage_map.get_attackers() {
+            let damage = damage_map.get_damage(&attacker);
+            if damage == 0 {
+                continue;
+            }
+
+            // Calculate reward based on damage ratio
+            let total_hp = mob_data.max_hp;
+            let ratio = if total_hp > 0 {
+                (damage as f64 / total_hp as f64).min(1.0)
+            } else {
+                0.0
+            };
+
+            let reward = MobReward::calculate(
+                mob_data.level,
+                mob_data.level, // In full implementation, use actual attacker level
+                0,              // mob's 은전 attribute
+                0,              // 난이도
+            );
+
+            // Divide by number of attackers
+            let exp = reward.exp / attacker_count.max(1);
+            let gold = reward.gold / attacker_count.max(1);
+
+            let mut messages = Vec::new();
+
+            // Build reward messages (matching Python output)
+            if reward.bonus_exp > 0 || reward.bonus_gold > 0 {
+                messages.push(format!(
+                    "\r\n당신이 {}(+{})의 경험치를 얻습니다.",
+                    exp, reward.bonus_exp
+                ));
+                messages.push(format!(
+                    "당신이 {}에게 은전 {}(+{})개를 획득합니다.",
+                    self.name, gold, reward.bonus_gold
+                ));
+            } else {
+                messages.push(format!("\r\n당신이 {}의 경험치를 얻습니다.", exp));
+                messages.push(format!(
+                    "당신이 {}에게 은전 {}개를 획득합니다.",
+                    self.name, gold
+                ));
+            }
+
+            // Herb drop message (for first attacker if mob level >= attacker level)
+            if attacker == *damage_map.get_attackers().first().unwrap_or(&String::new()) {
+                if let Some(herb) = HerbDrop::calculate(
+                    mob_data.level,
+                    mob_data.level,
+                    0,
+                    herb_list,
+                    0.3, // 약초나올확률 default
+                ) {
+                    messages.push(format!(
+                        "{} 약간의 경험치를 얻습니다.\r\n{} 몇개의 은전을 획득합니다.",
+                        hangul::han_iga(&attacker),
+                        hangul::han_iga(&attacker)
+                    ));
+                }
+            }
+
+            result.insert(attacker, (exp + reward.bonus_exp, gold + reward.bonus_gold, messages));
+        }
+
+        result
+    }
+
+    /// Get death message (Python: 소멸스크립)
+    pub fn get_death_message(&self, mob_data: &RawMobData) -> String {
+        if !mob_data.death_script.is_empty() {
+            return format!("\r\n\x1b[1;37m{}\x1b[0;37m", mob_data.death_script);
+        }
+
+        // Default death message (matching Python output)
+        format!(
+            "\r\n\x1b[1;37m{}{} 쓰러집니다. '쿠웅~~ 철퍼덕~~'\x1b[0;37m",
+            self.name,
+            crate::hangul::han_iga(&self.name)
+        )
+    }
+
+    /// Get corpse disappear message (Python: doDeath in objs/mob.py:756)
+    pub fn get_corpse_message(&self) -> String {
+        format!(
+            "\r\n{}의 시체가 무림지존의 손에 이끌려 망자의 강을 건너갑니다.",
+            self.get_name_with_particle()
+        )
+    }
+
+    /// Get mob name with appropriate Korean particle
+    pub fn get_name_with_particle(&self) -> String {
+        format!("{}{}", self.name, crate::hangul::han_iga(&self.name))
     }
 
     /// Get HP display string
@@ -677,6 +836,25 @@ impl MobCache {
         false
     }
 
+    /// Damage a mob in the given room (reduce HP)
+    /// Returns (new_hp, died) if mob was found and damaged
+    pub fn damage_mob(&mut self, zone: &str, room: &str, mob_key: &str, damage: i64) -> Option<(i64, bool)> {
+        let room_key = format!("{}:{}", zone, room);
+        if let Some(instances) = self.instances.get_mut(&room_key) {
+            for mob in instances.iter_mut() {
+                if mob.mob_key == mob_key && mob.alive {
+                    mob.hp = (mob.hp - damage).max(0);
+                    let died = mob.hp <= 0;
+                    if died {
+                        mob.kill();
+                    }
+                    return Some((mob.hp, died));
+                }
+            }
+        }
+        None
+    }
+
     /// Update respawn state for all instances
     pub fn update_respawns(&mut self) {
         let now = chrono::Utc::now().timestamp();
@@ -723,6 +901,18 @@ impl MobCache {
     pub fn is_empty(&self) -> bool {
         self.mobs.is_empty()
     }
+
+    /// Kill a mob instance in a specific room
+    pub fn kill_mob(&mut self, zone: &str, room: &str, mob_key: &str) -> bool {
+        let room_key = format!("{}:{}", zone, room);
+        if let Some(instances) = self.instances.get_mut(&room_key) {
+            if let Some(mob) = instances.iter_mut().find(|m| m.mob_key == mob_key && m.alive) {
+                mob.kill();
+                return true;
+            }
+        }
+        false
+    }
 }
 
 impl Default for MobCache {
@@ -742,6 +932,197 @@ pub enum MobError {
 
     #[error("Parse error: {0}")]
     ParseError(String),
+}
+
+/// Damage tracker for mob combat (Python: dmgMap)
+/// Maps attacker name -> total damage dealt
+#[derive(Debug, Clone, Default)]
+pub struct DamageMap {
+    pub damage: HashMap<String, i64>,
+}
+
+impl DamageMap {
+    pub fn new() -> Self {
+        Self {
+            damage: HashMap::new(),
+        }
+    }
+
+    pub fn add_damage(&mut self, attacker: &str, dmg: i64) {
+        *self.damage.entry(attacker.to_string()).or_insert(0) += dmg;
+    }
+
+    pub fn get_damage(&self, attacker: &str) -> i64 {
+        self.damage.get(attacker).copied().unwrap_or(0)
+    }
+
+    pub fn get_total_damage(&self) -> i64 {
+        self.damage.values().sum()
+    }
+
+    pub fn get_attackers(&self) -> Vec<String> {
+        self.damage.keys().cloned().collect()
+    }
+
+    pub fn clear(&mut self) {
+        self.damage.clear();
+    }
+}
+
+/// Reward result from killing a mob (Python: getExpGold result)
+#[derive(Debug, Clone)]
+pub struct MobReward {
+    /// Experience points
+    pub exp: i64,
+    /// Gold (은전)
+    pub gold: i64,
+    /// Bonus exp from difficulty
+    pub bonus_exp: i64,
+    /// Bonus gold from difficulty
+    pub bonus_gold: i64,
+}
+
+impl MobReward {
+    /// Calculate exp and gold rewards (Python: getExpGold in objs/mob.py:569)
+    ///
+    /// # Arguments
+    /// * `mob_level` - The mob's level (c2)
+    /// * `target_level` - The attacker's level (c1)
+    /// * `mob_gold` - Base gold from mob data (은전)
+    /// * `difficulty` - Difficulty bonus (난이도, 0-7)
+    ///
+    /// # Returns
+    /// Experience and gold rewards
+    pub fn calculate(mob_level: i64, target_level: i64, mob_gold: i64, difficulty: i64) -> Self {
+        // Use seeded random for consistency (Python uses randint)
+        use std::collections::hash_map::DefaultHasher;
+        use std::hash::{Hash, Hasher};
+
+        let seed = (mob_level * target_level) as u64;
+        let mut hasher = DefaultHasher::new();
+        seed.hash(&mut hasher);
+        let hash = hasher.finish();
+
+        // Exp calculation (Python: a = ((c2*c2)//3)+30, b = (a * (c2-c1))//100, c = a + b)
+        let a = ((mob_level * mob_level) / 3) + 30;
+        let b = (a * (mob_level - target_level)) / 100;
+        let mut exp = a + b;
+
+        // Add random variance to exp (±0-9)
+        let exp_var = (hash % 10) as i64;
+        if (hash & 1) == 0 {
+            exp += exp_var;
+        } else {
+            exp -= exp_var;
+        }
+        if exp < 1 {
+            exp = 1;
+        }
+        // Cap at MAX_INT equivalent
+        if exp > 2_000_000_000 {
+            exp = 2_000_000_000;
+        }
+
+        // Gold calculation (Python: c1 = mob_level + 14)
+        let mut gold = (mob_level + 14) + mob_gold;
+        let gold_var = ((hash >> 4) % 5) as i64;
+        if ((hash >> 5) & 1) == 0 {
+            gold += gold_var;
+        } else {
+            gold -= gold_var;
+        }
+        if gold < 1 {
+            gold = 1;
+        }
+        if gold > 2_000_000_000 {
+            gold = 2_000_000_000;
+        }
+
+        // Calculate difficulty bonus (Python: Body.difficulty[d-1][2] and [3])
+        // difficulty is 1-indexed in Python (1-7), we use 0-6 here
+        let (bonus_exp, bonus_gold) = if difficulty > 0 && difficulty <= 7 {
+            let bonus_mult = match difficulty {
+                1 => (2, 2),
+                2 => (3, 3),
+                3 => (5, 5),
+                4 => (8, 8),
+                5 => (13, 13),
+                6 => (20, 20),
+                7 => (33, 33),
+                _ => (0, 0),
+            };
+            let be = (exp * bonus_mult.0) / 100;
+            let bg = (gold * bonus_mult.1) / 100;
+            (be, bg)
+        } else {
+            (0, 0)
+        };
+
+        Self {
+            exp,
+            gold,
+            bonus_exp,
+            bonus_gold,
+        }
+    }
+
+    /// Get total exp including bonus
+    pub fn total_exp(&self) -> i64 {
+        self.exp + self.bonus_exp
+    }
+
+    /// Get total gold including bonus
+    pub fn total_gold(&self) -> i64 {
+        self.gold + self.bonus_gold
+    }
+}
+
+/// Herb drop result (Python: addHerb in objs/mob.py:606)
+#[derive(Debug, Clone)]
+pub struct HerbDrop {
+    /// Herb item index (아이템 인덱스)
+    pub herb_index: String,
+    /// Herb name
+    pub herb_name: String,
+}
+
+impl HerbDrop {
+    /// Calculate if herb should drop based on level difference (Python: addHerb logic)
+    ///
+    /// # Arguments
+    /// * `mob_level` - The mob's level
+    /// * `target_level` - The attacker's level
+    /// * `difficulty` - Difficulty bonus (난이도)
+    /// * `herb_list` - Available herb item indices
+    /// * `base_chance` - Base drop chance (약초나올확률, default 0.3 = 30%)
+    ///
+    /// # Returns
+    /// Some(herb) if drop occurs, None otherwise
+    pub fn calculate(mob_level: i64, target_level: i64, difficulty: i64, herb_list: &[String], base_chance: f64) -> Option<HerbDrop> {
+        if mob_level < target_level {
+            return None;
+        }
+
+        let level_diff = (mob_level - target_level) as f64;
+        let drop_chance = level_diff * 0.01 + 0.05 + difficulty as f64;
+
+        // Cap at base_chance (약초나올확률)
+        let drop_chance = drop_chance.min(base_chance);
+
+        // Random roll
+        let roll = (rand::random::<f64>() * 100.0) as i64;
+        let chance_threshold = (drop_chance * 100.0) as i64;
+
+        if roll < chance_threshold && !herb_list.is_empty() {
+            let idx = rand::random::<usize>() % herb_list.len();
+            return Some(HerbDrop {
+                herb_index: herb_list[idx].clone(),
+                herb_name: format!(" Herb{}", idx),
+            });
+        }
+
+        None
+    }
 }
 
 /// Global mob cache accessor

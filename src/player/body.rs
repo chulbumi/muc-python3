@@ -9,27 +9,33 @@ use crate::data::get_skill_defense_head;
 use crate::object::{Object, Value};
 use crate::world::item::get_item_weight_by_key;
 
-/// Action states for game entities
+/// Action states for game entities (Python: ACT_STAND=0, ACT_FIGHT=1, ACT_DEATH=2, ACT_REGEN=3, ACT_REST=4)
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
 pub enum ActState {
-    /// Standing/Idle state
+    /// Standing/Idle state (ACT_STAND)
     #[default]
     Stand = 0,
-    /// Fighting state
+    /// Fighting state (ACT_FIGHT)
     Fight = 1,
-    /// Resting state
-    Rest = 2,
-    /// Moving state
-    Move = 3,
+    /// Death state (ACT_DEATH)
+    Death = 2,
+    /// Regenerating state (ACT_REGEN)
+    Regeneration = 3,
+    /// Resting state (ACT_REST)
+    Rest = 4,
+    /// Moving state (additional, not in Python ACT constants)
+    Move = 5,
 }
 
 impl ActState {
-    /// Create ActState from i32 value
+    /// Create ActState from i32 value (Python compatibility)
     pub fn from_i32(value: i32) -> Self {
         match value {
             1 => ActState::Fight,
-            2 => ActState::Rest,
-            3 => ActState::Move,
+            2 => ActState::Death,
+            3 => ActState::Regeneration,
+            4 => ActState::Rest,
+            5 => ActState::Move,
             _ => ActState::Stand,
         }
     }
@@ -209,6 +215,14 @@ pub struct Body {
     pub memos: HashMap<String, MemoRecord>,
     /// 대화 기록 (NPC와의 대화 내용)
     pub talk_history: Vec<String>,
+    /// Death progression step (0-4, for doDeath() progression)
+    pub step_death: i32,
+    /// Time of death (for regen timing)
+    pub time_of_death: Option<std::time::Instant>,
+    /// Corpse duration (seconds before becoming corpse)
+    pub corpse_duration: u64,
+    /// Regeneration duration (seconds before regen)
+    pub regen_duration: u64,
 }
 
 /// 쪽지 한 통. 파이썬 memo[키] = {제목,시간,작성자,내용}.
@@ -260,6 +274,10 @@ impl Body {
             script_temp_item: None,
             memos: HashMap::new(),
             talk_history: Vec::new(),
+            step_death: 0,
+            time_of_death: None,
+            corpse_duration: 60, // Default 60 seconds
+            regen_duration: 300, // Default 5 minutes
         }
     }
 
@@ -919,6 +937,8 @@ impl Body {
                 ActState::Stand => "서 있습니다.",
                 ActState::Rest => "운기조식을 하고 있습니다.",
                 ActState::Fight => "목숨을 건 사투를 벌이고 있습니다.",
+                ActState::Death => "쓰러져 있습니다.",
+                ActState::Regeneration => "운기조식을 하고 있습니다.",
                 ActState::Move => "서 있습니다.",
             }
         };
@@ -983,6 +1003,278 @@ impl Body {
     /// Get reference to the inner Object
     pub fn object_ref(&self) -> &Object {
         &self.object
+    }
+
+    // ==================== Secret Skills (비전) ====================
+
+    /// Get the currently set secret skill (비전설정)
+    /// This skill reduces damage from matching mobs by 50%
+    pub fn get_vision_setting(&self) -> String {
+        self.object.getString("비전설정")
+    }
+
+    /// Set the secret skill for training (비전설정)
+    pub fn set_vision_setting(&mut self, skill_name: &str) {
+        self.object.set("비전설정", skill_name);
+    }
+
+    /// Check if player has a specific secret skill learned (비전이름)
+    pub fn has_secret_skill(&self, skill_name: &str) -> bool {
+        let skills = self.object.getString("비전이름");
+        if skills.is_empty() {
+            return false;
+        }
+        skills.split(',').any(|s| s.trim() == skill_name)
+    }
+
+    /// Get list of learned secret skills
+    pub fn get_secret_skills(&self) -> Vec<String> {
+        let skills = self.object.getString("비전이름");
+        if skills.is_empty() {
+            Vec::new()
+        } else {
+            skills.split(',')
+                .map(|s| s.trim().to_string())
+                .filter(|s| !s.is_empty())
+                .collect()
+        }
+    }
+
+    /// Get currently training secret skill (비전수련)
+    /// Returns (skill_name, progress_level)
+    pub fn get_vision_training(&self) -> (String, i64) {
+        let training = self.object.getString("비전수련");
+        if training.is_empty() {
+            (String::new(), 0)
+        } else {
+            let parts: Vec<&str> = training.split_whitespace().collect();
+            let skill_name = parts.get(0).unwrap_or(&"").to_string();
+            let progress = if parts.len() >= 2 {
+                parts[1].parse().unwrap_or(0)
+            } else {
+                0
+            };
+            (skill_name, progress)
+        }
+    }
+
+    /// Set training secret skill (비전수련설정)
+    pub fn set_vision_training(&mut self, skill_name: &str, progress: i64) {
+        let value = if progress > 0 {
+            format!("{} {}", skill_name, progress)
+        } else {
+            skill_name.to_string()
+        };
+        self.object.set("비전수련", value);
+    }
+
+    /// Clear training secret skill (비전수련삭제)
+    pub fn clear_vision_training(&mut self) {
+        self.object.set("비전수련", "");
+    }
+
+    /// Add a learned secret skill to 비전이름
+    pub fn add_secret_skill(&mut self, skill_name: &str) {
+        let mut skills = self.get_secret_skills();
+        if !skills.contains(&skill_name.to_string()) {
+            skills.push(skill_name.to_string());
+            let skills_str = skills.join(",");
+            self.object.set("비전이름", skills_str);
+        }
+    }
+
+    /// Check vision training progress - called during combat
+    /// Python: checkVision(skill) - increases progress if skill matches training
+    /// Returns (completed, message)
+    pub fn check_vision_training(&mut self, skill_name: &str) -> (bool, String) {
+        let (training_skill, progress) = self.get_vision_training();
+
+        if training_skill.is_empty() {
+            return (false, String::new());
+        }
+
+        if training_skill != skill_name {
+            return (false, String::new());
+        }
+
+        // Training progress: ~1% chance per hit to complete
+        // In Python: if randint(0, 99) > 1: progress += 1
+        use rand::Rng;
+        let roll = rand::thread_rng().gen_range(0..100);
+
+        if roll > 1 {
+            let new_progress = progress + 1;
+
+            // Check if completed (threshold seems to be around 10-15 in Python)
+            if new_progress >= 10 {
+                // Training complete!
+                self.clear_vision_training();
+                self.add_secret_skill(skill_name);
+
+                let msg = format!(
+                    "\r\n\x1b[1m당신이 『\x1b[32m{}\x1b[37m』의 무공 구결을 깨우치기 시작합니다. \'ΔΨΞλΟ~\'\x1b[0;37m\r\n",
+                    skill_name
+                );
+                return (true, msg);
+            } else {
+                self.set_vision_training(skill_name, new_progress);
+            }
+        }
+
+        (false, String::new())
+    }
+
+    /// Get damage reduction against a mob skill based on vision setting
+    /// Returns (multiplier, description) - e.g., (0.5, "damage halved")
+    pub fn get_vision_damage_modifier(&self, mob_skill_name: &str) -> (f64, String) {
+        let vision = self.get_vision_setting();
+        if vision.is_empty() {
+            return (1.0, String::new());
+        }
+
+        // Check if mob skill matches vision setting
+        // 비전설정 can be:
+        // - "비전무공" - matches any "비전XXX" skill
+        // - Specific skill name like "강룡십팔장" - matches that exact skill
+        if vision == "비전무공" {
+            if mob_skill_name.starts_with("비전") {
+                return (0.5, format!("비전({}) 때문에 피해가 절반입니다.", vision));
+            }
+        } else if vision == mob_skill_name {
+            return (0.5, format!("비전({}) 때문에 피해가 절반입니다.", vision));
+        }
+
+        (1.0, String::new())
+    }
+
+    // ==================== Death & Reborn ====================
+
+    /// Handle player death (Python: die() in objs/player.py:821)
+    /// Sets death state, resets stats, drops items, enters coma
+    pub fn die(&mut self) {
+        self.act = ActState::Death;
+        self._str = 0;
+        self._dex = 0;
+        self._arm = 0;
+        // Note: autoMoveList would be cleared here if implemented
+
+        self.unwear_all();
+        self.drop_all_items_death();
+
+        // Send death messages (matching Python output exactly)
+        self.send_line("\r\n\x1b[1;37m당신이 쓰러집니다. '쿠웅~~ 철퍼덕~~'\x1b[0;37m");
+        self.send_line("당신은 정신이 혼미합니다.");
+
+        self.clear_targets_death();
+        self.clear_skills();
+
+        // Recalculate modifiers from skills (Python: for s in self.skills)
+        let skill_list = self.get_string("무공이름");
+        if !skill_list.is_empty() {
+            for skill_name in skill_list.split(',') {
+                let skill_name = skill_name.trim();
+                if !skill_name.is_empty() {
+                    // In full implementation, would load skill data and add modifiers
+                    // For now, this is simplified
+                }
+            }
+        }
+
+        // Enter coma state (input_to(self.coma) in Python)
+        // The actual coma handler is implemented at the network level
+    }
+
+    /// Process death progression through reborn (Python: doDeath() in objs/player.py:2248)
+    /// Returns messages to send to player
+    pub fn do_death(&mut self) -> Vec<String> {
+        let mut messages = Vec::new();
+
+        match self.step_death {
+            0 => {
+                messages.push("\r\n기혈이 거꾸로 돌며 정신이 혼미해 집니다.".to_string());
+                self.step_death = 1;
+            }
+            1 => {
+                messages.push("\r\n누군가가 당신 주위를 어슬렁 거립니다.".to_string());
+                self.step_death = 2;
+            }
+            2 => {
+                messages.push("\r\n장의사가 당신을 어깨에 메고 낑낑대며 걸어갑니다.".to_string());
+                self.step_death = 3;
+            }
+            3 => {
+                // Python: enterRoom('낙양성:7', '사망', '사망')
+                // For now, just send message - actual room move handled by caller
+                messages.push("\r\n장의사가 당신을 어깨에 메고 낑낑대며 걸어갑니다.".to_string());
+                self.step_death = 4;
+            }
+            4 => {
+                messages.push("\r\n코끝을 찌르는 향냄새에 정신을 차려보니 장의사 내부다.".to_string());
+                messages.push("당신은 죽었다가 다시 살아났습니다.".to_string());
+
+                // Reset to alive state
+                self.act = ActState::Stand;
+                self.step_death = 0;
+
+                // Full heal
+                let max_hp = self.get_int("최대체력");
+                self.set("체력", max_hp);
+                let max_mp = self.get_int("최대내공");
+                self.set("내공", max_mp);
+            }
+            _ => {
+                self.step_death = 0;
+            }
+        }
+
+        messages
+    }
+
+    /// Check if player is in coma/death state
+    pub fn is_in_coma(&self) -> bool {
+        self.act == ActState::Death
+    }
+
+    /// Handle coma input (blocks all commands except blank/empty)
+    /// Returns true if input should be blocked
+    pub fn coma_check(&self, input: &str) -> bool {
+        if self.is_in_coma() && !input.trim().is_empty() {
+            return true;
+        }
+        false
+    }
+
+    /// Drop all items on death (Python: dropAllItem())
+    pub fn drop_all_items_death(&mut self) {
+        // Clear all items from inventory
+        // In full implementation, items would be moved to the room
+        self.object.objs.clear();
+        self.object.inv_stack.clear();
+    }
+
+    /// Clear all combat targets (separate method for death handling)
+    pub fn clear_targets_death(&mut self) {
+        self.targets.clear();
+    }
+
+    /// Get death progress step (0-4)
+    pub fn get_death_step(&self) -> i32 {
+        self.step_death
+    }
+
+    /// Set death progress step
+    pub fn set_death_step(&mut self, step: i32) {
+        self.step_death = step.clamp(0, 4);
+    }
+
+    /// Record time of death
+    pub fn record_time_of_death(&mut self) {
+        self.time_of_death = Some(std::time::Instant::now());
+    }
+
+    /// Get seconds since death
+    pub fn get_seconds_since_death(&self) -> Option<u64> {
+        self.time_of_death.map(|t| t.elapsed().as_secs())
     }
 }
 

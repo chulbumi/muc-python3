@@ -14,6 +14,7 @@ pub mod scheduler;
 pub mod data;
 pub mod hotreload;
 pub mod world;
+pub mod combat;
 pub mod oneitem;
 
 // Re-export commonly used types

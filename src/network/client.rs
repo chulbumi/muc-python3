@@ -407,6 +407,7 @@ async fn process_login_state(
             .unwrap_or(false)
     };
     // Lock is released here
+    println!("[DEBUG CLIENT] is_logged_in={}, addr={}", is_logged_in, addr);
 
     if is_logged_in {
         // 다단계 입력 대기 중이면 (암호변경 등) 해당 플로우 처리
@@ -471,6 +472,8 @@ async fn process_login_state(
                 let is_special = input_name == "손님" || input_name == "무명객" || input_name == "나만바라바";
 
                 info!("Name validation (from Logo): name='{}', is_korean={}, is_special={}",
+                    input_name, is_korean, is_special);
+                eprintln!("[NAME VALID] from Logo: name='{}', is_korean={}, is_special={}",
                     input_name, is_korean, is_special);
 
                 if input_name.is_empty() {
@@ -746,6 +749,8 @@ async fn process_login_state(
                             if let Some(session) = client.login_session_mut() {
                                 let (new_mode, new_pos, waiting, output_msg, wait_for_input, is_complete, delay) =
                                     process_script_line(session, "");
+                                eprintln!("[DEBUG SCRIPT_FLOW] process_script_line returned: mode={}, pos={}, waiting={:?}, wait_input={}, complete={}, delay={}",
+                                    new_mode, new_pos, waiting, wait_for_input, is_complete, delay);
                                 session.script_mode = new_mode;
                                 session.script_position = new_pos;
                                 session.waiting_for_command = waiting;
@@ -778,6 +783,7 @@ async fn process_login_state(
                     }
 
                     if script_complete {
+                        println!("[DEBUG CLIENT] script_complete=true, calling complete_char_creation_and_enter_game with player_name={}", player_name);
                         complete_char_creation_and_enter_game(broadcaster, addr, &player_name, command_registry, room_cache).await?;
                         return Ok(false);
                     }
@@ -953,6 +959,9 @@ fn process_script_line(
     session: &mut LoginSession,
     input: &str,
 ) -> (u8, usize, Option<String>, Option<String>, bool, bool, u64) {
+    eprintln!("[process_script_line] input='{}', doumi_resume_op={:?}, doumi_resume_position={}",
+        input, session.doumi_resume_op, session.doumi_resume_position);
+    eprintln!("[process_script_line] doumi_script_path='{}'", session.doumi_script_path);
     if session.doumi_script_path.is_empty() {
         return (
             session.script_mode,
@@ -1038,6 +1047,7 @@ fn process_script_line(
     let res = session.doumi_resume_op.take();
     let position = session.doumi_resume_position;
     let resume = res.as_ref().map(|o| (o.as_str(), input, position));
+    eprintln!("[process_script_line] About to call run_doumi_to_result, resume_op={:?}", res);
     let result = run_doumi_to_result(&session.doumi_script_path, &mut ob, resume);
 
     match result {
@@ -1098,6 +1108,7 @@ async fn complete_char_creation_and_enter_game(
     _command_registry: Arc<CommandRegistry>,
     room_cache: Arc<std::sync::Mutex<RoomCache>>,
 ) -> Result<(), Box<dyn std::error::Error>> {
+    println!("[DEBUG COMPLETE] complete_char_creation_and_enter_game called with player_name={}", player_name);
     // Get character creation data and complete login
     let (char_name, char_gender) = {
         let mut clients = broadcaster.clients.lock();
@@ -2136,6 +2147,7 @@ async fn handle_game_command(
     }
 
     debug!("Game command from {}: {}", addr, command);
+    println!("[DEBUG CLIENT] Game command from {}: '{}'", addr, command);
 
     // Parse the command
     let parsed = CommandParser::parse(command);

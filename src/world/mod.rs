@@ -9,6 +9,7 @@ pub mod item;
 pub mod guild;
 pub mod rank;
 pub mod event;
+pub mod skill;
 
 // Re-export commonly used types
 pub use room::{
@@ -21,6 +22,12 @@ pub use room::{
 pub use mob::{
     MobCache, MobInstance, RawMobData, MobError, EventScript,
     get_mob_cache,
+};
+
+pub use skill::{
+    Skill, SkillCache, SkillType, PatternAction, PatternElement,
+    get_skill_cache, get_skill, get_skill_defense_head,
+    calculate_normal_attacks,
 };
 
 pub use item::{
@@ -178,6 +185,17 @@ impl WorldState {
         Ok((dest.0, dest.1))
     }
 
+    /// Kill a mob in a specific room
+    pub fn kill_mob(&mut self, zone: &str, room: &str, mob_key: &str) -> bool {
+        self.mob_cache.kill_mob(zone, room, mob_key)
+    }
+
+    /// Damage a mob in a specific room
+    /// Returns (new_hp, died) if mob was found and damaged
+    pub fn damage_mob(&mut self, zone: &str, room: &str, mob_key: &str, damage: i64) -> Option<(i64, bool)> {
+        self.mob_cache.damage_mob(zone, room, mob_key, damage)
+    }
+
     /// 고유 명칭 또는 방향명("초보수련장", "출구", "북" 등)으로 이동.
     /// 반환: (new_zone, new_room, 이동 메시지용 이름 "북쪽" or "초보수련장")
     pub fn move_player_by_name(
@@ -237,6 +255,22 @@ impl WorldState {
     /// Update world state (respawns, etc.)
     pub fn update(&mut self) {
         self.mob_cache.update_respawns();
+    }
+
+    /// Get mobs in a room (convenience method)
+    pub fn get_mobs_in_room(&self, zone: &str, room: &str) -> Vec<&MobInstance> {
+        self.mob_cache.get_mobs_in_room(zone, room)
+    }
+
+    /// Get mob data by key
+    pub fn get_mob_data(&self, mob_key: &str) -> Option<&RawMobData> {
+        self.mob_cache.get_mob(mob_key)
+    }
+
+    /// Get mob instance in a specific room
+    pub fn get_mob(&self, zone: &str, room: &str, mob_key: &str) -> Option<&MobInstance> {
+        let mobs = self.mob_cache.get_mobs_in_room(zone, room);
+        mobs.iter().find(|m| m.mob_key == mob_key && m.alive).copied()
     }
 }
 

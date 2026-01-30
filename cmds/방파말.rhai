@@ -7,7 +7,9 @@ fn cmd(ob, line) {
         return;
     }
     let r = send_broadcast_to_guild(ob, line);
-    if r == "no_guild" { send_line(ob, "☞ 소속된 방파가 없어요."); }
+    if r == "no_guild" {
+        send_line(ob, "☞ 소속된 방파가 없어요.");
+    }
 }
 
 fn main(ob, line) {

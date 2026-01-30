@@ -80,8 +80,8 @@ pub fn run_doumi(
     let resume_position = resume.map(|(_, _, pos)| pos).unwrap_or(0) as i64;
 
     // Debug logging
-    eprintln!("DOUMI run: script_path={}, resume_op={:?}, resume_position={}, output.len={}, ob.len={}",
-        script_path, resume_op, resume_position, output.len(), ob.len());
+    eprintln!("DOUMI run: script_path={}, resume_op={:?}, resume_input={:?}, resume_position={}, output.len={}, ob.len={}",
+        script_path, resume_op, resume_input, resume_position, output.len(), ob.len());
     if ob.len() > 0 {
         eprintln!("  ob contents: {:?}", ob.iter().map(|(k,v)| (k, v.clone().into_string().unwrap_or_default())).collect::<Vec<_>>());
     }
@@ -118,6 +118,7 @@ pub fn run_doumi(
         let n: String = m.as_ref().and_then(|x| x.get("이름").and_then(|v: &Dynamic| v.clone().into_string().ok())).unwrap_or_default();
         let p: String = m.as_ref().and_then(|x| x.get("암호").and_then(|v: &Dynamic| v.clone().into_string().ok())).unwrap_or_default();
         let g: String = m.as_ref().and_then(|x| x.get("성별").and_then(|v: &Dynamic| v.clone().into_string().ok())).unwrap_or_default();
+        eprintln!("[DOUMI] finish_script called: name={}, password={}, gender={}", n, if p.is_empty() { "(empty)" } else { "(hidden)" }, g);
         unsafe { *fin.get() = Some((n, p, g)) };
     });
 
