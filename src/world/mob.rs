@@ -1254,4 +1254,110 @@ mod tests {
             ev_keys
         );
     }
+
+    /// Test mob spawning for starting room
+    #[test]
+    fn test_spawn_mobs_starting_room() {
+        let data_dir = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("data").join("mob");
+        let mut cache = MobCache::with_data_dir(data_dir);
+
+        // Spawn mobs for room 1 (starting room) with mob_ids from map data
+        let mob_ids = vec!["밍밍-범죄자".to_string(), "포졸".to_string()];
+        cache.spawn_mobs_for_room("낙양성", "1", &mob_ids);
+
+        // Check if mobs were spawned
+        let mobs = cache.get_mobs_in_room("낙양성", "1");
+        eprintln!("test_spawn_mobs_starting_room: Found {} mobs in room 낙양성:1", mobs.len());
+
+        for mob in &mobs {
+            eprintln!("  - Mob: {}, key: {}, desc1: {}", mob.name, mob.mob_key,
+                if let Some(data) = cache.get_mob(&mob.mob_key) { &data.desc1 } else { "?" });
+        }
+
+        // Verify mobs exist (this test will fail if mob loading is broken)
+        assert!(!mobs.is_empty(), "No mobs found in room 낙양성:1");
+    }
+
+    /// Test loading room and spawning mobs from room data
+    #[test]
+    fn test_room_and_mob_spawn_integration() {
+        let mob_data_dir = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("data").join("mob");
+        let room_data_dir = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("data").join("map");
+        let mut mob_cache = MobCache::with_data_dir(mob_data_dir);
+        let mut room_cache = crate::world::RoomCache::with_data_dir(room_data_dir);
+
+        // Load room 1
+        let room_result = room_cache.get_room("낙양성", "1");
+        assert!(room_result.is_ok(), "Failed to load room: {:?}", room_result);
+
+        let room = room_result.unwrap();
+        let room_ref = room.read().unwrap();
+        let mob_ids = room_ref.mob_ids.clone();
+        eprintln!("test_room_and_mob_spawn_integration: Room mob_ids = {:?}", mob_ids);
+
+        // Spawn mobs using the mob_ids from the room
+        mob_cache.spawn_mobs_for_room("낙양성", "1", &mob_ids);
+
+        // Check if mobs were spawned
+        let mobs = mob_cache.get_mobs_in_room("낙양성", "1");
+        eprintln!("test_room_and_mob_spawn_integration: Found {} mobs in room 낙양성:1", mobs.len());
+
+        for mob in &mobs {
+            eprintln!("  - Mob: {}, key: {}", mob.name, mob.mob_key);
+        }
+
+        // Verify mobs exist
+        assert!(!mobs.is_empty(), "No mobs found in room 낙양성:1 after spawn");
+        assert_eq!(mobs.len(), 2, "Expected 2 mobs in room 낙양성:1");
+    }
+
+    /// Test WorldState spawn_mobs_for_room integration
+    #[test]
+    fn test_worldstate_spawn_integration() {
+        use crate::world::WorldState;
+
+        let mut world = WorldState::new();
+
+        // This simulates what happens during login
+        world.spawn_mobs_for_room("낙양성", "1");
+
+        // Check if room was loaded
+        let room = world.room_cache.get_room_cached("낙양성", "1");
+        eprintln!("test_worldstate_spawn_integration: Room found in cache: {}", room.is_some());
+
+        if let Some(room) = room {
+            let room_ref = room.read().unwrap();
+            eprintln!("test_worldstate_spawn_integration: Room mob_ids = {:?}", room_ref.mob_ids);
+        }
+
+        // Check if mobs were spawned
+        let mobs = world.get_mobs_in_room("낙양성", "1");
+        eprintln!("test_worldstate_spawn_integration: Found {} mobs in room 낙양성:1", mobs.len());
+
+        for mob in &mobs {
+            eprintln!("  - Mob: {}, key: {}", mob.name, mob.mob_key);
+        }
+
+        // Verify mobs exist
+        assert!(!mobs.is_empty(), "No mobs found in room 낙양성:1 after WorldState spawn");
+        assert_eq!(mobs.len(), 2, "Expected 2 mobs in room 낙양성:1");
+    }
+
+    /// Test loading mob data directly
+    #[test]
+    fn test_load_mob_밍밍_범죄자() {
+        let data_dir = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("data").join("mob");
+        let mut cache = MobCache::with_data_dir(data_dir);
+
+        match cache.load_mob("낙양성", "밍밍-범죄자") {
+            Ok(data) => {
+                eprintln!("test_load_mob_밍밍_범죄자: name={}, zone={}, desc1={}",
+                    data.name, data.zone, data.desc1);
+                assert_eq!(data.name, "밍밍");
+            }
+            Err(e) => {
+                eprintln!("test_load_mob_밍밍_범죄자: Failed to load: {}", e);
+            }
+        }
+    }
 }

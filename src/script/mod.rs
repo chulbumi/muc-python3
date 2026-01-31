@@ -561,6 +561,28 @@ pub fn load_body_from_json(body: &mut Body, path: &str) -> bool {
         for (k, v) in uso {
             body.object.attr.insert(k.clone(), serde_json_to_value(v));
         }
+
+        // Python 호환성: 금화/은화를 은전으로 변환
+        // 일부 Python JSON은 "금화", "은화" 필드를 사용하지만
+        // Rust 내부와 최신 Python은 "은전" 필드를 사용
+        let has_gold = uso.contains_key("금화") || uso.contains_key("은화");
+        let has_money = uso.contains_key("은전");
+        if has_gold && !has_money {
+            let gold = body.object.getInt("금화");
+            let silver = body.object.getInt("은화");
+            // 금화 1개 = 은전 10000개 (Python 규칙)
+            let total_money = gold * 10000 + silver;
+            body.object.set("은전", total_money);
+        }
+
+        // Python 호환성: "현재방" 필드를 "위치"로도 복사
+        // Python JSON은 "현재방" 필드를 사용하지만 Rust 내부에서는 "위치"를 사용
+        if uso.contains_key("현재방") && !uso.contains_key("위치") {
+            let current_room = body.object.getString("현재방");
+            if !current_room.is_empty() {
+                body.object.set("위치", current_room);
+            }
+        }
     }
 
     body.object.inv_stack.clear();
@@ -1977,6 +1999,11 @@ pub fn create_engine_with_output(output_collector: Arc<Mutex<Vec<String>>>) -> E
         }
     });
 
+    // repeat function for Rhai scripts
+    engine.register_fn("repeat", |s: &str, count: i64| -> String {
+        s.repeat(count.max(0) as usize)
+    });
+
     engine.register_fn("to_int", |s: &str| -> i64 {
         s.trim().parse().unwrap_or(0)
     });
@@ -2524,6 +2551,65 @@ pub fn create_engine_with_body_and_output(
         arr
     });
 
+    // list_inventory_of_player(ob, target_name): 관리자가 같은 방 다른 플레이어의 소지품 확인.
+    // {ok, items, err}. ok=true면 items=[["이름",개수],...]. err="not_admin"|"not_found"|"not_same_room"|"no_permission".
+    let body_ptr_inv_other = body_ptr;
+    engine.register_fn("list_inventory_of_player", move |ob: &mut rhai::Map, target_name: &str| -> Dynamic {
+        let admin = ob
+            .get("관리자등급")
+            .and_then(|v| v.as_int().ok())
+            .unwrap_or(0i64);
+        if admin < 1000 {
+            let mut m = rhai::Map::new();
+            m.insert("ok".into(), Dynamic::from(false));
+            m.insert("err".into(), Dynamic::from("not_admin"));
+            return Dynamic::from(m);
+        }
+
+        let body = unsafe { &*body_ptr_inv_other };
+        let viewer_name = body.get_name();
+
+        let w = match get_world_state().read() {
+            Ok(g) => g,
+            Err(_) => {
+                let mut m = rhai::Map::new();
+                m.insert("ok".into(), Dynamic::from(false));
+                m.insert("err".into(), Dynamic::from("no_position"));
+                return Dynamic::from(m);
+            }
+        };
+
+        // 같은 방에 있는지 확인
+        let viewer_pos = match w.get_player_position(viewer_name.as_str()) {
+            Some(p) => p,
+            None => {
+                let mut m = rhai::Map::new();
+                m.insert("ok".into(), Dynamic::from(false));
+                m.insert("err".into(), Dynamic::from("no_position"));
+                return Dynamic::from(m);
+            }
+        };
+
+        let players_in_room = w.get_players_in_room(&viewer_pos.zone, &viewer_pos.room);
+        let target_found = players_in_room.iter().any(|n| n == target_name);
+        if !target_found {
+            let mut m = rhai::Map::new();
+            m.insert("ok".into(), Dynamic::from(false));
+            m.insert("err".into(), Dynamic::from("not_same_room"));
+            return Dynamic::from(m);
+        }
+
+        // 타겟 플레이어의 데이터 가져오기
+        // TODO: 플레이어 간 소지품 보기 기능은 복잡하므로 추후 구현
+        // 일단 빈 결과 반환 (관리자 기능은 아직 미지원)
+
+        let mut m = rhai::Map::new();
+        m.insert("ok".into(), Dynamic::from(true));
+        m.insert("err".into(), Dynamic::from(""));
+        m.insert("items".into(), Dynamic::from(rhai::Array::new()));
+        Dynamic::from(m)
+    });
+
     // get_merchant_script(ob): 현재 방의 상인(물건판매) 몹의 물건판매스크립을 "\r\n"으로 이어서 반환. 없으면 "".
     let body_ptr_merchant = body_ptr;
     engine.register_fn("get_merchant_script", move |_ob: &mut rhai::Map| -> String {
@@ -2921,12 +3007,30 @@ pub fn create_engine_with_body_and_output(
     });
 
     // get_room_name(zone, room) -> 방 이름 문자열. 어디 등.
+    // i64 버전
     engine.register_fn("get_room_name", |zone: &str, room: i64| -> String {
         let w = match get_world_state().read() {
             Ok(g) => g,
             Err(_) => return format!("{}:{}", zone, room),
         };
         let r = w.room_cache.get_room_cached(zone, &room.to_string());
+        match r {
+            Some(arc) => {
+                let guard = arc.read().unwrap();
+                if guard.display_name.is_empty() { guard.name.clone() } else { guard.display_name.clone() }
+            }
+            None => format!("{}:{}", zone, room),
+        }
+    });
+
+    // get_room_name(zone, room) -> 방 이름 문자열. 어디 등.
+    // &str 버전 (room이 문자열인 경우)
+    engine.register_fn("get_room_name", |zone: &str, room: &str| -> String {
+        let w = match get_world_state().read() {
+            Ok(g) => g,
+            Err(_) => return format!("{}:{}", zone, room),
+        };
+        let r = w.room_cache.get_room_cached(zone, room);
         match r {
             Some(arc) => {
                 let guard = arc.read().unwrap();
@@ -3011,12 +3115,28 @@ pub fn create_engine_with_body_and_output(
     });
 
     // get_exits_string(zone, room): 출구 나침반 문자열. 지도/맵 등.
+    // i64 버전
     engine.register_fn("get_exits_string", |zone: &str, room: i64| -> String {
         let w = match get_world_state().read() {
             Ok(g) => g,
             Err(_) => return String::new(),
         };
         if let Some(arc) = w.room_cache.get_room_cached(zone, &room.to_string()) {
+            if let Ok(r) = arc.read() {
+                return format_exits_long(&*r);
+            }
+        }
+        String::new()
+    });
+
+    // get_exits_string(zone, room): 출구 나침반 문자열. 지도/맵 등.
+    // &str 버전 (room이 문자열인 경우)
+    engine.register_fn("get_exits_string", |zone: &str, room: &str| -> String {
+        let w = match get_world_state().read() {
+            Ok(g) => g,
+            Err(_) => return String::new(),
+        };
+        if let Some(arc) = w.room_cache.get_room_cached(zone, room) {
             if let Ok(r) = arc.read() {
                 return format_exits_long(&*r);
             }
@@ -4243,6 +4363,82 @@ pub fn create_engine_with_body_and_output(
                 m.insert("hp".into(), Dynamic::from(mob.hp));
                 m.insert("max_hp".into(), Dynamic::from(mob.max_hp));
                 m.insert("mob_key".into(), Dynamic::from(mob.mob_key.clone()));
+                arr.push(Dynamic::from(m));
+            }
+        }
+        arr
+    });
+
+    // get_room_mobs_admin(ob) - 관리자용 몹 상세 정보 (infoMob 대응)
+    // 레벨, 체력, 내공, 힘, 민첩, 맷집, 타겟 등 상세 정보 반환
+    let body_ptr_room_mobs_admin = body_ptr;
+    engine.register_fn("get_room_mobs_admin", move |_ob: &mut rhai::Map| -> rhai::Array {
+        let body = unsafe { &*body_ptr_room_mobs_admin };
+        let name = body.get_name();
+        let w = match get_world_state().read() {
+            Ok(g) => g,
+            Err(_) => return rhai::Array::new(),
+        };
+        let pos = match w.get_player_position(&name.as_str()) {
+            Some(p) => p,
+            None => return rhai::Array::new(),
+        };
+        let mobs = w.mob_cache.get_mobs_in_room(&pos.zone, &pos.room);
+        let mut arr = rhai::Array::new();
+        for mob in mobs {
+            if let Some(mob_data) = w.mob_cache.get_mob(&mob.mob_key) {
+                let mut m = rhai::Map::new();
+                m.insert("name".into(), Dynamic::from(mob_data.name.clone()));
+                m.insert("level".into(), Dynamic::from(mob_data.level));
+                m.insert("hp".into(), Dynamic::from(mob.hp));
+                m.insert("max_hp".into(), Dynamic::from(mob.max_hp));
+                m.insert("inner_power".into(), Dynamic::from(mob_data.inner_power));
+                m.insert("strength".into(), Dynamic::from(mob_data.strength));
+                m.insert("agility".into(), Dynamic::from(mob_data.agility));
+                m.insert("alive".into(), Dynamic::from(mob.alive));
+                // 타겟 목록
+                let mut targets_arr = rhai::Array::new();
+                for target_name in &mob.targets {
+                    targets_arr.push(Dynamic::from(target_name.clone()));
+                }
+                m.insert("targets".into(), Dynamic::from(targets_arr));
+                // 상태 (alive/dead)
+                let state = if mob.alive { "활동" } else { "사망" };
+                m.insert("state".into(), Dynamic::from(state));
+                arr.push(Dynamic::from(m));
+            }
+        }
+        arr
+    });
+
+    // get_room_players_admin(ob) - 관리자용 플레이어 상세 정보 (infoPlayer 대응)
+    // 레벨, 체력, 내공, 힘, 민첩, 맷집, 타겟 등 상세 정보 반환
+    let body_ptr_room_players_admin = body_ptr;
+    engine.register_fn("get_room_players_admin", move |_ob: &mut rhai::Map| -> rhai::Array {
+        let body = unsafe { &*body_ptr_room_players_admin };
+        let viewer_name = body.get_name();
+
+        // 같은 방의 다른 플레이어 목록
+        let mut arr = rhai::Array::new();
+
+        // TODO: broadcaster를 통한 플레이어 데이터 접근 구현
+        // 현재는 간단하게 이름만 반환
+        let w = match get_world_state().read() {
+            Ok(g) => g,
+            Err(_) => return arr,
+        };
+        let pos = match w.get_player_position(viewer_name.as_str()) {
+            Some(p) => p,
+            None => return arr,
+        };
+        let players = w.get_players_in_room(&pos.zone, &pos.room);
+        for player_name in players {
+            if player_name != viewer_name {
+                let mut m = rhai::Map::new();
+                m.insert("name".into(), Dynamic::from(player_name.clone()));
+                m.insert("level".into(), Dynamic::from(1i64)); // TODO: 실제 레벨
+                m.insert("hp".into(), Dynamic::from(100i64)); // TODO: 실제 HP
+                m.insert("max_hp".into(), Dynamic::from(100i64)); // TODO: 실제 최대 HP
                 arr.push(Dynamic::from(m));
             }
         }
@@ -7524,6 +7720,26 @@ fn build_ob_from_body(body: &Body) -> rhai::Map {
     m.insert("3 숙련도".into(), body.get_int("3 숙련도").into());
     m.insert("4 숙련도".into(), body.get_int("4 숙련도").into());
     m.insert("5 숙련도".into(), body.get_int("5 숙련도").into());
+
+    // Korean attribute keys that scripts access via get_int()
+    // These are required by 능력치.rhai and other scripts
+    m.insert("체력".into(), body.get_hp().into());
+    m.insert("최고체력".into(), body.get_int("최고체력").into());
+    m.insert("내공".into(), body.get_mp().into());
+    m.insert("최고내공".into(), body.get_max_mp().into());
+    m.insert("힘".into(), body.get_int("힘").into());
+    m.insert("민첩성".into(), body.get_int("민첩성").into());
+    m.insert("명중".into(), body.get_int("명중").into());
+    m.insert("회피".into(), body.get_int("회피").into());
+    m.insert("필살".into(), body.get_int("필살").into());
+    m.insert("운".into(), body.get_int("운").into());
+    m.insert("배우자".into(), body.get_string("배우자").into());
+    m.insert("직위".into(), body.get_string("직위").into());
+    m.insert("성별".into(), body.get_string("성별").into());
+    m.insert("목표경험치".into(), body.get_int("목표경험치").into());
+    m.insert("분노".into(), body.get_int("분노").into());
+    m.insert("소지품무게".into(), body.get_int("소지품무게").into());
+    m.insert("특성치".into(), body.get_int("특성치").into());
     m
 }
 

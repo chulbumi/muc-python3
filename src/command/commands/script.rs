@@ -102,24 +102,26 @@ pub async fn register_script_commands(
 
     println!("[SCRIPT_CMD] Found {} scripts to register", script_names.len());
 
+    // Collect existing command aliases once to avoid O(n*m) complexity
+    let existing_aliases: std::collections::HashSet<String> = registry.all_commands()
+        .iter()
+        .flat_map(|cmd| {
+            let mut aliases = cmd.aliases.clone();
+            aliases.push(cmd.name.clone());
+            aliases
+        })
+        .collect();
+
     for script_name in script_names {
         // Skip if command already exists (built-in commands take priority)
-        // Check both primary command names and aliases of existing commands
         if registry.contains(&script_name) {
             info!("[SCRIPT_CMD] Skipping {} (already registered as built-in)", script_name);
             continue;
         }
 
         // Also check if any existing command has this as an alias
-        let mut is_alias = false;
-        for cmd in registry.all_commands() {
-            if cmd.matches(&script_name) {
-                info!("[SCRIPT_CMD] Skipping {} (alias of existing command {})", script_name, cmd.name);
-                is_alias = true;
-                break;
-            }
-        }
-        if is_alias {
+        if existing_aliases.contains(&script_name) {
+            info!("[SCRIPT_CMD] Skipping {} (alias of existing command)", script_name);
             continue;
         }
 
@@ -156,4 +158,6 @@ pub async fn register_script_commands(
         registry.register(info);
         info!("[SCRIPT_CMD] Registered command: {}", name_clone);
     }
+
+    println!("[SCRIPT_CMD] Script registration complete");
 }

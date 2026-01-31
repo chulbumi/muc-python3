@@ -44,7 +44,8 @@ fastrand = "2.1"
 rand = "0.8"
 
 # 스크립팅 (Rhai)
-rhai = { version = "1.19", features = ["serde", "unchecked"] }
+# unicode-xid-ident: 한글 변수명 지원을 위해 필요
+rhai = { version = "1.19", features = ["serde", "unchecked", "unicode-xid-ident"] }
 
 # 파일 감시 (핫리로딩)
 notify = "6.1"

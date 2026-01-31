@@ -153,7 +153,7 @@ mod tests {
         let mut registry = CommandRegistry::new();
         register_vision_commands(&mut registry);
 
-        let player = create_test_player();
+        let mut player = create_test_player();
         let cmd = registry.get("비전").unwrap();
 
         let result = (cmd.handler)(&mut player, &[]);
@@ -207,7 +207,7 @@ mod tests {
         let mut registry = CommandRegistry::new();
         register_vision_commands(&mut registry);
 
-        let player = create_test_player();
+        let mut player = create_test_player();
         let cmd = registry.get("비전삭제").unwrap();
 
         let result = (cmd.handler)(&mut player, &[]);
@@ -237,7 +237,7 @@ mod tests {
 
     #[test]
     fn test_has_secret_skill() {
-        let player = create_test_player();
+        let mut player = create_test_player();
         assert!(!player.has_secret_skill("강룡십팔장"));
 
         player.set("비전이름", "강룡십팔장,비전검법");
@@ -262,7 +262,7 @@ mod tests {
 
     #[test]
     fn test_vision_training() {
-        let player = create_test_player();
+        let mut player = create_test_player();
 
         // No training initially
         let (skill, progress) = player.get_vision_training();
@@ -284,7 +284,7 @@ mod tests {
 
     #[test]
     fn test_get_vision_damage_modifier() {
-        let player = create_test_player();
+        let mut player = create_test_player();
 
         // No vision set
         let (multiplier, _) = player.get_vision_damage_modifier("비전무공");

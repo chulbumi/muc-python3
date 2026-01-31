@@ -267,6 +267,9 @@ pub async fn handle_client(
     // Create channel for sending messages to this client
     let (tx, mut rx) = mpsc::unbounded_channel::<String>();
 
+    // Create channel for send_task to notify read loop when it exits (e.g., due to broken pipe)
+    let (send_done_tx, mut send_done_rx) = mpsc::channel::<()>(1);
+
     // Create client and add to broadcaster
     {
         let mut clients = broadcaster.clients.lock();
@@ -285,20 +288,24 @@ pub async fn handle_client(
         while let Some(msg) = rx.recv().await {
             // Disconnect sentinel: break to close connection (e.g. kick on duplicate login)
             if msg == DISCONNECT_SENTINEL {
+                info!("Send task for {} received disconnect sentinel", addr);
                 break;
             }
             // Don't add extra \r\n - messages already have proper line endings
             if let Err(e) = writer.write_all(msg.as_bytes()).await {
-                error!("Failed to send to {}: {}", addr, e);
+                error!("Failed to send to {} (broken pipe/connection reset): {}", addr, e);
                 break;
             }
             if let Err(e) = writer.flush().await {
-                error!("Failed to flush to {}: {}", addr, e);
+                error!("Failed to flush to {} (broken pipe/connection reset): {}", addr, e);
                 break;
             }
             // Send prompt only after login is complete
             // Note: For now, prompts are sent by the read loop after each command
         }
+        // Notify read loop that send task is exiting
+        let _ = send_done_tx.send(()).await;
+        info!("Send task for {} exiting", addr);
     });
 
     // Main read loop - handle login flow
@@ -320,57 +327,69 @@ pub async fn handle_client(
     }
 
     'read_loop: loop {
-        match reader.read(&mut read_buf).await {
-            Ok(0) => {
-                // Connection closed by peer
-                debug!("Client {} closed connection", addr);
+        // Use tokio::select! to wait for either: read data OR send_task completion (broken pipe)
+        tokio::select! {
+            // Check if send_task has exited (broken pipe, etc.)
+            _ = send_done_rx.recv() => {
+                error!("Send task for {} exited (broken pipe), closing connection", addr);
                 break;
             }
-            Ok(n) => {
-                let data = &read_buf[..n];
-                debug!("Received {} bytes from {}: {:?}", n, addr, data);
 
-                // Parse lines from data
-                match codec.feed_data(data) {
-                    Ok(lines) => {
-                        for line in lines {
-                            let line = line.trim();
-                            info!("Line from {}: '{}' (len={}, bytes={:?})", addr, line, line.len(), line.as_bytes());
+            // Normal read path
+            read_result = reader.read(&mut read_buf) => {
+                match read_result {
+                    Ok(0) => {
+                        // Connection closed by peer
+                        debug!("Client {} closed connection", addr);
+                        break;
+                    }
+                    Ok(n) => {
+                        let data = &read_buf[..n];
+                        debug!("Received {} bytes from {}: {:?}", n, addr, data);
 
-                            // Check for quit command (works at any stage): quit, 끝, 종료
-                            let is_quit = line.to_lowercase() == "quit" || line == "끝" || line == "종료";
-                            if is_quit {
-                                info!("Client {} requested quit: {}", addr, line);
-                                let _ = tx_clone.send("Goodbye!\r\n".to_string());
-                                tokio::time::sleep(tokio::time::Duration::from_millis(100)).await;
-                                break 'read_loop;
+                        // Parse lines from data
+                        match codec.feed_data(data) {
+                            Ok(lines) => {
+                                for line in lines {
+                                    let line = line.trim();
+                                    info!("Line from {}: '{}' (len={}, bytes={:?})", addr, line, line.len(), line.as_bytes());
+
+                                    // Check for quit command (works at any stage): quit, 끝, 종료
+                                    let is_quit = line.to_lowercase() == "quit" || line == "끝" || line == "종료";
+                                    if is_quit {
+                                        info!("Client {} requested quit: {}", addr, line);
+                                        let _ = tx_clone.send("Goodbye!\r\n".to_string());
+                                        tokio::time::sleep(tokio::time::Duration::from_millis(100)).await;
+                                        break 'read_loop;
+                                    }
+
+                                    // Process login state machine
+                                    let should_disconnect = process_login_state(
+                                        &broadcaster,
+                                        addr,
+                                        line,
+                                        &tx_clone,
+                                        command_registry.clone(),
+                                        room_cache.clone(),
+                                        shutdown_notify.clone(),
+                                    ).await?;
+
+                                    if should_disconnect {
+                                        break 'read_loop;
+                                    }
+                                }
                             }
-
-                            // Process login state machine
-                            let should_disconnect = process_login_state(
-                                &broadcaster,
-                                addr,
-                                line,
-                                &tx_clone,
-                                command_registry.clone(),
-                                room_cache.clone(),
-                                shutdown_notify.clone(),
-                            ).await?;
-
-                            if should_disconnect {
-                                break 'read_loop;
+                            Err(e) => {
+                                warn!("Codec error for {}: {}", addr, e);
+                                let _ = tx_clone.send(format!("\r\nError: {}\r\n", e));
                             }
                         }
                     }
                     Err(e) => {
-                        warn!("Codec error for {}: {}", addr, e);
-                        let _ = tx_clone.send(format!("\r\nError: {}\r\n", e));
+                        error!("Error reading from {}: {}", addr, e);
+                        break;
                     }
                 }
-            }
-            Err(e) => {
-                error!("Error reading from {}: {}", addr, e);
-                break;
             }
         }
     }
@@ -1320,11 +1339,52 @@ async fn complete_login_and_enter_game(
             player.state = STATE_ACTIVE;
             player.interactive = 1;
 
+            // Determine starting position BEFORE moving player to client
+            // Python 호환성: 저장된 위치 또는 귀환지맵을 읽어서 스폰
+            let start_pos = {
+                // 1. 저장된 위치 확인 (Python: 로그인 시 마지막 위치 유지)
+                // Python JSON은 "현재방" 필드를 사용, "위치"는 WorldState에서 사용
+                let mut saved_loc = player.body.get_string("위치");
+                if saved_loc.is_empty() || saved_loc == "시작/시작" {
+                    // "위치"가 없거나 기본값이면 "현재방" 확인 (Python JSON 호환성)
+                    saved_loc = player.body.get_string("현재방");
+                }
+
+                // 2. 귀환지맵 확인 (Python: getStart()에서 사용)
+                let return_loc = player.body.get_string("귀환지맵");
+
+                if !saved_loc.is_empty() {
+                    // 저장된 위치 파싱: "낙양성:1" 형식
+                    if saved_loc.contains(':') {
+                        let parts: Vec<&str> = saved_loc.split(':').collect();
+                        PlayerPosition::new(parts[0].to_string(), parts[1].to_string())
+                    } else if saved_loc.contains('/') {
+                        // "낙양성/1" 형식도 지원
+                        let parts: Vec<&str> = saved_loc.split('/').collect();
+                        PlayerPosition::new(parts[0].to_string(), parts[1].to_string())
+                    } else {
+                        PlayerPosition::start_fallback()
+                    }
+                } else if !return_loc.is_empty() {
+                    // 귀환지맵 파싱
+                    if return_loc.contains(':') {
+                        let parts: Vec<&str> = return_loc.split(':').collect();
+                        PlayerPosition::new(parts[0].to_string(), parts[1].to_string())
+                    } else if return_loc.contains('/') {
+                        let parts: Vec<&str> = return_loc.split('/').collect();
+                        PlayerPosition::new(parts[0].to_string(), parts[1].to_string())
+                    } else {
+                        PlayerPosition::start_fallback()
+                    }
+                } else {
+                    // 기본값: Python과 동일하게 낙양성:42 (왕대협 NPC)
+                    PlayerPosition::start_fallback()
+                }
+            };
+
             // Store the player in the client
             client.set_player(player);
 
-            // Set player's starting position in WorldState and spawn mobs for start room
-            let start_pos = PlayerPosition::start(); // 낙양성:1
             {
                 let mut w = get_world_state().write().unwrap();
                 w.set_player_position(name.as_str(), start_pos.clone());
@@ -1493,8 +1553,6 @@ async fn show_room_to_player(
     // Get room from cache
     let world = get_world_state().read().unwrap();
     let room_key = format!("{}:{}", pos.zone, pos.room);
-    eprintln!("[show_room_to_player] Looking for room key: '{}', zone={}, room={}", room_key, pos.zone, pos.room);
-    eprintln!("[show_room_to_player] Room cache size: {}", world.room_cache.len());
     let room_output = if let Some(room) = world.room_cache.get_room_cached(&pos.zone, &pos.room) {
         let room_ref = room.read()
             .map_err(|e| format!("Room read lock error: {}", e))?;
@@ -1761,9 +1819,11 @@ pub(crate) fn send_to_others_in_room(
     msg: &str,
 ) {
     let world = get_world_state().read().unwrap();
-    let clients = broadcaster.clients.lock();
+    let mut clients = broadcaster.clients.lock();
     let line = format!("\r\n{}\r\n", msg);
-    for (_addr, client) in clients.iter() {
+    let mut dead_addrs = Vec::new();
+
+    for (&addr, client) in clients.iter() {
         if let Some(ref p) = client.player {
             if p.body.object_ref().getInt("투명상태") == 1 {
                 continue;
@@ -1774,10 +1834,20 @@ pub(crate) fn send_to_others_in_room(
             }
             if let Some(pos) = world.get_player_position(&name) {
                 if pos.zone == zone && pos.room == room {
-                    let _ = client.sender.send(line.clone());
+                    if let Err(_e) = client.sender.send(line.clone()) {
+                        // Send failed - client likely has broken pipe
+                        tracing::debug!("Failed to send to {} (connection dead)", addr);
+                        dead_addrs.push(addr);
+                    }
                 }
             }
         }
+    }
+
+    // Clean up dead clients
+    for addr in dead_addrs {
+        tracing::warn!("Removing dead client {} due to send failure in send_to_others_in_room", addr);
+        clients.remove(&addr);
     }
 }
 
@@ -1785,9 +1855,11 @@ pub(crate) fn send_to_others_in_room(
 /// clients 락을 잡은 채 send_to를 호출하면 데드락이 나므로, client.sender로 직접 전송.
 pub(crate) fn broadcast_shout(broadcaster: &crate::network::Broadcaster, msg: &str) {
     use crate::network::ClientState;
-    let clients = broadcaster.clients.lock();
+    let mut clients = broadcaster.clients.lock();
     let line = format!("\r\n{}\r\n", msg);
-    for (_addr, client) in clients.iter() {
+    let mut dead_addrs = Vec::new();
+
+    for (&addr, client) in clients.iter() {
         if client.state != ClientState::Active {
             continue;
         }
@@ -1799,40 +1871,71 @@ pub(crate) fn broadcast_shout(broadcaster: &crate::network::Broadcaster, msg: &s
         } else {
             continue;
         }
-        let _ = client.sender.send(line.clone());
+        if let Err(_e) = client.sender.send(line.clone()) {
+            tracing::debug!("Failed to send to {} (connection dead)", addr);
+            dead_addrs.push(addr);
+        }
+    }
+
+    // Clean up dead clients
+    for addr in dead_addrs {
+        tracing::warn!("Removing dead client {} due to send failure in broadcast_shout", addr);
+        clients.remove(&addr);
     }
 }
 
 /// 공지(notice): 게임 접속 전체에 전송. 외침거부와 무관하게 Active 클라이언트 전원에게.
 pub(crate) fn broadcast_notice(broadcaster: &crate::network::Broadcaster, msg: &str) {
     use crate::network::ClientState;
-    let clients = broadcaster.clients.lock();
+    let mut clients = broadcaster.clients.lock();
     let line = format!("\r\n{}\r\n", msg);
-    for (_addr, client) in clients.iter() {
+    let mut dead_addrs = Vec::new();
+
+    for (&addr, client) in clients.iter() {
         if client.state != ClientState::Active {
             continue;
         }
         if client.player.is_some() {
-            let _ = client.sender.send(line.clone());
+            if let Err(_e) = client.sender.send(line.clone()) {
+                tracing::debug!("Failed to send to {} (connection dead)", addr);
+                dead_addrs.push(addr);
+            }
         }
+    }
+
+    // Clean up dead clients
+    for addr in dead_addrs {
+        tracing::warn!("Removing dead client {} due to send failure in broadcast_notice", addr);
+        clients.remove(&addr);
     }
 }
 
 /// 특정 접속자(이름)에게만 메시지 전송. 스크립트 send_to_user에서 수집된 목록 처리용.
 pub(crate) fn send_to_one_user(broadcaster: &crate::network::Broadcaster, name: &str, msg: &str) {
     use crate::network::ClientState;
-    let clients = broadcaster.clients.lock();
+    let mut clients = broadcaster.clients.lock();
     let line = format!("\r\n{}\r\n", msg);
-    for (_addr, client) in clients.iter() {
+    let mut dead_addrs = Vec::new();
+
+    for (&addr, client) in clients.iter() {
         if client.state != ClientState::Active {
             continue;
         }
         if let Some(ref p) = client.player {
             if p.body.get_string("이름") == name {
-                let _ = client.sender.send(line.clone());
+                if let Err(_e) = client.sender.send(line.clone()) {
+                    tracing::debug!("Failed to send to {} (connection dead)", addr);
+                    dead_addrs.push(addr);
+                }
                 break;
             }
         }
+    }
+
+    // Clean up dead clients
+    for addr in dead_addrs {
+        tracing::warn!("Removing dead client {} due to send failure in send_to_one_user", addr);
+        clients.remove(&addr);
     }
 }
 
@@ -2610,14 +2713,23 @@ async fn handle_game_command(
             if let Some(pos) = w.get_player_position(&tname) {
                 if pos.zone == z && pos.room == r {
                     let line = format!("\r\n{}\r\n", tmsg);
-                    let clients = broadcaster.clients.lock();
-                    for (_a, c) in clients.iter() {
+                    let mut clients = broadcaster.clients.lock();
+                    let mut dead_addr: Option<SocketAddr> = None;
+                    for (&a, c) in clients.iter() {
                         if let Some(ref p) = c.player {
                             if p.body.get_string("이름") == tname {
-                                let _ = c.sender.send(line);
+                                if let Err(_e) = c.sender.send(line.clone()) {
+                                    // Target player has broken pipe - mark for cleanup
+                                    tracing::warn!("Failed to send to emotion target {} (broken pipe)", tname);
+                                    dead_addr = Some(a);
+                                }
                                 break;
                             }
                         }
+                    }
+                    // Clean up dead client if needed
+                    if let Some(addr) = dead_addr {
+                        clients.remove(&addr);
                     }
                 }
             }
@@ -2993,16 +3105,25 @@ async fn handle_game_command(
     }
     if let Some((names, msg)) = broadcast_to_players.take() {
         let line = format!("\r\n{}\r\n", msg);
-        let clients = broadcaster.clients.lock();
+        let mut clients = broadcaster.clients.lock();
+        let mut dead_addrs = Vec::new();
         for name in names {
-            for (_a, c) in clients.iter() {
+            for (&a, c) in clients.iter() {
                 if let Some(ref p) = c.player {
                     if p.body.get_string("이름") == name {
-                        let _ = c.sender.send(line.clone());
+                        if let Err(_e) = c.sender.send(line.clone()) {
+                            tracing::warn!("Failed to broadcast to player {} (broken pipe)", name);
+                            dead_addrs.push(a);
+                        }
                         break;
                     }
                 }
             }
+        }
+        // Clean up dead clients
+        for addr in dead_addrs {
+            tracing::warn!("Removing dead client {} due to send failure in broadcast_to_players", addr);
+            clients.remove(&addr);
         }
     }
     if let Some((target_name, message, sender_name)) = tell_pending.take() {

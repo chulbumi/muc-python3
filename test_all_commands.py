@@ -1,157 +1,299 @@
 #!/usr/bin/env python3
-# -*- coding: utf-8 -*-
-import socket
+"""
+MUD Command Comparison Test
+Tests commands on both Python (9900) and Rust (9999) servers and compares outputs
+"""
+
+import telnetlib
 import time
-import sys
+import re
+import json
+from datetime import datetime
 
-def test_command(port, char_name, password, command):
-    """Test single command on server"""
-    try:
-        sock = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
-        sock.settimeout(5)
-        sock.connect(("127.0.0.1", port))
+class MUDTester:
+    def __init__(self, host='localhost', port=9900, character_name=None):
+        self.host = host
+        self.port = port
+        self.character_name = character_name or f"테스터{port}"
+        self.tn = None
+        self.connected = False
 
-        time.sleep(0.2)
-        sock.recv(4096)  # Welcome
+    def connect(self):
+        """Connect to the MUD server"""
+        try:
+            self.tn = telnetlib.Telnet(self.host, self.port, timeout=10)
+            self.connected = True
+            time.sleep(0.5)
+            return True
+        except Exception as e:
+            print(f"Connection error to {self.host}:{self.port} - {e}")
+            return False
 
-        sock.send(f"{char_name}\r\n".encode("utf-8"))
-        time.sleep(0.2)
-        sock.recv(4096)
+    def login(self):
+        """Login to the MUD"""
+        if not self.connected:
+            return False
 
-        sock.send(f"{password}\r\n".encode("utf-8"))
-        time.sleep(0.4)
-        login_resp = sock.recv(4096).decode("utf-8", errors="ignore")
+        # Wait for login prompt
+        time.sleep(1)
 
-        if "암호" in login_resp or "틀렸습니다" in login_resp:
-            sock.close()
-            return False, "login_failed"
+        # Send character name
+        self.send_command(self.character_name)
+        time.sleep(1)
 
-        # Send command
-        sock.send(f"{command}\r\n".encode("utf-8"))
-        time.sleep(0.3)
+        # Send password (assuming empty or default)
+        self.send_command("")
+        time.sleep(1)
 
-        response = sock.recv(8192).decode("utf-8", errors="ignore")
+        # Skip through any initial prompts
+        for _ in range(3):
+            self.send_command("")
+            time.sleep(0.5)
 
-        sock.close()
+        return True
 
-        # Check if command was recognized
-        has_content = len(response) > 10
-        has_error = "알 수 없는" in response or "Unknown" in response or "없는 명령" in response
+    def send_command(self, command):
+        """Send a command to the MUD"""
+        if self.tn:
+            try:
+                cmd_bytes = command.encode('utf-8') + b'\n'
+                self.tn.write(cmd_bytes)
+            except Exception as e:
+                print(f"Send command error: {e}")
 
-        return True, {
-            "has_content": has_content,
-            "has_error": has_error,
-            "length": len(response)
-        }
+    def get_output(self, wait_time=1):
+        """Get output from the MUD"""
+        if self.tn:
+            time.sleep(wait_time)
+            try:
+                output = self.tn.read_very_eager().decode('utf-8', errors='ignore')
+                return output
+            except Exception as e:
+                print(f"Get output error: {e}")
+                return ""
+        return ""
 
-    except Exception as e:
-        return False, str(e)
+    def execute_command(self, command, wait_time=1):
+        """Execute a command and return the output"""
+        self.send_command(command)
+        return self.get_output(wait_time)
 
-def test_all_commands(port, commands):
-    """Test all commands on a server"""
-    results = {}
+    def cleanup_output(self, output):
+        """Clean up output for comparison"""
+        # Remove extra whitespace
+        output = re.sub(r'\s+', ' ', output)
+        # Remove special characters that might differ
+        output = output.strip()
+        return output
 
-    for cmd in commands:
-        success, result = test_command(port, "검사", "9999", cmd)
+    def disconnect(self):
+        """Disconnect from the MUD"""
+        if self.tn:
+            try:
+                self.tn.close()
+            except:
+                pass
+            self.connected = False
 
-        if success:
-            if isinstance(result, dict):
-                results[cmd] = result
-            else:
-                results[cmd] = {"has_content": False, "has_error": True}
-        else:
-            results[cmd] = {"has_content": False, "has_error": True}
 
-        # Small delay between commands
-        time.sleep(0.1)
+def test_command(tester, command, wait_time=1):
+    """Test a single command and return the output"""
+    print(f"  Testing: {command}")
+    output = tester.execute_command(command, wait_time)
+    return output
 
-    return results
+
+def compare_outputs(py_output, rust_output, command):
+    """Compare outputs from Python and Rust servers"""
+    result = {
+        'command': command,
+        'same': True,
+        'differences': [],
+        'py_output': py_output,
+        'rust_output': rust_output
+    }
+
+    # Clean outputs for comparison
+    py_clean = py_output.strip()
+    rust_clean = rust_output.strip()
+
+    # Normalize whitespace for comparison
+    py_normalized = re.sub(r'\s+', ' ', py_clean)
+    rust_normalized = re.sub(r'\s+', ' ', rust_clean)
+
+    if py_normalized != rust_normalized:
+        result['same'] = False
+
+        # Find differences
+        py_lines = py_clean.split('\n')
+        rust_lines = rust_clean.split('\n')
+
+        if len(py_lines) != len(rust_lines):
+            result['differences'].append(f"Line count differs: Python={len(py_lines)}, Rust={len(rust_lines)}")
+
+        # Compare line by line
+        max_lines = max(len(py_lines), len(rust_lines))
+        for i in range(max_lines):
+            py_line = py_lines[i] if i < len(py_lines) else "(missing)"
+            rust_line = rust_lines[i] if i < len(rust_lines) else "(missing)"
+
+            if py_line.strip() != rust_line.strip():
+                py_norm = re.sub(r'\s+', ' ', py_line.strip())
+                rust_norm = re.sub(r'\s+', ' ', rust_line.strip())
+                if py_norm != rust_norm:
+                    result['differences'].append(f"Line {i+1}:")
+                    result['differences'].append(f"  Python: {py_line}")
+                    result['differences'].append(f"  Rust:   {rust_line}")
+
+    return result
+
 
 def main():
-    # Read all commands
-    with open("/tmp/all_commands.txt", "r") as f:
-        commands = [line.strip() for line in f if line.strip()]
+    """Main test function"""
+    results = []
 
-    # Remove test/debug commands
-    exclude = ["test", "test_output", "test_simple", "test_syntax", "debug_test", "comm", "master"]
-    commands = [c for c in commands if c not in exclude]
+    # Commands to test
+    commands = [
+        ('능력치', 1, 'Stats'),
+        ('점수', 1, 'Score'),
+        ('무공', 1, 'Martial Arts'),
+        ('소지품', 1, 'Inventory'),
+        ('누구', 1, 'Who'),
+        ('봐', 1, 'Look'),
+        ('말 테스트', 1, 'Say'),
+        ('지도', 1, 'Map'),
+        ('어디', 1, 'Where'),
+        ('동', 2, 'East'),
+        ('서', 2, 'West'),
+        ('남', 2, 'South'),
+        ('북', 2, 'North'),
+    ]
 
-    print("=" * 80)
-    print(f"전체 명령어 테스트 - 총 {len(commands)}개")
-    print("=" * 80)
+    print("=" * 60)
+    print("MUD Command Comparison Test")
+    print("=" * 60)
+    print(f"Start time: {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}")
+    print()
 
-    all_results = {}
+    # Test each command
+    for cmd, wait_time, description in commands:
+        print(f"\n[{description}] Testing command: {cmd}")
+        print("-" * 40)
 
-    for port, server_name in [(9900, "Python"), (9999, "Rust")]:
-        print(f"\n[{server_name} 서버 (포트 {port})] 테스트 중...")
-        print("-" * 60)
+        # Connect to Python server
+        print("  Connecting to Python server (9900)...")
+        py_tester = MUDTester(host='localhost', port=9900, character_name='테스터파이썬')
+        if py_tester.connect():
+            py_tester.login()
+            time.sleep(1)
+            py_output = test_command(py_tester, cmd, wait_time)
+            py_tester.disconnect()
+            print(f"  Python output length: {len(py_output)} chars")
+        else:
+            print("  Failed to connect to Python server")
+            py_output = ""
 
-        results = test_all_commands(port, commands)
+        # Connect to Rust server
+        print("  Connecting to Rust server (9999)...")
+        rust_tester = MUDTester(host='localhost', port=9999, character_name='테스터러스트')
+        if rust_tester.connect():
+            rust_tester.login()
+            time.sleep(1)
+            rust_output = test_command(rust_tester, cmd, wait_time)
+            rust_tester.disconnect()
+            print(f"  Rust output length: {len(rust_output)} chars")
+        else:
+            print("  Failed to connect to Rust server")
+            rust_output = ""
 
-        # Count results
-        total = len(results)
-        ok = sum(1 for r in results.values() if r.get("has_content") and not r.get("has_error"))
-        errors = sum(1 for r in results.values() if r.get("has_error"))
-        empty = sum(1 for r in results.values() if not r.get("has_content"))
+        # Compare outputs
+        print("  Comparing outputs...")
+        comparison = compare_outputs(py_output, rust_output, cmd)
+        results.append(comparison)
 
-        print(f"  총: {total}")
-        print(f"  정상: {ok}")
-        print(f"  오류/알 수 없음: {errors}")
-        print(f"  응답 없음: {empty}")
+        if comparison['same']:
+            print(f"  Result: Outputs are IDENTICAL")
+        else:
+            print(f"  Result: Outputs DIFFER")
+            print(f"  Differences found: {len(comparison['differences'])}")
 
-        all_results[server_name] = results
+    # Generate report
+    generate_report(results)
 
-    # Comparison
-    print("\n" + "=" * 80)
-    print("[명령어별 비교]")
-    print("=" * 80)
+    print("\n" + "=" * 60)
+    print("Test completed!")
+    print("=" * 60)
 
-    py_results = all_results.get("Python", {})
-    rs_results = all_results.get("Rust", {})
 
-    py_ok = sum(1 for r in py_results.values() if r.get("has_content") and not r.get("has_error"))
-    rs_ok = sum(1 for r in rs_results.values() if r.get("has_content") and not r.get("has_error"))
+def generate_report(results):
+    """Generate a comparison report"""
+    report_path = '/home/ubuntu/muc-python3/COMMAND_COMPARISON.md'
 
-    print(f"\nPython: {py_ok}/{len(py_results)} 정상 작동")
-    print(f"Rust:   {rs_ok}/{len(rs_results)} 정상 작동")
+    with open(report_path, 'w', encoding='utf-8') as f:
+        f.write("# MUD Command Comparison Report\n\n")
+        f.write(f"**Generated:** {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}\n\n")
+        f.write("**Servers:**\n")
+        f.write("- Python Server: localhost:9900\n")
+        f.write("- Rust Server: localhost:9999\n\n")
+        f.write("**Characters:**\n")
+        f.write("- Python: 테스터파이썬\n")
+        f.write("- Rust: 테스터러스트\n\n")
+        f.write("---\n\n")
 
-    # Show commands that work on both
-    both_ok = []
-    for cmd in commands:
-        py = py_results.get(cmd, {})
-        rs = rs_results.get(cmd, {})
-        if (py.get("has_content") and not py.get("has_error") and
-            rs.get("has_content") and not rs.get("has_error")):
-            both_ok.append(cmd)
+        # Summary
+        same_count = sum(1 for r in results if r['same'])
+        diff_count = len(results) - same_count
 
-    print(f"\n양쪽 모두 정상 작동: {len(both_ok)}/{len(commands)} ({100*len(both_ok)//len(commands)}%)")
+        f.write("## Summary\n\n")
+        f.write(f"- **Total Commands Tested:** {len(results)}\n")
+        f.write(f"- **Identical Outputs:** {same_count} \n")
+        f.write(f"- **Different Outputs:** {diff_count} x\n\n")
+        f.write(f"**Pass Rate:** {same_count/len(results)*100:.1f}%\n\n")
+        f.write("---\n\n")
 
-    # Show differences
-    py_only = []
-    rs_only = []
+        # Detailed results
+        f.write("## Detailed Results\n\n")
 
-    for cmd in commands:
-        py = py_results.get(cmd, {})
-        rs = rs_results.get(cmd, {})
-        py_works = py.get("has_content") and not py.get("has_error")
-        rs_works = rs.get("has_content") and not rs.get("has_error")
+        for i, result in enumerate(results, 1):
+            f.write(f"### {i}. {result['command']}\n\n")
 
-        if py_works and not rs_works:
-            py_only.append(cmd)
-        elif rs_works and not py_works:
-            rs_only.append(cmd)
+            if result['same']:
+                f.write("**Status:** IDENTICAL\n\n")
+            else:
+                f.write("**Status:** DIFFERENT\n\n")
+                f.write("**Differences:**\n\n")
+                for diff in result['differences']:
+                    f.write(f"- {diff}\n")
+                f.write("\n")
 
-    if py_only:
-        print(f"\nPython만 작동 ({len(py_only)}): {', '.join(py_only[:10])}")
-        if len(py_only) > 10:
-            print(f"  ... 외 {len(py_only)-10}개")
+            # Python output
+            f.write("**Python Server Output:**\n\n")
+            f.write("```\n")
+            f.write(result['py_output'] if result['py_output'] else "(No output)")
+            f.write("\n```\n\n")
 
-    if rs_only:
-        print(f"\nRust만 작동 ({len(rs_only)}): {', '.join(rs_only[:10])}")
-        if len(rs_only) > 10:
-            print(f"  ... 외 {len(rs_only)-10}개")
+            # Rust output
+            f.write("**Rust Server Output:**\n\n")
+            f.write("```\n")
+            f.write(result['rust_output'] if result['rust_output'] else "(No output)")
+            f.write("\n```\n\n")
 
-    print("\n" + "=" * 80)
+            f.write("---\n\n")
 
-if __name__ == "__main__":
+        # Recommendations
+        if diff_count > 0:
+            f.write("## Recommendations\n\n")
+            f.write("The following commands need to be aligned between Python and Rust implementations:\n\n")
+
+            for result in results:
+                if not result['same']:
+                    f.write(f"- **{result['command']}**")
+                    if result['differences']:
+                        f.write(f": {result['differences'][0] if result['differences'] else 'See details above'}")
+                    f.write("\n")
+
+    print(f"\nReport saved to: {report_path}")
+
+
+if __name__ == '__main__':
     main()

@@ -236,10 +236,10 @@ mod tests {
         let mut registry = CommandRegistry::new();
         register_skill_commands(&mut registry);
 
-        let player = Body::new();
+        let mut player = Body::new();
         let cmd = registry.get("무공").unwrap();
 
-        let result = (cmd.handler)(&player, &[]);
+        let result = (cmd.handler)(&mut player, &[]);
         assert!(matches!(result, CommandResult::Output(_)));
     }
 
@@ -253,7 +253,7 @@ mod tests {
 
         let cmd = registry.get("기술보기").unwrap();
 
-        let result = (cmd.handler)(&player, &["target"]);
+        let result = (cmd.handler)(&mut player, &["target"]);
         assert!(matches!(result, CommandResult::Error(_)));
     }
 
@@ -267,7 +267,7 @@ mod tests {
 
         let cmd = registry.get("기술보기").unwrap();
 
-        let result = (cmd.handler)(&player, &[]);
+        let result = (cmd.handler)(&mut player, &[]);
         assert!(matches!(result, CommandResult::Error(_)));
     }
 }

@@ -61,9 +61,14 @@ impl PlayerPosition {
         }
     }
 
-    /// Create starting position (낙양성:1)
+    /// Create starting position (Python 호환: 낙양성:42 왕대협)
     pub fn start() -> Self {
-        Self::new("낙양성".to_string(), "1".to_string())
+        Self::new("낙양성".to_string(), "42".to_string())
+    }
+
+    /// Create fallback starting position (same as start - Python 호환: 낙양성:42 왕대협)
+    pub fn start_fallback() -> Self {
+        Self::new("낙양성".to_string(), "42".to_string())
     }
 
     /// Get the position key for room lookup
@@ -247,7 +252,9 @@ impl WorldState {
             .room_cache
             .get_room(zone, room)
             .ok()
-            .and_then(|r| r.read().ok().map(|g| g.mob_ids.clone()))
+            .and_then(|r| {
+                r.read().ok().map(|g| g.mob_ids.clone())
+            })
             .unwrap_or_default();
         self.mob_cache.spawn_mobs_for_room(zone, room, &mob_ids);
     }

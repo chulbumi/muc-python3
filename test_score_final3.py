@@ -4,20 +4,20 @@ import time
 
 sock = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
 sock.settimeout(10)
-sock.connect(('localhost', 9990))
+sock.connect(('localhost', 9999))
 
 # Get banner
 time.sleep(1)
 sock.recv(8192)
 
 # Login as 점수
-print("=== Login as 점수 ===")
-sock.sendall("점수\r\n".encode('utf-8'))
+print("=== Login as 테스트 ===")
+sock.sendall("테스트\r\n".encode('utf-8'))
 time.sleep(1)
 sock.recv(8192)
 
-# Empty password
-sock.sendall(b"\r\n")
+# Password
+sock.sendall("1234\r\n".encode('utf-8'))
 time.sleep(1)
 
 # Get all login messages

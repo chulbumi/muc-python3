@@ -6,7 +6,7 @@ use std::collections::HashMap;
 use std::net::SocketAddr;
 use std::sync::Arc;
 use parking_lot::Mutex;
-use tracing::debug;
+use tracing::{debug, warn};
 
 use crate::network::{client::ClientState, Client};
 
@@ -100,7 +100,8 @@ impl Broadcaster {
     ///
     /// If `exclude` is Some, that client will not receive the message.
     pub fn broadcast(&self, message: &str, exclude: Option<SocketAddr>) {
-        let clients = self.clients.lock();
+        let mut clients = self.clients.lock();
+        let mut dead_addrs = Vec::new();
 
         for (&addr, client) in clients.iter() {
             if Some(addr) != exclude {
@@ -114,10 +115,18 @@ impl Broadcaster {
 
                 let processed_message = replace_player_templates(message, &player_name);
 
-                if let Err(e) = client.sender.send(processed_message) {
-                    debug!("Failed to send to {}: {}", addr, e);
+                if let Err(_e) = client.sender.send(processed_message) {
+                    // Send failed - client's send task likely exited (broken pipe)
+                    debug!("Failed to send to {} (connection dead), marking for cleanup", addr);
+                    dead_addrs.push(addr);
                 }
             }
+        }
+
+        // Clean up dead clients to prevent memory leaks and cascading errors
+        for addr in dead_addrs {
+            warn!("Removing dead client {} due to send failure (broken pipe)", addr);
+            clients.remove(&addr);
         }
     }
 
@@ -126,7 +135,8 @@ impl Broadcaster {
     ///
     /// Only clients with `ClientState::Active` will receive the message.
     pub fn broadcast_active(&self, message: &str, exclude: Option<SocketAddr>) {
-        let clients = self.clients.lock();
+        let mut clients = self.clients.lock();
+        let mut dead_addrs = Vec::new();
 
         for (&addr, client) in clients.iter() {
             if Some(addr) != exclude && client.state == ClientState::Active {
@@ -140,10 +150,18 @@ impl Broadcaster {
 
                 let processed_message = replace_player_templates(message, &player_name);
 
-                if let Err(e) = client.sender.send(processed_message) {
-                    debug!("Failed to send to {}: {}", addr, e);
+                if let Err(_e) = client.sender.send(processed_message) {
+                    // Send failed - client's send task likely exited (broken pipe)
+                    debug!("Failed to send to {} (connection dead), marking for cleanup", addr);
+                    dead_addrs.push(addr);
                 }
             }
+        }
+
+        // Clean up dead clients to prevent memory leaks and cascading errors
+        for addr in dead_addrs {
+            warn!("Removing dead client {} due to send failure (broken pipe)", addr);
+            clients.remove(&addr);
         }
     }
 
