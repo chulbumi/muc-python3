@@ -1,13 +1,13 @@
 // Formatting utilities for Rhai
 
 fn fill_space(width, text) {
-    let len = text.chars().count();
-    if len >= width {
+    let text_len = len(text);
+    if text_len >= width {
         text
     } else {
-        let padding = width - len;
+        let padding = width - text_len;
         let result = text;
-        let mut i = 0;
+        let i = 0;
         while i < padding {
             result = result + " ";
             i = i + 1;
@@ -17,13 +17,13 @@ fn fill_space(width, text) {
 }
 
 fn pad_start(s, width, fill) {
-    let len = s.chars().count();
-    if len >= width {
+    let s_len = len(s);
+    if s_len >= width {
         s
     } else {
-        let padding = width - len;
-        let mut result = "";
-        let mut i = 0;
+        let padding = width - s_len;
+        let result = "";
+        let i = 0;
         while i < padding {
             result = result + fill;
             i = i + 1;

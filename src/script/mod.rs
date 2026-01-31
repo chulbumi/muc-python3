@@ -435,11 +435,13 @@ fn serde_json_to_value(v: &serde_json::Value) -> Value {
         }
         serde_json::Value::String(s) => Value::String(s.clone()),
         serde_json::Value::Array(arr) => {
+            // 배열을 파이프로 구분된 문자열로 변환 (Rust 내부 형식)
+            // Python은 ["skill1", "skill2"] 또는 ["skill1 100 100", "skill2 100 100"] 형식으로 저장
             let s = arr
                 .iter()
                 .filter_map(|x| x.as_str())
                 .collect::<Vec<_>>()
-                .join(" ");
+                .join("|");
             Value::String(s)
         }
         serde_json::Value::Object(_) => Value::String(serde_json::to_string(v).unwrap_or_default()),
@@ -460,6 +462,20 @@ pub fn save_body_to_json(body: &mut Body, path: &str) -> bool {
 
     let mut uso = serde_json::Map::new();
     for (k, v) in &body.object.attr {
+        // Python 호환성: 파이프 구분 문자열을 배열로 변환
+        if k == "무공숙련도" || k == "무공이름" {
+            if let Value::String(s) = v {
+                if !s.is_empty() {
+                    // "skill1|skill2" 또는 "skill1 level exp|skill2 level exp" 형식을 배열로 변환
+                    let parts: Vec<serde_json::Value> = s.split('|')
+                        .map(|p| serde_json::Value::String(p.trim().to_string()))
+                        .filter(|p| !p.as_str().map(|s| s.is_empty()).unwrap_or(true))
+                        .collect();
+                    uso.insert(k.clone(), serde_json::Value::Array(parts));
+                    continue;
+                }
+            }
+        }
         uso.insert(k.clone(), value_to_serde_json(v));
     }
 
@@ -7426,6 +7442,11 @@ impl ScriptStorage {
         let library_source = self.get_library_source();
         let script_with_main = format!("{}\n{}\nmain(ob, cmdline)", library_source, script.source);
         println!("[DEBUG] About to run script with_main, length={}", script_with_main.len());
+        // Print first 20 lines for debugging
+        let lines: Vec<&str> = script_with_main.lines().take(400).collect();
+        for (i, line) in lines.iter().enumerate() {
+            println!("[DEBUG] Line {}: {:?}", i + 1, line);
+        }
         let result = engine.run_with_scope(&mut scope, &script_with_main);
         println!("[DEBUG] Script run result: {:?}", result);
         result.map_err(|e| format!("스크립트 실행 오류: {}", e))?;

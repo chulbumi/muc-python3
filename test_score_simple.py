@@ -1,63 +1,83 @@
-#!/usr/bin/env python3
 import socket
 import time
+import sys
 
-sock = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
-sock.settimeout(10)
-sock.connect(('localhost', 9990))
+def recv_all(s, timeout=0.3):
+    s.setblocking(False)
+    data = b""
+    start = time.time()
+    while time.time() - start < timeout:
+        try:
+            chunk = s.recv(4096)
+            if not chunk:
+                break
+            data += chunk
+        except BlockingIOError:
+            time.sleep(0.05)
+    return data
 
-# Get banner
-time.sleep(1)
-sock.recv(8192)
+def test_score():
+    s = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+    s.connect(('localhost', 9999))
+    s.setblocking(False)
+    
+    time.sleep(0.3)
+    initial = recv_all(s, 0.5)
+    print("INITIAL:", len(initial), "bytes")
+    
+    name = f"test{int(time.time() * 1000) % 10000}"
+    password = "9999"
+    gender = "남"
+    
+    try:
+        # 빠른도우미
+        s.sendall("빠른도우미\r\n".encode('utf-8'))
+        time.sleep(0.2)
+        recv_all(s, 0.2)
+        
+        # Name
+        s.sendall(f"{name}\r\n".encode('utf-8'))
+        time.sleep(0.2)
+        resp = recv_all(s, 0.2)
+        print(f"After name: {len(resp)} bytes")
+        
+        # Password
+        s.sendall(f"{password}\r\n".encode('utf-8'))
+        time.sleep(0.2)
+        recv_all(s, 0.2)
+        
+        # Gender
+        s.sendall(f"{gender}\r\n".encode('utf-8'))
+        time.sleep(0.5)
+        resp = recv_all(s, 1.0)
+        print(f"After gender: {len(resp)} bytes")
+        print(resp.decode('utf-8', errors='replace')[-500:])
+        
+        # Score
+        s.sendall("능력치\r\n".encode('utf-8'))
+        time.sleep(0.5)
+        resp = recv_all(s, 1.0)
+        print(f"\n=== SCORE OUTPUT ({len(resp)} bytes) ===")
+        output = resp.decode('utf-8', errors='replace')
+        print(output)
+        
+        if "오류" in output or "Syntax error" in output:
+            print("\n*** ERROR: Syntax error! ***")
+            return 1
+        elif "체력" in output or "힘" in output:
+            print("\n*** SUCCESS: Score works! ***")
+            return 0
+        else:
+            print("\n*** UNKNOWN ***")
+            return 2
+            
+    except Exception as e:
+        print(f"Exception: {e}")
+        return 3
+    finally:
+        try:
+            s.close()
+        except:
+            pass
 
-# Login as 점수
-sock.sendall("점수\r\n".encode('utf-8'))
-time.sleep(1)
-sock.recv(8192)
-
-# Empty password
-sock.sendall(b"\r\n")
-time.sleep(1)
-
-# Clear login messages
-sock.settimeout(1)
-try:
-    while True:
-        chunk = sock.recv(8192)
-        if not chunk:
-            break
-except socket.timeout:
-    pass
-
-sock.settimeout(10)
-time.sleep(1)
-
-# Try 봐 (look) command first
-print("=== Sending: 봐 (look) ===")
-sock.sendall("봐\r\n".encode('utf-8'))
-time.sleep(1)
-
-response = sock.recv(8192)
-print(f"Response (len={len(response)}):")
-print(response.decode('utf-8', errors='replace')[:300])
-
-# Then try 능력치
-print("\n=== Sending: 능력치 ===")
-sock.sendall("능력치\r\n".encode('utf-8'))
-time.sleep(2)
-
-all_data = b""
-sock.settimeout(2)
-try:
-    while True:
-        chunk = sock.recv(4096)
-        if not chunk:
-            break
-        all_data += chunk
-except socket.timeout:
-    pass
-
-print(f"Response (len={len(all_data)}):")
-print(all_data.decode('utf-8', errors='replace'))
-
-sock.close()
+sys.exit(test_score())
