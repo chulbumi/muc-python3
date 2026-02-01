@@ -106,7 +106,6 @@ fn step3_monster_appear(ob) {
 
     send_line(ob, "");
 
-    // wait_key_input will add the prompt
     wait_key_input("step4_pre_combat", "흑백쌍괴 봐");
 }
 
@@ -332,8 +331,6 @@ fn step8_pursuit_arrive(ob) {
     send_line(ob, "하늘이 용서치 않을 것이다...\"");
 
     send_line(ob, "");
-
-    // wait_key_input will add the prompt
     wait_key_input("step9_combat2_start", "봐");
 }
 
@@ -357,8 +354,6 @@ fn step9_combat2_start(ob) {
     send_line(ob, "음흉한 살기를 풍기는 \x1b[33m흑백쌍괴\x1b[0;37;40m가 \x1b[1m당신\x1b[0;37;40m을 노려보고 있습니다.");
 
     send_line(ob, "");
-
-    // wait_key_input will add the prompt
     wait_key_input("step10_combat_skill", "흑백쌍괴 쳐");
 }
 
@@ -380,8 +375,6 @@ fn step10_combat_skill(ob) {
     send_line(ob, "\x1b[33m흑백쌍괴\x1b[0;37;40m가 당신을 참수도로 푹~ 찔렀습니다 \x1b[1;31m810\x1b[0;37;40m");
 
     send_line(ob, "");
-
-    // wait_key_input will add the prompt
     wait_key_input("step11_combat_victory", "혈천섬광 시전");
 }
 
@@ -727,7 +720,6 @@ fn step22_tutorial_start(ob) {
 
     send_line(ob, "[450/450, 18/18]");
 
-    // wait_key_input will add the prompt
     wait_key_input("step23_tutorial_inventory", "소지품");
 }
 
