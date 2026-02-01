@@ -63,3 +63,9 @@ fn get_key_input(expected) {
     throw #{ type: "doumi_suspend", op: "get_key_input", prompt: "", expected: expected };
 }
 
+// 초기화 함수 (단계 기반에서는 no-op, 하위 호환용)
+fn start_script(ob) {
+    // 스크립트 시작 시 초기화 (step-based에서는 no-op)
+    // 이전 버전과의 호환성을 위해 제공
+}
+

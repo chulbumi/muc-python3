@@ -4,8 +4,6 @@
 // ========== Act 1: The Escape (steps 1-5) ==========
 
 fn step1_welcome(ob) {
-    send_line(ob, "\x1b[0;37;40m\x1b[H\x1b[2J");
-
     set_tick(3);
 
     send_line(ob, "\x1b[1;30;40m옷깃을 가볍게 적시는 가랑비가 촉촉히 내리는 새벽 .......\x1b[0;37;40m");
@@ -60,7 +58,7 @@ fn step1_welcome(ob) {
 
     send_line(ob, "");
 
-    send_line(ob, "기침과 함께 \x1b[31m검붙은\x1b[37m 핏덩이가 뿜어져 나온다. 외상 뿐 아니라 깊은 내상도 입은");
+    send_line(ob, "기침과 함께 \x1b[31m검붉은\x1b[37m 핏덩이가 뿜어져 나온다. 외상 뿐 아니라 깊은 내상도 입은");
 
     send_line(ob, "것 같다.");
 
