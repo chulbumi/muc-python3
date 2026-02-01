@@ -97,6 +97,9 @@ struct LoginSession {
     doumi_resume_op: Option<String>,
     /// get_key_input용. suspend.expected와 일치하는 입력만 통과.
     doumi_resume_expected: Option<String>,
+    /// True when we're actively waiting for user input (wait_enter, wait_input, wait_key_input)
+    /// When false, inputs received during script output are discarded
+    waiting_for_input: bool,
 }
 
 impl LoginSession {
@@ -119,6 +122,7 @@ impl LoginSession {
             doumi_step: None,
             doumi_resume_op: None,
             doumi_resume_expected: None,
+            waiting_for_input: false,
         }
     }
 
@@ -599,8 +603,14 @@ async fn process_login_state(
                 LoginAction::GameCommand(name)
             }
             LoginState::ScriptMode => {
-                // Handle script-based character creation
-                handle_script_state(session, input)
+                // If script is outputting (not waiting for input), discard any received input
+                // This prevents buffered input from being processed when wait_enter/wait_input is reached
+                if !session.waiting_for_input {
+                    LoginAction::None
+                } else {
+                    // We're actively waiting for input - process it
+                    handle_script_state(session, input)
+                }
             }
         }
     };
@@ -1046,6 +1056,10 @@ fn process_script_line(
     eprintln!("[process_script_line] Calling run_doumi_to_result: current_step={:?}, resume_op={:?}, initial_delay={}",
         current_step, resume_op, session.delay_after_output);
 
+    // Clear waiting flag - we're about to process script output, not waiting for input yet
+    // Will be set to true again when we reach the next suspend (wait_enter/wait_input/wait_key_input)
+    session.waiting_for_input = false;
+
     let result = run_doumi_to_result(
         &session.doumi_script_path,
         &mut ob,
@@ -1067,6 +1081,9 @@ fn process_script_line(
 
             // Store delay for line-by-line output
             session.delay_after_output = delay_ms;
+
+            // We're now waiting for user input - accept inputs from this point
+            session.waiting_for_input = true;
 
             // Don't duplicate the prompt if it's already in the lines
             let joined = lines.join("");
