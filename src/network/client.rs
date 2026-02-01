@@ -91,12 +91,12 @@ struct LoginSession {
     doumi_script_path: String,
     /// Rhai 도우미 ob (get_name/get_password/get_sex 결과 등). Send 요구로 HashMap<String,String>로 보관.
     doumi_ob: Option<HashMap<String, String>>,
-    /// suspend 시 대기 op (get_name, get_password, get_sex, get_enter, get_key_input 등). resume 시 (op, input)으로 전달.
+    /// 현재 실행할 단계 함수명 (예: "step1_welcome", "step2_name"). None이면 처음 시작.
+    doumi_step: Option<String>,
+    /// suspend 시 대기 op (wait_enter, get_name, get_password, get_sex, get_key_input 등)
     doumi_resume_op: Option<String>,
     /// get_key_input용. suspend.expected와 일치하는 입력만 통과.
     doumi_resume_expected: Option<String>,
-    /// suspend 시 현재까지 실행된 위치 (resume 시 스크립트를 이 위치부터 계속 실행)
-    doumi_resume_position: usize,
 }
 
 impl LoginSession {
@@ -116,9 +116,9 @@ impl LoginSession {
             delay_after_output: 0,
             doumi_script_path: String::new(),
             doumi_ob: None,
+            doumi_step: None,
             doumi_resume_op: None,
             doumi_resume_expected: None,
-            doumi_resume_position: 0,
         }
     }
 
@@ -510,9 +510,9 @@ async fn process_login_state(
                         "lib/doumi/초기도우미".to_string()
                     };
                     session.doumi_ob = None;
+                    session.doumi_step = None;  // None = step1_welcome부터 시작
                     session.doumi_resume_op = None;
                     session.doumi_resume_expected = None;
-                    session.doumi_resume_position = 0;
                     LoginAction::StartScript
                 } else {
                     session.state = LoginState::Password;
@@ -547,9 +547,9 @@ async fn process_login_state(
                         "lib/doumi/초기도우미".to_string()
                     };
                     session.doumi_ob = None;
+                    session.doumi_step = None;  // None = step1_welcome부터 시작
                     session.doumi_resume_op = None;
                     session.doumi_resume_expected = None;
-                    session.doumi_resume_position = 0;
                     LoginAction::StartScript
                 } else {
                     session.state = LoginState::Password;
@@ -655,7 +655,28 @@ async fn process_login_state(
                 };
 
                 if let Some(msg) = msg {
-                    broadcaster.send_to(addr, &msg)?;
+                    // Check if we should apply line-by-line delays (DOUMI scripts with set_tick)
+                    let (delay_per_line, is_doumi) = {
+                        let clients = broadcaster.clients.lock();
+                        clients.get(&addr)
+                            .and_then(|c| c.login_session.as_ref())
+                            .map(|s| (s.delay_after_output, !s.doumi_script_path.is_empty()))
+                            .unwrap_or((0, false))
+                    };
+
+                    if delay_per_line > 0 && is_doumi {
+                        // DOUMI script with tick delay: send each line separately with delay
+                        for line in msg.split("\r\n") {
+                            if !line.is_empty() {
+                                broadcaster.send_to(addr, &format!("{}\r\n", line))?;
+                                eprintln!("[ TICK] Line delay: {}ms", delay_per_line);
+                                tokio::time::sleep(tokio::time::Duration::from_millis(delay_per_line)).await;
+                            }
+                        }
+                    } else {
+                        // Normal output: send all at once
+                        broadcaster.send_to(addr, &msg)?;
+                    }
                 }
 
                 // Apply tick delay if any (after sending output)
@@ -694,31 +715,63 @@ async fn process_login_state(
         }
         LoginAction::ScriptContinue => {
             // Get script output to send
-            let (msg, should_wait, script_complete, player_name, delay_ms) = {
+            let (msg, should_wait, script_complete, player_name, delay_ms, has_step) = {
                 let mut clients = broadcaster.clients.lock();
                 let client = clients.get_mut(&addr);
                 if let Some(client) = client {
                     if let Some(session) = client.login_session_mut() {
-                        info!("[ScriptContinue] START: pos={}, mode={}, input={:?}", session.script_position, session.script_mode, input);
+                        info!("[ScriptContinue] START: step={:?}, mode={}, input={:?}", session.doumi_step, session.script_mode, input);
                         let (new_mode, new_pos, waiting, output_msg, wait_for_input, is_complete, delay) =
                             process_script_line(session, input);
                         session.script_mode = new_mode;
                         session.script_position = new_pos;
                         session.waiting_for_command = waiting;
                         let name = session.char_name.clone();
-                        info!("[ScriptContinue] END: new_pos={}, wait={}, complete={}, msg_len={}, delay={}",
-                            new_pos, wait_for_input, is_complete, output_msg.as_ref().map_or(0, |m| m.len()), delay);
-                        (output_msg, wait_for_input, is_complete, name, delay)
+                        let has_step = session.doumi_step.is_some();
+                        info!("[ScriptContinue] END: step={:?}, wait={}, complete={}, msg_len={}, delay={}",
+                            session.doumi_step, wait_for_input, is_complete, output_msg.as_ref().map_or(0, |m| m.len()), delay);
+                        (output_msg, wait_for_input, is_complete, name, delay, has_step)
                     } else {
-                        (None, false, false, String::new(), 0)
+                        (None, false, false, String::new(), 0, false)
                     }
                 } else {
-                    (None, false, false, String::new(), 0)
+                    (None, false, false, String::new(), 0, false)
                 }
             };
 
+            // Clear screen when resuming from a step (not first step)
+            // This prevents visual overlap with previous content
+            if has_step {
+                if let Some(ref msg) = msg {
+                    if !msg.is_empty() {
+                        broadcaster.send_to(addr, "\x1b[0;37;40m\x1b[H\x1b[2J\r\n")?;
+                    }
+                }
+            }
+
             if let Some(msg) = msg {
-                broadcaster.send_to(addr, &msg)?;
+                // Check if we should apply line-by-line delays (DOUMI scripts with set_tick)
+                let (delay_per_line, is_doumi) = {
+                    let clients = broadcaster.clients.lock();
+                    clients.get(&addr)
+                        .and_then(|c| c.login_session.as_ref())
+                        .map(|s| (s.delay_after_output, !s.doumi_script_path.is_empty()))
+                        .unwrap_or((0, false))
+                };
+
+                if delay_per_line > 0 && is_doumi {
+                    // DOUMI script with tick delay: send each line separately with delay
+                    for line in msg.split("\r\n") {
+                        if !line.is_empty() {
+                            broadcaster.send_to(addr, &format!("{}\r\n", line))?;
+                            eprintln!("[ TICK] Line delay: {}ms", delay_per_line);
+                            tokio::time::sleep(tokio::time::Duration::from_millis(delay_per_line)).await;
+                        }
+                    }
+                } else {
+                    // Normal output: send all at once
+                    broadcaster.send_to(addr, &msg)?;
+                }
             }
 
             // Apply tick delay if any (after sending output)
@@ -744,75 +797,9 @@ async fn process_login_state(
                 info!("[ScriptContinue] should_wait=true, exiting");
                 Ok(false)
             } else {
-                // Continue processing script - use loop to avoid async recursion
-                info!("[ScriptContinue] Continuing script processing, input={:?}", input);
-                loop {
-                    // Check if still in script mode
-                    let is_script_mode = {
-                        let clients = broadcaster.clients.lock();
-                        clients.get(&addr)
-                            .and_then(|c| c.login_session.as_ref())
-                            .map(|s| s.state == LoginState::ScriptMode)
-                            .unwrap_or(false)
-                    };
-
-                    if !is_script_mode {
-                        return Ok(false);
-                    }
-
-                    // Process next script line
-                    let (msg, should_wait, script_complete, player_name, delay_ms) = {
-                        let mut clients = broadcaster.clients.lock();
-                        let client = clients.get_mut(&addr);
-                        if let Some(client) = client {
-                            if let Some(session) = client.login_session_mut() {
-                                let (new_mode, new_pos, waiting, output_msg, wait_for_input, is_complete, delay) =
-                                    process_script_line(session, "");
-                                eprintln!("[DEBUG SCRIPT_FLOW] process_script_line returned: mode={}, pos={}, waiting={:?}, wait_input={}, complete={}, delay={}",
-                                    new_mode, new_pos, waiting, wait_for_input, is_complete, delay);
-                                session.script_mode = new_mode;
-                                session.script_position = new_pos;
-                                session.waiting_for_command = waiting;
-                                let name = session.char_name.clone();
-                                (output_msg, wait_for_input, is_complete, name, delay)
-                            } else {
-                                (None, false, false, String::new(), 0)
-                            }
-                        } else {
-                            (None, false, false, String::new(), 0)
-                        }
-                    };
-
-                    if let Some(msg) = msg {
-                        broadcaster.send_to(addr, &msg)?;
-                    }
-
-                    // Apply tick delay if any (after sending output) - inner loop
-                    let delay_to_apply = {
-                        let clients = broadcaster.clients.lock();
-                        clients.get(&addr)
-                            .and_then(|c| c.login_session.as_ref())
-                            .map(|s| s.delay_after_output)
-                            .unwrap_or(0)
-                    };
-                    if delay_to_apply > 0 {
-                        eprintln!("[ TICK] Applying {}ms delay after output (inner loop)", delay_to_apply);
-                        tokio::time::sleep(tokio::time::Duration::from_millis(delay_to_apply)).await;
-                        // Don't clear delay - it persists for all subsequent lines
-                    }
-
-                    if script_complete {
-                        println!("[DEBUG CLIENT] script_complete=true, calling complete_char_creation_and_enter_game with player_name={}", player_name);
-                        complete_char_creation_and_enter_game(broadcaster, addr, &player_name, command_registry, room_cache).await?;
-                        return Ok(false);
-                    }
-
-                    if should_wait {
-                        // Waiting for user input, exit loop
-                        return Ok(false);
-                    }
-                    // Otherwise continue processing script lines
-                }
+                // No more immediate output - wait for next user input
+                info!("[ScriptContinue] No more output, waiting for next input");
+                Ok(false)
             }
         }
         LoginAction::ScriptComplete(player_name) => {
@@ -978,8 +965,8 @@ fn process_script_line(
     session: &mut LoginSession,
     input: &str,
 ) -> (u8, usize, Option<String>, Option<String>, bool, bool, u64) {
-    eprintln!("[process_script_line] input='{}', doumi_resume_op={:?}, doumi_resume_position={}",
-        input, session.doumi_resume_op, session.doumi_resume_position);
+    eprintln!("[process_script_line] input='{}', doumi_step={:?}, doumi_resume_op={:?}",
+        input, session.doumi_step, session.doumi_resume_op);
     eprintln!("[process_script_line] doumi_script_path='{}'", session.doumi_script_path);
     if session.doumi_script_path.is_empty() {
         return (
@@ -1026,11 +1013,6 @@ fn process_script_line(
                 0,
             );
         }
-        if t == "무명객" || t == "나만바바바" {
-            // Skip the old error - this is handled by the is_special branch above (lines 481-491)
-            // The is_special check: `let is_special = input_name == "손님" || input_name == "무명객" || input_name == "나만바바";`
-            // So this code block is now redundant - removed the error return
-        }
         if PathBuf::from("data/user").join(format!("{}.json", t)).exists() {
             session.doumi_ob = Some(doumi_ob_to_hashmap(ob));
             return (
@@ -1063,23 +1045,37 @@ fn process_script_line(
         }
     }
 
-    let res = session.doumi_resume_op.take();
-    let position = session.doumi_resume_position;
-    let resume = res.as_ref().map(|o| (o.as_str(), input, position));
-    eprintln!("[process_script_line] About to call run_doumi_to_result, resume_op={:?}", res);
-    let result = run_doumi_to_result(&session.doumi_script_path, &mut ob, resume);
+    // 현재 단계와 resume 정보 가져오기
+    let current_step = session.doumi_step.take();
+    let resume_op = session.doumi_resume_op.take();
+    let resume = resume_op.as_ref().map(|o| (o.as_str(), input));
+
+    eprintln!("[process_script_line] Calling run_doumi_to_result: current_step={:?}, resume_op={:?}",
+        current_step, resume_op);
+
+    let result = run_doumi_to_result(
+        &session.doumi_script_path,
+        &mut ob,
+        current_step.as_deref(),
+        resume,
+    );
 
     match result {
         DoumiRunResult::Suspend { lines, delay_ms, suspend } => {
             session.doumi_ob = Some(doumi_ob_to_hashmap(ob));
+            let next_step = suspend.next_step.clone();
+            session.doumi_step = next_step.clone();
             session.doumi_resume_op = Some(suspend.op.clone());
             session.doumi_resume_expected = suspend.expected.clone();
-            session.doumi_resume_position = suspend.position;
+
+            eprintln!("[process_script_line] Suspend: op={}, next_step={:?}, lines={}",
+                suspend.op, next_step, lines.len());
+
+            // Store delay for line-by-line output
+            session.delay_after_output = delay_ms;
+
             // Don't duplicate the prompt if it's already in the lines
-            // The script may send the prompt with ANSI codes, while suspend.prompt is plain text
             let joined = lines.join("");
-            // Check if the core prompt text is already in the output
-            // The script might send "【\x1b[1m엔터키를 누르세요\x1b[0;37;40m】" while suspend.prompt is "【엔터키를 누르세요】"
             let has_prompt = joined.contains(&suspend.prompt) ||
                              joined.contains("엔터키를 누르세요") ||
                              joined.contains("엔터키를 누르세요】");
@@ -1111,9 +1107,9 @@ fn process_script_line(
             session.char_gender = norm(&gender);
             session.doumi_script_path.clear();
             session.doumi_ob = None;
+            session.doumi_step = None;
             session.doumi_resume_op = None;
             session.doumi_resume_expected = None;
-            session.doumi_resume_position = 0;
             (0, 0, None, None, false, true, 0)
         }
     }
