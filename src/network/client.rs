@@ -703,6 +703,16 @@ async fn process_login_state(
                     // Don't clear delay - it persists for all subsequent lines
                 }
 
+                // NOW we can accept input - output is fully sent
+                if should_wait {
+                    let mut clients = broadcaster.clients.lock();
+                    if let Some(client) = clients.get_mut(&addr) {
+                        if let Some(session) = client.login_session_mut() {
+                            session.waiting_for_input = true;
+                        }
+                    }
+                }
+
                 if script_complete {
                     complete_char_creation_and_enter_game(broadcaster, addr, &player_name, command_registry, room_cache).await?;
                     return Ok(false);
@@ -789,6 +799,16 @@ async fn process_login_state(
                 eprintln!("[ TICK] Applying {}ms delay after output", delay_to_apply);
                 tokio::time::sleep(tokio::time::Duration::from_millis(delay_to_apply)).await;
                 // Don't clear delay - it persists for all subsequent lines
+            }
+
+            // NOW we can accept input - output is fully sent
+            if should_wait {
+                let mut clients = broadcaster.clients.lock();
+                if let Some(client) = clients.get_mut(&addr) {
+                    if let Some(session) = client.login_session_mut() {
+                        session.waiting_for_input = true;
+                    }
+                }
             }
 
             if script_complete {
@@ -1081,9 +1101,6 @@ fn process_script_line(
 
             // Store delay for line-by-line output
             session.delay_after_output = delay_ms;
-
-            // We're now waiting for user input - accept inputs from this point
-            session.waiting_for_input = true;
 
             // Don't duplicate the prompt if it's already in the lines
             let joined = lines.join("");
