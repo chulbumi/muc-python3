@@ -106,10 +106,7 @@ fn step3_monster_appear(ob) {
 
     send_line(ob, "");
 
-    send_line(ob, "『흑백쌍괴 봐』를 입력 하세요");
-
-    send_line(ob, ">");
-
+    // wait_key_input will add the prompt
     wait_key_input("step4_pre_combat", "흑백쌍괴 봐");
 }
 
@@ -336,10 +333,7 @@ fn step8_pursuit_arrive(ob) {
 
     send_line(ob, "");
 
-    send_line(ob, "『봐』를 입력 하세요");
-
-    send_line(ob, ">");
-
+    // wait_key_input will add the prompt
     wait_key_input("step9_combat2_start", "봐");
 }
 
@@ -364,10 +358,7 @@ fn step9_combat2_start(ob) {
 
     send_line(ob, "");
 
-    send_line(ob, "『흑백쌍괴 쳐』를 입력 하세요");
-
-    send_line(ob, ">");
-
+    // wait_key_input will add the prompt
     wait_key_input("step10_combat_skill", "흑백쌍괴 쳐");
 }
 
@@ -390,10 +381,7 @@ fn step10_combat_skill(ob) {
 
     send_line(ob, "");
 
-    send_line(ob, "『혈천섬광 시전』를 입력 하세요");
-
-    send_line(ob, ">");
-
+    // wait_key_input will add the prompt
     wait_key_input("step11_combat_victory", "혈천섬광 시전");
 }
 
@@ -737,10 +725,9 @@ fn step22_tutorial_start(ob) {
 
     send_line(ob, "");
 
-    send_line(ob, "『소지품』를 입력 하세요");
-
     send_line(ob, "[450/450, 18/18]");
 
+    // wait_key_input will add the prompt
     wait_key_input("step23_tutorial_inventory", "소지품");
 }
 
