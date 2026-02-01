@@ -390,7 +390,7 @@ fn step10_combat_skill(ob) {
 
     send_line(ob, "");
 
-    send_line(ob, "『혈천섬광 시전』을 입력 하세요");
+    send_line(ob, "『혈천섬광 시전』를 입력 하세요");
 
     send_line(ob, ">");
 
@@ -737,7 +737,7 @@ fn step22_tutorial_start(ob) {
 
     send_line(ob, "");
 
-    send_line(ob, "『소지품』을 입력 하세요");
+    send_line(ob, "『소지품』를 입력 하세요");
 
     send_line(ob, "[450/450, 18/18]");
 
