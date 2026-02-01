@@ -273,14 +273,19 @@ pub fn run_doumi(
 }
 
 /// run_doumi를 호출하고, Suspend/Finished를 DoumiRunResult로 변환.
+///
+/// ## Parameters
+/// - `initial_delay`: 이전 스텝에서 설정된 tick 값 (초기 호출 시 0, 이후 스텝에서는 이전 값 유지)
+///   Python 서버와 동일하게 tick 값이 스텝 간에 유지됨
 pub fn run_doumi_to_result(
     script_path: &str,
     ob: &mut Map,
     current_step: Option<&str>,
     resume: Option<(&str, &str)>,
+    initial_delay: u64,
 ) -> DoumiRunResult {
     let mut output = Vec::new();
-    let mut delay_ms = 0u64;
+    let mut delay_ms = initial_delay;  // Preserve tick value from previous step
 
     match run_doumi(script_path, ob, current_step, resume, &mut output, &mut delay_ms) {
         Ok(Some((n, p, g))) => DoumiRunResult::Finished { name: n, password: p, gender: g },

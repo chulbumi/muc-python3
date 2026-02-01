@@ -739,15 +739,8 @@ async fn process_login_state(
                 }
             };
 
-            // Clear screen when resuming from a step (not first step)
-            // This prevents visual overlap with previous content
-            if has_step {
-                if let Some(ref msg) = msg {
-                    if !msg.is_empty() {
-                        broadcaster.send_to(addr, "\x1b[0;37;40m\x1b[H\x1b[2J\r\n")?;
-                    }
-                }
-            }
+            // Note: No screen-clear here - Python server doesn't clear screen between DOUMI steps
+            // Screen-clear is only sent at StartScript (client.rs:618) for the initial step
 
             if let Some(msg) = msg {
                 // Check if we should apply line-by-line delays (DOUMI scripts with set_tick)
@@ -1050,14 +1043,15 @@ fn process_script_line(
     let resume_op = session.doumi_resume_op.take();
     let resume = resume_op.as_ref().map(|o| (o.as_str(), input));
 
-    eprintln!("[process_script_line] Calling run_doumi_to_result: current_step={:?}, resume_op={:?}",
-        current_step, resume_op);
+    eprintln!("[process_script_line] Calling run_doumi_to_result: current_step={:?}, resume_op={:?}, initial_delay={}",
+        current_step, resume_op, session.delay_after_output);
 
     let result = run_doumi_to_result(
         &session.doumi_script_path,
         &mut ob,
         current_step.as_deref(),
         resume,
+        session.delay_after_output,  // Pass existing delay to preserve tick value across steps
     );
 
     match result {
