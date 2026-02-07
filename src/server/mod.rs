@@ -15,7 +15,7 @@ use std::time::Duration;
 use tokio::net::TcpListener;
 use tokio::sync::Mutex as AsyncMutex;
 use tokio::sync::Notify;
-use tracing::{error, info};
+use tracing::{error, info, warn};
 
 use crate::command::commands::register_basic_commands;
 use crate::command::commands::script::register_script_commands;
@@ -107,10 +107,66 @@ impl MudServer {
     pub async fn initialize(&self) -> Result<(), Box<dyn std::error::Error>> {
         info!("Initializing MUD server...");
 
-        // Register basic commands would happen here
-        // TODO: Load game data
+        // Load game data
+        self.load_game_data().await?;
 
         info!("Server initialization complete");
+        Ok(())
+    }
+
+    /// Load game data from data directory
+    ///
+    /// Preloads rooms, mobs, and items into the world state cache
+    async fn load_game_data(&self) -> Result<(), Box<dyn std::error::Error>> {
+        use crate::world::WorldState;
+
+        let world = crate::world::get_world_state();
+        let mut world_write = world.write().map_err(|e| {
+            format!("Failed to get world write lock: {}", e)
+        })?;
+
+        // Get list of available zones
+        let map_dir = std::path::Path::new("data/map");
+        if !map_dir.exists() {
+            info!("Map directory not found, skipping room preload");
+            return Ok(());
+        }
+
+        let zones: Vec<String> = std::fs::read_dir(map_dir)
+            .map_err(|e| format!("Failed to read map directory: {}", e))?
+            .filter_map(|entry| entry.ok())
+            .filter(|entry| entry.path().is_dir())
+            .filter_map(|entry| entry.file_name().into_string().ok())
+            .filter(|name| name != "ln.sh" && !name.starts_with('.'))
+            .collect();
+
+        info!("Found {} zones to preload", zones.len());
+
+        // Preload starting zones (common areas)
+        let starting_zones = vec!["시작", "낙양성"];
+        let mut total_rooms = 0;
+
+        for zone in &starting_zones {
+            match world_write.room_cache.preload_zone(zone) {
+                Ok(count) => {
+                    info!("Preloaded {} rooms from zone '{}'", count, zone);
+                    total_rooms += count;
+                }
+                Err(e) => {
+                    warn!("Failed to preload zone '{}': {}", zone, e);
+                }
+            }
+        }
+
+        info!("Total rooms preloaded: {}", total_rooms);
+
+        // Preload mobs for starting zones
+        for zone in &starting_zones {
+            if let Err(e) = world_write.mob_cache.preload_zone(zone) {
+                warn!("Failed to preload mobs for zone '{}': {}", zone, e);
+            }
+        }
+
         Ok(())
     }
 
