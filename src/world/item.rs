@@ -251,14 +251,15 @@ impl ItemCache {
         }
 
         // Read and parse JSON
-        let content = std::fs::read_to_string(&file_path)
-            .map_err(|e| ItemError::IoError(e.to_string()))?;
+        let content =
+            std::fs::read_to_string(&file_path).map_err(|e| ItemError::IoError(e.to_string()))?;
 
-        let json: JsonValue = serde_json::from_str(&content)
-            .map_err(|e| ItemError::ParseError(e.to_string()))?;
+        let json: JsonValue =
+            serde_json::from_str(&content).map_err(|e| ItemError::ParseError(e.to_string()))?;
 
         // Extract item info
-        let item_info = json.get("아이템정보")
+        let item_info = json
+            .get("아이템정보")
             .and_then(|v| v.as_object())
             .ok_or_else(|| ItemError::ParseError("아이템정보 not found".to_string()))?;
 
@@ -272,24 +273,30 @@ impl ItemCache {
     }
 
     /// Parse item data from JSON object
-    fn parse_item_data(&self, item_info: &serde_json::Map<String, JsonValue>) -> Result<RawItemData, ItemError> {
+    fn parse_item_data(
+        &self,
+        item_info: &serde_json::Map<String, JsonValue>,
+    ) -> Result<RawItemData, ItemError> {
         let mut data = RawItemData::new();
 
         // Name (이름)
-        data.name = item_info.get("이름")
+        data.name = item_info
+            .get("이름")
             .and_then(|v| v.as_str())
             .unwrap_or("이름 없는 아이템")
             .to_string();
 
         // Item type (종류)
-        data.item_type = item_info.get("종류")
+        data.item_type = item_info
+            .get("종류")
             .and_then(|v| v.as_str())
             .unwrap_or("기타")
             .to_string();
 
         // Determine if equipment/consumable based on type
         match data.item_type.as_str() {
-            "무기" | "방패" | "방어구" | "투구" | "신발" | "장갑" | "망토" | "악세사리" => {
+            "무기" | "방패" | "방어구" | "투구" | "신발" | "장갑" | "망토" | "악세사리" =>
+            {
                 data.is_equipment = true;
             }
             "먹는것" | "약" => {
@@ -309,7 +316,8 @@ impl ItemCache {
         // Description (설명 or 설명2)
         if let Some(desc) = item_info.get("설명2").or_else(|| item_info.get("설명")) {
             if let Some(arr) = desc.as_array() {
-                data.description = arr.iter()
+                data.description = arr
+                    .iter()
                     .filter_map(|v| v.as_str().map(|s| s.to_string()))
                     .collect();
             } else if let Some(s) = desc.as_str() {
@@ -320,7 +328,8 @@ impl ItemCache {
         // Reaction names (반응이름)
         if let Some(names) = item_info.get("반응이름") {
             if let Some(arr) = names.as_array() {
-                data.reaction_names = arr.iter()
+                data.reaction_names = arr
+                    .iter()
                     .filter_map(|v| v.as_str().map(|s| s.to_string()))
                     .collect();
             } else if let Some(s) = names.as_str() {
@@ -329,46 +338,51 @@ impl ItemCache {
         }
 
         // Price (값 or 가격)
-        data.price = item_info.get("값")
+        data.price = item_info
+            .get("값")
             .and_then(|v| v.as_i64())
             .or_else(|| item_info.get("가격").and_then(|v| v.as_i64()))
             .unwrap_or(0);
 
         // Weight (무게)
-        data.weight = item_info.get("무게")
-            .and_then(|v| v.as_i64())
-            .unwrap_or(0);
+        data.weight = item_info.get("무게").and_then(|v| v.as_i64()).unwrap_or(0);
 
         // Level requirement (레벨제한)
-        data.level_req = item_info.get("레벨제한")
+        data.level_req = item_info
+            .get("레벨제한")
             .and_then(|v| v.as_i64())
             .unwrap_or(0);
 
         // Defense (방어력)
-        data.defense = item_info.get("방어력")
+        data.defense = item_info
+            .get("방어력")
             .and_then(|v| v.as_i64())
             .unwrap_or(0);
 
         // Damage (공격력 or 타격)
-        data.damage = item_info.get("공격력")
+        data.damage = item_info
+            .get("공격력")
             .and_then(|v| v.as_i64())
             .or_else(|| item_info.get("타격").and_then(|v| v.as_i64()))
             .unwrap_or(0);
 
         // Extra damage (추가타격)
-        data.extra_damage = item_info.get("추가타격")
+        data.extra_damage = item_info
+            .get("추가타격")
             .and_then(|v| v.as_i64())
             .unwrap_or(0);
 
         // Durability (내구도 or 최대내구도)
-        data.max_durability = item_info.get("최대내구도")
+        data.max_durability = item_info
+            .get("최대내구도")
             .and_then(|v| v.as_i64())
             .or_else(|| item_info.get("내구도").and_then(|v| v.as_i64()))
             .unwrap_or(1000);
         data.durability = data.max_durability;
 
         // Equipment slot (장착부위)
-        data.equip_slot = item_info.get("장착부위")
+        data.equip_slot = item_info
+            .get("장착부위")
             .and_then(|v| v.as_str())
             .unwrap_or("")
             .to_string();
@@ -391,12 +405,14 @@ impl ItemCache {
         }
 
         // Learn skill (배울무공)
-        data.learn_skill = item_info.get("배울무공")
+        data.learn_skill = item_info
+            .get("배울무공")
             .and_then(|v| v.as_str())
             .map(|s| s.to_string());
 
         // Use effect (사용효과)
-        data.use_effect = item_info.get("사용효과")
+        data.use_effect = item_info
+            .get("사용효과")
             .and_then(|v| v.as_str())
             .map(|s| s.to_string());
 
@@ -406,11 +422,13 @@ impl ItemCache {
     /// Preload all items
     pub fn preload_all(&mut self) -> Result<usize, ItemError> {
         if !self.data_dir.exists() {
-            return Err(ItemError::NotFound(self.data_dir.to_string_lossy().to_string()));
+            return Err(ItemError::NotFound(
+                self.data_dir.to_string_lossy().to_string(),
+            ));
         }
 
-        let entries = std::fs::read_dir(&self.data_dir)
-            .map_err(|e| ItemError::IoError(e.to_string()))?;
+        let entries =
+            std::fs::read_dir(&self.data_dir).map_err(|e| ItemError::IoError(e.to_string()))?;
 
         let mut count = 0;
         for entry in entries {
@@ -418,7 +436,8 @@ impl ItemCache {
             let path = entry.path();
 
             if path.extension().and_then(|s| s.to_str()) == Some("json") {
-                let name = path.file_stem()
+                let name = path
+                    .file_stem()
                     .and_then(|s| s.to_str())
                     .ok_or_else(|| ItemError::ParseError("Invalid file name".to_string()))?;
 
@@ -493,7 +512,8 @@ pub fn get_item_weight_by_key(key: &str) -> i64 {
         Err(_) => return 0,
     };
     let info = json.get("아이템정보").and_then(|v| v.as_object());
-    info.and_then(|o| o.get("무게").and_then(|v| v.as_i64())).unwrap_or(0)
+    info.and_then(|o| o.get("무게").and_then(|v| v.as_i64()))
+        .unwrap_or(0)
 }
 
 /// 아이템 표시이름. data/item/{key}.json의 아이템정보.이름, 없으면 key.

@@ -2,10 +2,10 @@
 //!
 //! Manages connected clients and broadcasts messages to them.
 
+use parking_lot::Mutex;
 use std::collections::HashMap;
 use std::net::SocketAddr;
 use std::sync::Arc;
-use parking_lot::Mutex;
 use tracing::{debug, warn};
 
 use crate::network::{client::ClientState, Client};
@@ -30,19 +30,31 @@ fn replace_player_templates(message: &str, player_name: &str) -> String {
 
     // Handle [공](이라/라)
     if result.contains("[공](이라/라)") {
-        let particle = if has_batchilm(player_name) { "이라" } else { "라" };
+        let particle = if has_batchilm(player_name) {
+            "이라"
+        } else {
+            "라"
+        };
         result = result.replace("[공](이라/라)", &format!("{}{}", player_name, particle));
     }
 
     // Handle [공](아/야)
     if result.contains("[공](아/야)") {
-        let particle = if has_batchilm(player_name) { "아" } else { "야" };
+        let particle = if has_batchilm(player_name) {
+            "아"
+        } else {
+            "야"
+        };
         result = result.replace("[공](아/야)", &format!("{}{}", player_name, particle));
     }
 
     // Handle [공](이/가)
     if result.contains("[공](이/가)") {
-        let particle = if has_batchilm(player_name) { "이" } else { "가" };
+        let particle = if has_batchilm(player_name) {
+            "이"
+        } else {
+            "가"
+        };
         result = result.replace("[공](이/가)", &format!("{}{}", player_name, particle));
     }
 
@@ -106,10 +118,16 @@ impl Broadcaster {
         for (&addr, client) in clients.iter() {
             if Some(addr) != exclude {
                 // Get player name and replace templates for each client
-                let player_name = client.player.as_ref()
+                let player_name = client
+                    .player
+                    .as_ref()
                     .map(|p| {
                         let name = p.body.get_string("이름");
-                        if name.is_empty() { "방문자".to_string() } else { name }
+                        if name.is_empty() {
+                            "방문자".to_string()
+                        } else {
+                            name
+                        }
                     })
                     .unwrap_or_else(|| "방문자".to_string());
 
@@ -117,7 +135,10 @@ impl Broadcaster {
 
                 if let Err(_e) = client.sender.send(processed_message) {
                     // Send failed - client's send task likely exited (broken pipe)
-                    debug!("Failed to send to {} (connection dead), marking for cleanup", addr);
+                    debug!(
+                        "Failed to send to {} (connection dead), marking for cleanup",
+                        addr
+                    );
                     dead_addrs.push(addr);
                 }
             }
@@ -125,7 +146,10 @@ impl Broadcaster {
 
         // Clean up dead clients to prevent memory leaks and cascading errors
         for addr in dead_addrs {
-            warn!("Removing dead client {} due to send failure (broken pipe)", addr);
+            warn!(
+                "Removing dead client {} due to send failure (broken pipe)",
+                addr
+            );
             clients.remove(&addr);
         }
     }
@@ -141,10 +165,16 @@ impl Broadcaster {
         for (&addr, client) in clients.iter() {
             if Some(addr) != exclude && client.state == ClientState::Active {
                 // Get player name and replace templates for each client
-                let player_name = client.player.as_ref()
+                let player_name = client
+                    .player
+                    .as_ref()
                     .map(|p| {
                         let name = p.body.get_string("이름");
-                        if name.is_empty() { "방문자".to_string() } else { name }
+                        if name.is_empty() {
+                            "방문자".to_string()
+                        } else {
+                            name
+                        }
                     })
                     .unwrap_or_else(|| "방문자".to_string());
 
@@ -152,7 +182,10 @@ impl Broadcaster {
 
                 if let Err(_e) = client.sender.send(processed_message) {
                     // Send failed - client's send task likely exited (broken pipe)
-                    debug!("Failed to send to {} (connection dead), marking for cleanup", addr);
+                    debug!(
+                        "Failed to send to {} (connection dead), marking for cleanup",
+                        addr
+                    );
                     dead_addrs.push(addr);
                 }
             }
@@ -160,7 +193,10 @@ impl Broadcaster {
 
         // Clean up dead clients to prevent memory leaks and cascading errors
         for addr in dead_addrs {
-            warn!("Removing dead client {} due to send failure (broken pipe)", addr);
+            warn!(
+                "Removing dead client {} due to send failure (broken pipe)",
+                addr
+            );
             clients.remove(&addr);
         }
     }
@@ -172,10 +208,16 @@ impl Broadcaster {
 
         if let Some(client) = clients.get(&addr) {
             // Get player name and replace templates
-            let player_name = client.player.as_ref()
+            let player_name = client
+                .player
+                .as_ref()
                 .map(|p| {
                     let name = p.body.get_string("이름");
-                    if name.is_empty() { "방문자".to_string() } else { name }
+                    if name.is_empty() {
+                        "방문자".to_string()
+                    } else {
+                        name
+                    }
                 })
                 .unwrap_or_else(|| "방문자".to_string());
 
@@ -268,10 +310,16 @@ impl Broadcaster {
 
                 if in_room {
                     // Get player name and replace templates for each client
-                    let player_name = client.player.as_ref()
+                    let player_name = client
+                        .player
+                        .as_ref()
                         .map(|p| {
                             let name = p.body.get_string("이름");
-                            if name.is_empty() { "방문자".to_string() } else { name }
+                            if name.is_empty() {
+                                "방문자".to_string()
+                            } else {
+                                name
+                            }
                         })
                         .unwrap_or_else(|| "방문자".to_string());
 
@@ -279,7 +327,10 @@ impl Broadcaster {
 
                     if let Err(_e) = client.sender.send(processed_message) {
                         // Send failed - client's send task likely exited (broken pipe)
-                        debug!("Failed to send to {} (connection dead), marking for cleanup", addr);
+                        debug!(
+                            "Failed to send to {} (connection dead), marking for cleanup",
+                            addr
+                        );
                         dead_addrs.push(addr);
                     }
                 }
@@ -288,7 +339,10 @@ impl Broadcaster {
 
         // Clean up dead clients to prevent memory leaks and cascading errors
         for addr in dead_addrs {
-            warn!("Removing dead client {} due to send failure (broken pipe)", addr);
+            warn!(
+                "Removing dead client {} due to send failure (broken pipe)",
+                addr
+            );
             clients.remove(&addr);
         }
     }
@@ -320,11 +374,7 @@ impl Broadcast {
     /// Broadcast a message to all clients (equivalent to Python's `broadcast()`)
     ///
     /// If `exclude` is Some, that client will not receive the message.
-    pub fn broadcast(
-        broadcaster: &Broadcaster,
-        message: &str,
-        exclude: Option<SocketAddr>,
-    ) {
+    pub fn broadcast(broadcaster: &Broadcaster, message: &str, exclude: Option<SocketAddr>) {
         if message.is_empty() {
             return;
         }

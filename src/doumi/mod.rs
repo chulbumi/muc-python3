@@ -5,11 +5,11 @@
 //! - 개별 스크립트: step1_welcome(), step2_name(), ... 함수 정의
 //! - 각 단계 함수는 wait_* 호출로 다음 단계 지정하며 suspend
 
-use rhai::{Engine, Scope, Dynamic, Map, EvalAltResult, Module, Shared};
+use crate::hangul::{han_iga, han_ira};
+use rhai::{Dynamic, Engine, EvalAltResult, Map, Module, Scope, Shared};
 use std::path::Path;
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::Arc;
-use crate::hangul::{han_ira, han_iga};
 
 /// [공], [공](이라/라), [공](아/야), [공](이/가) 치환
 fn substitute_doumi_variables(text: &str, name: &str, _gender: &str) -> String {
@@ -39,7 +39,7 @@ fn substitute_doumi_variables(text: &str, name: &str, _gender: &str) -> String {
 pub struct DoumiSuspend {
     pub op: String,
     pub prompt: String,
-    pub expected: Option<String>, // get_key_input용
+    pub expected: Option<String>,  // get_key_input용
     pub next_step: Option<String>, // 다음에 호출할 단계 함수명 (예: "step2_name")
 }
 
@@ -84,8 +84,12 @@ pub fn run_doumi(
     let mut engine = Engine::new();
 
     // Get resume parameters
-    let resume_op = resume.map(|(op, _)| op.to_string()).unwrap_or_else(|| String::new());
-    let resume_input = resume.map(|(_, input)| input.to_string()).unwrap_or_else(|| String::new());
+    let resume_op = resume
+        .map(|(op, _)| op.to_string())
+        .unwrap_or_else(|| String::new());
+    let resume_input = resume
+        .map(|(_, input)| input.to_string())
+        .unwrap_or_else(|| String::new());
 
     // Determine which step to call
     let step_to_call = current_step.unwrap_or("step1_welcome");
@@ -94,7 +98,12 @@ pub fn run_doumi(
     eprintln!("DOUMI run: script_path={}, step_to_call={}, resume_op={:?}, resume_input={:?}, output.len={}, ob.len={}",
         script_path, step_to_call, resume_op, resume_input, output.len(), ob.len());
     if ob.len() > 0 {
-        eprintln!("  ob contents: {:?}", ob.iter().map(|(k,v)| (k, v.clone().into_string().unwrap_or_default())).collect::<Vec<_>>());
+        eprintln!(
+            "  ob contents: {:?}",
+            ob.iter()
+                .map(|(k, v)| (k, v.clone().into_string().unwrap_or_default()))
+                .collect::<Vec<_>>()
+        );
     }
 
     // set_tick(n) — n*100 ms. delay_ms에 기록.
@@ -107,15 +116,31 @@ pub fn run_doumi(
     // send_line(ob, msg) — [공] 치환 후 output에 push. \r\n 붙임.
     let out_ptr = output as *mut Vec<String>;
     engine.register_fn("send_line", move |ob_val: Dynamic, msg: &str| {
-        let name: String = ob_val.clone().try_cast::<Map>()
-            .and_then(|m| m.get("이름").and_then(|v: &Dynamic| v.clone().into_string().ok()))
+        let name: String = ob_val
+            .clone()
+            .try_cast::<Map>()
+            .and_then(|m| {
+                m.get("이름")
+                    .and_then(|v: &Dynamic| v.clone().into_string().ok())
+            })
             .unwrap_or_default();
-        let gender: String = ob_val.clone().try_cast::<Map>()
-            .and_then(|m| m.get("성별").and_then(|v: &Dynamic| v.clone().into_string().ok()))
+        let gender: String = ob_val
+            .clone()
+            .try_cast::<Map>()
+            .and_then(|m| {
+                m.get("성별")
+                    .and_then(|v: &Dynamic| v.clone().into_string().ok())
+            })
             .unwrap_or_default();
         let s = substitute_doumi_variables(msg, &name, &gender);
-        let line = if s.is_empty() { "\r\n".to_string() } else { format!("{}\r\n", s) };
-        unsafe { (*out_ptr).push(line); };
+        let line = if s.is_empty() {
+            "\r\n".to_string()
+        } else {
+            format!("{}\r\n", s)
+        };
+        unsafe {
+            (*out_ptr).push(line);
+        };
     });
 
     // finish_script(ob) — ob 또는 _saved_* 변수에서 이름/암호/성별 읽어 finished에 넣음.
@@ -125,10 +150,33 @@ pub fn run_doumi(
         // 먼저 글로벌 변수에서 읽기 시도 (모듈 변수는 register_fn 내에서 접근 불가능하므로 우선 ob에서만 읽음)
         // 대신, finish_script 호출 직전에 ob에 _saved_* 값을 복사하는 로직이 필요함
         let m = ob_val.clone().try_cast::<Map>();
-        let n: String = m.as_ref().and_then(|x| x.get("이름").and_then(|v: &Dynamic| v.clone().into_string().ok())).unwrap_or_default();
-        let p: String = m.as_ref().and_then(|x| x.get("암호").and_then(|v: &Dynamic| v.clone().into_string().ok())).unwrap_or_default();
-        let g: String = m.as_ref().and_then(|x| x.get("성별").and_then(|v: &Dynamic| v.clone().into_string().ok())).unwrap_or_default();
-        eprintln!("[DOUMI] finish_script called: name={}, password={}, gender={}", n, if p.is_empty() { "(empty)" } else { "(hidden)" }, g);
+        let n: String = m
+            .as_ref()
+            .and_then(|x| {
+                x.get("이름")
+                    .and_then(|v: &Dynamic| v.clone().into_string().ok())
+            })
+            .unwrap_or_default();
+        let p: String = m
+            .as_ref()
+            .and_then(|x| {
+                x.get("암호")
+                    .and_then(|v: &Dynamic| v.clone().into_string().ok())
+            })
+            .unwrap_or_default();
+        let g: String = m
+            .as_ref()
+            .and_then(|x| {
+                x.get("성별")
+                    .and_then(|v: &Dynamic| v.clone().into_string().ok())
+            })
+            .unwrap_or_default();
+        eprintln!(
+            "[DOUMI] finish_script called: name={}, password={}, gender={}",
+            n,
+            if p.is_empty() { "(empty)" } else { "(hidden)" },
+            g
+        );
         unsafe { *fin.get() = Some((n, p, g)) };
     });
 
@@ -138,9 +186,18 @@ pub fn run_doumi(
     doumi_module.set_var("_doumi_resume_input", resume_input.clone());
 
     // ob에서 이미 저장된 값들을 읽어옴 (이전 단계에서 저장된 값들)
-    let mut name_input: String = ob.get("이름").and_then(|v| v.clone().into_string().ok()).unwrap_or_default();
-    let mut password_input: String = ob.get("암호").and_then(|v| v.clone().into_string().ok()).unwrap_or_default();
-    let mut sex_input: String = ob.get("성별").and_then(|v| v.clone().into_string().ok()).unwrap_or_default();
+    let mut name_input: String = ob
+        .get("이름")
+        .and_then(|v| v.clone().into_string().ok())
+        .unwrap_or_default();
+    let mut password_input: String = ob
+        .get("암호")
+        .and_then(|v| v.clone().into_string().ok())
+        .unwrap_or_default();
+    let mut sex_input: String = ob
+        .get("성별")
+        .and_then(|v| v.clone().into_string().ok())
+        .unwrap_or_default();
 
     // 현재 resume_input을 적절한 변수에 추가 (값 누적)
     // resume_op에 따라 현재 입력값을 해당 변수에 저장
@@ -229,8 +286,8 @@ pub fn run_doumi(
     });
 
     // Register the pointer in the scope AND ob for script parameter
-    scope.push("ob", ob.clone());  // For script function parameter
-    scope.push("_ob_ptr", ob_ptr_clone3);  // For sync functions to access
+    scope.push("ob", ob.clone()); // For script function parameter
+    scope.push("_ob_ptr", ob_ptr_clone3); // For sync functions to access
 
     // 현재 단계 함수만 호출, ob를 인자로 전달
     let call_src = format!("{}\n{}(ob);", combined_src, step_to_call);
@@ -244,16 +301,25 @@ pub fn run_doumi(
     if let Some(d) = scope.get_value::<Dynamic>("ob") {
         if let Some(ob_map) = d.try_cast::<Map>() {
             *ob = ob_map;
-            eprintln!("[run_doumi] After sync from scope: ob has {} entries", ob.len());
+            eprintln!(
+                "[run_doumi] After sync from scope: ob has {} entries",
+                ob.len()
+            );
         } else {
             // Fall back to pointer sync
             *ob = ob_ptr.lock().unwrap().clone();
-            eprintln!("[run_doumi] After sync from ptr: ob has {} entries", ob.len());
+            eprintln!(
+                "[run_doumi] After sync from ptr: ob has {} entries",
+                ob.len()
+            );
         }
     } else {
         // Fall back to pointer sync
         *ob = ob_ptr.lock().unwrap().clone();
-        eprintln!("[run_doumi] After sync from ptr: ob has {} entries", ob.len());
+        eprintln!(
+            "[run_doumi] After sync from ptr: ob has {} entries",
+            ob.len()
+        );
     }
     for (k, v) in ob.iter() {
         if let Ok(s) = v.clone().into_string() {
@@ -263,9 +329,12 @@ pub fn run_doumi(
 
     match result {
         Ok(_) => {
-            eprintln!("DOUMI finished: script_path={}, step={}, finished={:?}", script_path, step_to_call, finished);
+            eprintln!(
+                "DOUMI finished: script_path={}, step={}, finished={:?}",
+                script_path, step_to_call, finished
+            );
             return Ok(finished);
-        },
+        }
         Err(e) => {
             // Extract the inner error value that contains our Map
             fn extract_error_value(mut err: &EvalAltResult) -> Option<Dynamic> {
@@ -282,13 +351,26 @@ pub fn run_doumi(
 
             if let Some(err_value) = extract_error_value(&e) {
                 if let Some(m) = err_value.clone().try_cast::<Map>() {
-                    let t: String = m.get("type").and_then(|v: &Dynamic| v.clone().into_string().ok()).unwrap_or_default();
+                    let t: String = m
+                        .get("type")
+                        .and_then(|v: &Dynamic| v.clone().into_string().ok())
+                        .unwrap_or_default();
                     if t == "doumi_suspend" {
-                        let op: String = m.get("op").and_then(|v: &Dynamic| v.clone().into_string().ok()).unwrap_or_default();
-                        let prompt: String = m.get("prompt").and_then(|v: &Dynamic| v.clone().into_string().ok()).unwrap_or_default();
-                        let expected: Option<String> = m.get("expected").and_then(|v: &Dynamic| v.clone().into_string().ok());
+                        let op: String = m
+                            .get("op")
+                            .and_then(|v: &Dynamic| v.clone().into_string().ok())
+                            .unwrap_or_default();
+                        let prompt: String = m
+                            .get("prompt")
+                            .and_then(|v: &Dynamic| v.clone().into_string().ok())
+                            .unwrap_or_default();
+                        let expected: Option<String> = m
+                            .get("expected")
+                            .and_then(|v: &Dynamic| v.clone().into_string().ok());
                         // next_step를 에러 Map에서 추출
-                        let next_step: Option<String> = m.get("next_step").and_then(|v: &Dynamic| v.clone().into_string().ok());
+                        let next_step: Option<String> = m
+                            .get("next_step")
+                            .and_then(|v: &Dynamic| v.clone().into_string().ok());
 
                         // ob has already been updated at the start of run_doumi with the accumulated values
                         // No need to modify ob here
@@ -301,13 +383,21 @@ pub fn run_doumi(
                         }
                         eprintln!("DOUMI suspend: step={}, op={}, prompt={}, next_step={:?}, output_lines={}",
                             step_to_call, op, prompt, next_step, output.len());
-                        return Err(DoumiSuspend { op, prompt, expected, next_step });
+                        return Err(DoumiSuspend {
+                            op,
+                            prompt,
+                            expected,
+                            next_step,
+                        });
                     }
                 }
             }
 
             // If not doumi_suspend or couldn't extract, return error
-            eprintln!("DOUMI error: script_path={}, step={}, error={:?}", script_path, step_to_call, e);
+            eprintln!(
+                "DOUMI error: script_path={}, step={}, error={:?}",
+                script_path, step_to_call, e
+            );
             return Err(DoumiSuspend {
                 op: "error".to_string(),
                 prompt: (*e).to_string(),
@@ -331,17 +421,38 @@ pub fn run_doumi_to_result(
     initial_delay: u64,
 ) -> DoumiRunResult {
     let mut output = Vec::new();
-    let mut delay_ms = initial_delay;  // Preserve tick value from previous step
+    let mut delay_ms = initial_delay; // Preserve tick value from previous step
 
-    match run_doumi(script_path, ob, current_step, resume, &mut output, &mut delay_ms) {
-        Ok(Some((n, p, g))) => DoumiRunResult::Finished { name: n, password: p, gender: g },
+    match run_doumi(
+        script_path,
+        ob,
+        current_step,
+        resume,
+        &mut output,
+        &mut delay_ms,
+    ) {
+        Ok(Some((n, p, g))) => DoumiRunResult::Finished {
+            name: n,
+            password: p,
+            gender: g,
+        },
         Ok(None) => {
             let (n, p, g) = (
-                ob.get("이름").and_then(|v| v.clone().into_string().ok()).unwrap_or_default(),
-                ob.get("암호").and_then(|v| v.clone().into_string().ok()).unwrap_or_default(),
-                ob.get("성별").and_then(|v| v.clone().into_string().ok()).unwrap_or_default(),
+                ob.get("이름")
+                    .and_then(|v| v.clone().into_string().ok())
+                    .unwrap_or_default(),
+                ob.get("암호")
+                    .and_then(|v| v.clone().into_string().ok())
+                    .unwrap_or_default(),
+                ob.get("성별")
+                    .and_then(|v| v.clone().into_string().ok())
+                    .unwrap_or_default(),
             );
-            DoumiRunResult::Finished { name: n, password: p, gender: g }
+            DoumiRunResult::Finished {
+                name: n,
+                password: p,
+                gender: g,
+            }
         }
         Err(s) => DoumiRunResult::Suspend {
             lines: output,

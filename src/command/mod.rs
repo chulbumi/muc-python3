@@ -3,15 +3,15 @@
 //! This module provides a comprehensive command parsing and execution system
 //! for handling player input in the MUD.
 
-pub mod parser;
-pub mod handler;
-pub mod registry;
 pub mod commands;
+pub mod handler;
+pub mod parser;
+pub mod registry;
 
+pub use commands::register_basic_commands;
+pub use handler::{CommandContext, CommandHandler, CommandResult, PendingInput};
 pub use parser::{CommandParser, ParsedCommand};
-pub use handler::{CommandHandler, CommandResult, CommandContext, PendingInput};
-pub use registry::{CommandRegistry, CommandInfo, CommandFn};
-pub use commands::{register_basic_commands};
+pub use registry::{CommandFn, CommandInfo, CommandRegistry};
 
 /// Direction constants for movement commands
 pub const DIRECTIONS: &[(&str, &str, &str)] = &[

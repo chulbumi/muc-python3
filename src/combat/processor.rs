@@ -6,9 +6,9 @@
 //! - Combat state management
 //! - Death and rewards
 
-use crate::player::{ActState, Body};
-use crate::world::{WorldState, MobInstance, RawMobData};
 use crate::hangul;
+use crate::player::{ActState, Body};
+use crate::world::{MobInstance, RawMobData, WorldState};
 use rand::Rng;
 
 /// Combat action result
@@ -161,7 +161,8 @@ pub fn check_hit(player: &Body, mob_data: &RawMobData) -> bool {
     let mob_level = mob_data.level;
 
     // Hit chance calculation
-    let hit_chance = 50 + (player_dex / 2) + (player_level * 2) - (mob_agility / 3) - (mob_level * 2);
+    let hit_chance =
+        50 + (player_dex / 2) + (player_level * 2) - (mob_agility / 3) - (mob_level * 2);
 
     // Clamp to 5-95%
     let hit_chance = hit_chance.max(5).min(95);
@@ -179,7 +180,9 @@ pub fn process_player_attack(
 
     let mob = mob_instance.clone();
     if !mob.alive {
-        round.player_messages.push("☞ 이미 죽은 몬스터입니다.".to_string());
+        round
+            .player_messages
+            .push("☞ 이미 죽은 몬스터입니다.".to_string());
         round.combat_ended = true;
         return round;
     }
@@ -192,7 +195,11 @@ pub fn process_player_attack(
         let particle = hangul::han_obj(&mob.name);
         let msg = format!("{} {} 공격했지만 빗나갔습니다!", mob.name, particle);
         round.player_messages.push(msg.clone());
-        round.room_messages.push(format!("{} {} 공격했지만 빗나갔습니다.", player.get_name(), mob.name));
+        round.room_messages.push(format!(
+            "{} {} 공격했지만 빗나갔습니다.",
+            player.get_name(),
+            mob.name
+        ));
         return round;
     }
 
@@ -240,11 +247,17 @@ pub fn process_player_attack(
         player.set("체력", player.get_hp() - mob_damage);
 
         let mob_particle = hangul::han_obj(&mob.name);
-        let counter_msg = format!("{} {} {}의 피해를 입혔습니다!",
-            mob.name, mob_particle, mob_damage);
+        let counter_msg = format!(
+            "{} {} {}의 피해를 입혔습니다!",
+            mob.name, mob_particle, mob_damage
+        );
         round.player_messages.push(counter_msg.clone());
-        round.room_messages.push(format!("{} {} {}의 피해를 입혔습니다.",
-            mob.name, player.get_name(), mob_damage));
+        round.room_messages.push(format!(
+            "{} {} {}의 피해를 입혔습니다.",
+            mob.name,
+            player.get_name(),
+            mob_damage
+        ));
 
         // Check if player died
         if player.get_hp() <= 0 {
@@ -254,7 +267,11 @@ pub fn process_player_attack(
 
             let death_msg = format!("☞ {} 당했습니다...", mob.name);
             round.player_messages.push(death_msg);
-            round.room_messages.push(format!("{} {} 쓰러졌습니다.", player.get_name(), hangul::han_obj(&player.get_name())));
+            round.room_messages.push(format!(
+                "{} {} 쓰러졌습니다.",
+                player.get_name(),
+                hangul::han_obj(&player.get_name())
+            ));
         }
     }
 
@@ -262,15 +279,24 @@ pub fn process_player_attack(
 }
 
 /// Get attack message (based on weapon type)
-fn get_attack_message(player: &Body, target_name: &str, damage: i64, particle: &str) -> (String, String) {
+fn get_attack_message(
+    player: &Body,
+    target_name: &str,
+    damage: i64,
+    particle: &str,
+) -> (String, String) {
     let player_name = player.get_name();
 
     // Simple attack message
-    let to_player = format!("{} {} {}의 피해를 입혔습니다!",
-        target_name, particle, damage);
+    let to_player = format!(
+        "{} {} {}의 피해를 입혔습니다!",
+        target_name, particle, damage
+    );
 
-    let to_room = format!("{} {} {}의 피해를 입혔습니다.",
-        player_name, target_name, damage);
+    let to_room = format!(
+        "{} {} {}의 피해를 입혔습니다.",
+        player_name, target_name, damage
+    );
 
     (to_player, to_room)
 }
@@ -282,11 +308,11 @@ fn calculate_exp_reward(mob_data: &RawMobData, player_level: i64) -> i64 {
     // Level difference adjustment
     let level_diff = player_level - mob_data.level;
     let adjusted_exp = if level_diff > 10 {
-        base_exp / 4  // Much lower level mob
+        base_exp / 4 // Much lower level mob
     } else if level_diff > 5 {
         base_exp / 2
     } else if level_diff < -5 {
-        base_exp * 2  // Higher level mob bonus
+        base_exp * 2 // Higher level mob bonus
     } else {
         base_exp
     };
@@ -300,9 +326,7 @@ fn calculate_gold_reward(mob_data: &RawMobData) -> i64 {
 
     // Random variation ±50%
     let variation = rand::thread_rng().gen_range(-50..=50);
-    (base_gold * (100 + variation)) / 100
-
-    .max(1)
+    (base_gold * (100 + variation)) / 100.max(1)
 }
 
 /// Start combat with a mob
@@ -325,7 +349,9 @@ pub fn find_mob_in_room(
 
     // First try exact match using WorldState's mob_cache
     {
-        let mob_instances = world.mob_cache.get_mobs_in_room(&player_pos.zone, &player_pos.room);
+        let mob_instances = world
+            .mob_cache
+            .get_mobs_in_room(&player_pos.zone, &player_pos.room);
         for mob in mob_instances {
             if mob.name == target_name {
                 if let Some(mob_data) = world.mob_cache.get_mob(&mob.mob_key) {
@@ -336,7 +362,9 @@ pub fn find_mob_in_room(
     }
 
     // Then try partial match
-    let mob_instances = world.mob_cache.get_mobs_in_room(&player_pos.zone, &player_pos.room);
+    let mob_instances = world
+        .mob_cache
+        .get_mobs_in_room(&player_pos.zone, &player_pos.room);
     for mob in mob_instances {
         if mob.name.contains(target_name) {
             if let Some(mob_data) = world.mob_cache.get_mob(&mob.mob_key) {
@@ -364,7 +392,7 @@ mod tests {
         let mut mob_data = RawMobData::new();
         mob_data.name = "테스트몹".to_string();
         mob_data.level = 8;
-        mob_data.strength = 50;    // 맷집 (방어력 - combined with inner_power)
+        mob_data.strength = 50; // 맷집 (방어력 - combined with inner_power)
         mob_data.inner_power = 20; // 내공 (defense contribution)
         mob_data.agility = 20;
         mob_data.max_hp = 100;
@@ -384,13 +412,13 @@ mod tests {
         player.set("레벨", 10i64);
         player.set("맷집", 40i64);
         player.set("민첩", 30i64);
-        player.armor = 10;  // 방어구
+        player.armor = 10; // 방어구
         player.set("최대체력", 100i64);
 
         let mut mob_data = RawMobData::new();
         mob_data.level = 8;
-        mob_data.strength = 40;       // 힘
-        mob_data.inner_power = 20;    // 내공 (attack power contribution)
+        mob_data.strength = 40; // 힘
+        mob_data.inner_power = 20; // 내공 (attack power contribution)
 
         // 공식: (40*2 + 40) - (10 + 40) = 80 + 40 - 50 = 70
         // ±20%: 56 ~ 84

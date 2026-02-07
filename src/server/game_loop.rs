@@ -9,8 +9,8 @@
 
 use std::sync::Arc;
 use std::time::{Duration, Instant};
-use tokio::time::interval;
 use tokio::sync::Mutex as AsyncMutex;
+use tokio::time::interval;
 use tracing::debug;
 
 use crate::network::Broadcaster;
@@ -132,7 +132,10 @@ impl GameLoop {
         self.last_tick = Instant::now();
 
         if elapsed >= Duration::from_secs(1) {
-            debug!("Tick {} took longer than 1 second: {:?}", self.tick_count, elapsed);
+            debug!(
+                "Tick {} took longer than 1 second: {:?}",
+                self.tick_count, elapsed
+            );
         }
 
         true

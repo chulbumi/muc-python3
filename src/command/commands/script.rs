@@ -2,15 +2,15 @@
 //!
 //! This module provides command execution through Rhai scripts.
 
+use crate::command::registry::{CommandInfo, CommandRegistry};
+use crate::command::{CommandFn, CommandResult};
+use crate::player::{body::SendLine, Body};
+use crate::scheduler::CallOutScheduler;
+use crate::script::ScriptStorage;
 use std::collections::HashMap;
 use std::sync::Arc;
 use tokio::sync::RwLock;
 use tracing::info;
-use crate::command::{CommandResult, CommandFn};
-use crate::command::registry::{CommandRegistry, CommandInfo};
-use crate::player::{Body, body::SendLine};
-use crate::scheduler::CallOutScheduler;
-use crate::script::ScriptStorage;
 
 /// Execute a script command
 pub async fn execute_script_command(
@@ -22,7 +22,14 @@ pub async fn execute_script_command(
     get_other_players_map: Option<Arc<dyn Fn() -> HashMap<String, String> + Send + Sync>>,
     call_out_scheduler: Option<Arc<CallOutScheduler>>,
 ) -> CommandResult {
-    match script_storage.execute(script_name, player, line, get_other_players_desc, get_other_players_map, call_out_scheduler) {
+    match script_storage.execute(
+        script_name,
+        player,
+        line,
+        get_other_players_desc,
+        get_other_players_map,
+        call_out_scheduler,
+    ) {
         Ok((_outputs, special)) => {
             if let Some(cr) = special {
                 cr
@@ -51,7 +58,10 @@ pub fn create_script_command(
     call_out_scheduler: Option<Arc<CallOutScheduler>>,
 ) -> CommandFn {
     Arc::new(move |player: &mut Body, args: &[&str]| -> CommandResult {
-        println!("[DEBUG SCRIPT] Executing script command: {}, args: {:?}", script_name, args);
+        println!(
+            "[DEBUG SCRIPT] Executing script command: {}, args: {:?}",
+            script_name, args
+        );
         let line = args.join(" ");
         let storage = script_storage.try_read();
         let storage = match storage {
@@ -61,9 +71,21 @@ pub fn create_script_command(
                 return CommandResult::Error(msg);
             }
         };
-        match storage.execute(&script_name, player, &line, get_other_players_desc.clone(), get_other_players_map.clone(), call_out_scheduler.clone()) {
+        match storage.execute(
+            &script_name,
+            player,
+            &line,
+            get_other_players_desc.clone(),
+            get_other_players_map.clone(),
+            call_out_scheduler.clone(),
+        ) {
             Ok((outputs, special)) => {
-                println!("[SCRIPT_CMD] Script {} executed, outputs.len()={}, special={:?}", script_name, outputs.len(), special);
+                println!(
+                    "[SCRIPT_CMD] Script {} executed, outputs.len()={}, special={:?}",
+                    script_name,
+                    outputs.len(),
+                    special
+                );
 
                 // Handle special actions first
                 if let Some(cr) = special {
@@ -108,10 +130,14 @@ pub async fn register_script_commands(
     let script_names = scripts.script_names();
     drop(scripts);
 
-    println!("[SCRIPT_CMD] Found {} scripts to register", script_names.len());
+    println!(
+        "[SCRIPT_CMD] Found {} scripts to register",
+        script_names.len()
+    );
 
     // Collect existing command aliases once to avoid O(n*m) complexity
-    let existing_aliases: std::collections::HashSet<String> = registry.all_commands()
+    let existing_aliases: std::collections::HashSet<String> = registry
+        .all_commands()
         .iter()
         .flat_map(|cmd| {
             let mut aliases = cmd.aliases.clone();
@@ -123,13 +149,19 @@ pub async fn register_script_commands(
     for script_name in script_names {
         // Skip if command already exists (built-in commands take priority)
         if registry.contains(&script_name) {
-            info!("[SCRIPT_CMD] Skipping {} (already registered as built-in)", script_name);
+            info!(
+                "[SCRIPT_CMD] Skipping {} (already registered as built-in)",
+                script_name
+            );
             continue;
         }
 
         // Also check if any existing command has this as an alias
         if existing_aliases.contains(&script_name) {
-            info!("[SCRIPT_CMD] Skipping {} (alias of existing command)", script_name);
+            info!(
+                "[SCRIPT_CMD] Skipping {} (alias of existing command)",
+                script_name
+            );
             continue;
         }
 
@@ -137,7 +169,13 @@ pub async fn register_script_commands(
         let name_clone = script_name.clone();
 
         // Create command from script
-        let command_fn = create_script_command(storage, script_name, get_other_players_desc.clone(), get_other_players_map.clone(), call_out_scheduler.clone());
+        let command_fn = create_script_command(
+            storage,
+            script_name,
+            get_other_players_desc.clone(),
+            get_other_players_map.clone(),
+            call_out_scheduler.clone(),
+        );
 
         // Get description from script if available
         let description = format!("{} 명령어", name_clone);
@@ -145,8 +183,25 @@ pub async fn register_script_commands(
 
         // Rhai 전환된 주다/외쳐/전음/표현: 기존 alias 유지 (레지스트리 built-in 외 별도)
         let aliases: Vec<String> = match name_clone.as_str() {
-            "주다" => vec!["줘".to_string(), "주".to_string(), "give".to_string(), "선물".to_string(), "선".to_string()],
-            "외쳐" => vec!["외".to_string(), "외침".to_string(), "잡".to_string(), "잡담".to_string(), ",".to_string(), "shout".to_string(), "창".to_string(), "창룡".to_string(), "창룡후".to_string(), "외친다".to_string()],
+            "주다" => vec![
+                "줘".to_string(),
+                "주".to_string(),
+                "give".to_string(),
+                "선물".to_string(),
+                "선".to_string(),
+            ],
+            "외쳐" => vec![
+                "외".to_string(),
+                "외침".to_string(),
+                "잡".to_string(),
+                "잡담".to_string(),
+                ",".to_string(),
+                "shout".to_string(),
+                "창".to_string(),
+                "창룡".to_string(),
+                "창룡후".to_string(),
+                "외친다".to_string(),
+            ],
             "전음" => vec!["전".to_string(), "/".to_string()],
             "표현" => vec!["표".to_string(), "'".to_string(), "emote".to_string()],
             _ => vec![],
@@ -157,7 +212,7 @@ pub async fn register_script_commands(
             name_clone.clone(),
             aliases,
             command_fn,
-            0,     // Level 0 = all players can use
+            0, // Level 0 = all players can use
             description.clone(),
             usage,
         );

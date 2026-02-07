@@ -1,7 +1,7 @@
 //! Integration test for script loading and execution
 
-use muc_engine::script::{ScriptStorage, ScriptConfig};
 use muc_engine::player::Body;
+use muc_engine::script::{ScriptConfig, ScriptStorage};
 
 #[test]
 fn test_script_loading() {
@@ -12,9 +12,11 @@ fn test_script_loading() {
     println!("Loaded scripts: {:?}", names);
 
     // Should have loaded the .rhai files from cmds/ directory
-    assert!(names.contains(&"say".to_string()) ||
-            names.contains(&"look".to_string()) ||
-            names.contains(&"help".to_string()));
+    assert!(
+        names.contains(&"say".to_string())
+            || names.contains(&"look".to_string())
+            || names.contains(&"help".to_string())
+    );
 }
 
 #[test]

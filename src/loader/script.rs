@@ -161,7 +161,8 @@ impl Parser {
     fn add_value(&mut self, value: &str) {
         let trimmed = value.trim_start_matches(':').trim();
         if !trimmed.is_empty() {
-            self.current_values.push(Box::new(ScriptValueInner::String(trimmed.to_string())));
+            self.current_values
+                .push(Box::new(ScriptValueInner::String(trimmed.to_string())));
         }
     }
 
@@ -365,14 +366,20 @@ mod tests {
         let mut data = HashMap::new();
         let mut segment = HashMap::new();
 
-        segment.insert("key1".to_string(), Box::new(ScriptValueInner::String("value1".to_string())));
+        segment.insert(
+            "key1".to_string(),
+            Box::new(ScriptValueInner::String("value1".to_string())),
+        );
 
         let mut list = Vec::new();
         list.push(Box::new(ScriptValueInner::String("value2".to_string())));
         list.push(Box::new(ScriptValueInner::String("value3".to_string())));
         segment.insert("key2".to_string(), Box::new(ScriptValueInner::List(list)));
 
-        data.insert("测试".to_string(), Box::new(ScriptValueInner::Dict(segment)));
+        data.insert(
+            "测试".to_string(),
+            Box::new(ScriptValueInner::Dict(segment)),
+        );
 
         let value = Box::new(ScriptValueInner::Dict(data));
         let mut output = Vec::new();

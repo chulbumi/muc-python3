@@ -429,18 +429,24 @@ impl Player {
         if self.body.get_int("투명상태") != 1 {
             match mode {
                 "시작" => {
-                    let _msg = format!("{} 무림지존을 꿈꾸며 강호에 출두합니다.",
-                        self.body.han_iga());
+                    let _msg = format!(
+                        "{} 무림지존을 꿈꾸며 강호에 출두합니다.",
+                        self.body.han_iga()
+                    );
                     // self.channel.send_to_all_in_out(&msg, self);
                 }
                 "귀환" => {
-                    let msg = format!("{} 하늘에서 사뿐히 내려 앉습니다. '척~~~'",
-                        self.body.han_iga());
+                    let msg = format!(
+                        "{} 하늘에서 사뿐히 내려 앉습니다. '척~~~'",
+                        self.body.han_iga()
+                    );
                     self.send_room(&msg);
                 }
                 "도망" => {
-                    let msg = format!("{} 신형을 비틀거리며 간신히 도망옵니다. '헉헉~~'",
-                        self.body.han_iga());
+                    let msg = format!(
+                        "{} 신형을 비틀거리며 간신히 도망옵니다. '헉헉~~'",
+                        self.body.han_iga()
+                    );
                     self.send_room(&msg);
                 }
                 _ => {
@@ -538,11 +544,8 @@ impl Player {
     /// Removes a member from the party
     pub fn remove_party_member(&mut self, member: &Arc<Mutex<Player>>) {
         let ptr = Arc::as_ptr(member);
-        self.party_members.retain(|m| {
-            m.upgrade()
-                .map(|m| Arc::as_ptr(&m) != ptr)
-                .unwrap_or(false)
-        });
+        self.party_members
+            .retain(|m| m.upgrade().map(|m| Arc::as_ptr(&m) != ptr).unwrap_or(false));
     }
 
     /// Leaves the current party
@@ -562,9 +565,7 @@ impl Player {
     pub fn del_item(&mut self, item: &Arc<Mutex<Object>>) -> bool {
         let ptr = Arc::as_ptr(item);
         let len_before = self.body.object.objs.len();
-        self.body.object.objs.retain(|obj| {
-            Arc::as_ptr(obj) != ptr
-        });
+        self.body.object.objs.retain(|obj| Arc::as_ptr(obj) != ptr);
         self.body.object.objs.len() < len_before
     }
 
@@ -709,11 +710,7 @@ impl Player {
 
         // Handle command repeat
         let prev_cmd = self.prev_cmd.clone();
-        let command = if line == "!" {
-            prev_cmd.as_str()
-        } else {
-            line
-        };
+        let command = if line == "!" { prev_cmd.as_str() } else { line };
 
         self.do_command(command);
     }
@@ -775,7 +772,10 @@ impl Player {
         self.followers.push(Arc::downgrade(&follower));
 
         if let Ok(f) = follower.lock() {
-            f.send_line(&format!("당신은 {} 따라다니기 시작합니다.", self.body.han_obj()));
+            f.send_line(&format!(
+                "당신은 {} 따라다니기 시작합니다.",
+                self.body.han_obj()
+            ));
         }
     }
 

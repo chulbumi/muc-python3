@@ -31,11 +31,7 @@ fn get_next_words(key: &str) -> String {
 fn get_str_cnt(line: &str) -> (String, i64) {
     let tok: Vec<&str> = line.split_whitespace().collect();
     let l = tok.len();
-    let cnt = if l >= 3 {
-        parse_int(tok[l - 1])
-    } else {
-        1
-    };
+    let cnt = if l >= 3 { parse_int(tok[l - 1]) } else { 1 };
     let index = tok.get(1).map(|s| (*s).to_string()).unwrap_or_default();
     (index, cnt)
 }
@@ -119,9 +115,10 @@ fn set_user_event(body: &mut Body, key: &str, value: &str) {
     } else {
         m.insert(key.to_string(), value.to_string());
     }
-    body.object
-        .attr
-        .insert("이벤트설정리스트".to_string(), Value::String(format_event_string(&m)));
+    body.object.attr.insert(
+        "이벤트설정리스트".to_string(),
+        Value::String(format_event_string(&m)),
+    );
     let path = format!("data/user/{}.json", body.get_name());
     let _ = save_body_to_json(body, &path);
 }
@@ -129,9 +126,10 @@ fn set_user_event(body: &mut Body, key: &str, value: &str) {
 fn del_user_event(body: &mut Body, key: &str) {
     let mut m = parse_event_string(&body.get_string("이벤트설정리스트"));
     m.remove(key);
-    body.object
-        .attr
-        .insert("이벤트설정리스트".to_string(), Value::String(format_event_string(&m)));
+    body.object.attr.insert(
+        "이벤트설정리스트".to_string(),
+        Value::String(format_event_string(&m)),
+    );
     let path = format!("data/user/{}.json", body.get_name());
     let _ = save_body_to_json(body, &path);
 }
@@ -151,9 +149,10 @@ fn get_tendency(body: &Body, t: &str) -> bool {
 
 /// $출력 / 일반 줄: [공], [사용자이름], [공](이/가) 치환.
 fn substitute_line(line: &str, player_name: &str) -> String {
-    let r = line
-        .replace("[사용자이름]", player_name)
-        .replace("[공](이/가)", &format!("{}{}", player_name, han_iga(player_name)));
+    let r = line.replace("[사용자이름]", player_name).replace(
+        "[공](이/가)",
+        &format!("{}{}", player_name, han_iga(player_name)),
+    );
     r.replace("[공]", player_name)
 }
 
@@ -239,7 +238,8 @@ pub fn do_event(
         if sline.starts_with('$') {
             let mut sline_mut = sline.clone();
             if words.len() > 2 {
-                sline_mut = sline_mut.replace("$변수:1", words.get(1).map(|s| s.as_str()).unwrap_or(""));
+                sline_mut =
+                    sline_mut.replace("$변수:1", words.get(1).map(|s| s.as_str()).unwrap_or(""));
             }
 
             let func = sline_mut.split_whitespace().next().unwrap_or("");
@@ -398,7 +398,9 @@ pub fn do_event_rhai(
     } else {
         format!("{}.rhai", path_trim)
     };
-    let script_path = Path::new("data/script").join(data.zone.as_str()).join(&with_ext);
+    let script_path = Path::new("data/script")
+        .join(data.zone.as_str())
+        .join(&with_ext);
     let src = match std::fs::read_to_string(&script_path) {
         Ok(s) => s,
         Err(_) => return CommandResult::Output("(이벤트 스크립트 파일 없음)".to_string()),
@@ -419,10 +421,12 @@ pub fn do_event_rhai(
 
     engine.register_fn("output", move |msg: &str| {
         let line = event_substitute(msg, &player_name_out);
-        unsafe { (*out_ptr).push(line); }
+        unsafe {
+            (*out_ptr).push(line);
+        }
     });
-    engine.register_fn("set_position", move |zone: &str, room: &str| {
-        unsafe { *pos_ptr = Some((zone.to_string(), room.to_string())); }
+    engine.register_fn("set_position", move |zone: &str, room: &str| unsafe {
+        *pos_ptr = Some((zone.to_string(), room.to_string()));
     });
     engine.register_fn("check_event", move |key: &str| -> bool {
         let b = unsafe { &*body_ptr };
@@ -505,30 +509,28 @@ pub fn do_event_rhai(
         let _ = save_body_to_json(b, &path);
     });
     engine.register_fn("words", move |i: i64| -> String {
-        words_vec
-            .get(i as usize)
-            .cloned()
-            .unwrap_or_default()
+        words_vec.get(i as usize).cloned().unwrap_or_default()
     });
-    engine.register_fn("wait_enter", move |next_func: &str, prompt: &str| -> Result<(), Box<EvalAltResult>> {
-        let mut m = Map::new();
-        m.insert("type".into(), Dynamic::from("event_enter"));
-        m.insert("next_func".into(), Dynamic::from(next_func.to_string()));
-        m.insert("prompt".into(), Dynamic::from(prompt.to_string()));
-        Err(Box::new(EvalAltResult::ErrorRuntime(
-            Dynamic::from(m),
-            Position::default(),
-        )))
-    });
+    engine.register_fn(
+        "wait_enter",
+        move |next_func: &str, prompt: &str| -> Result<(), Box<EvalAltResult>> {
+            let mut m = Map::new();
+            m.insert("type".into(), Dynamic::from("event_enter"));
+            m.insert("next_func".into(), Dynamic::from(next_func.to_string()));
+            m.insert("prompt".into(), Dynamic::from(prompt.to_string()));
+            Err(Box::new(EvalAltResult::ErrorRuntime(
+                Dynamic::from(m),
+                Position::default(),
+            )))
+        },
+    );
 
     let ast = match engine.compile(&src_with_preamble) {
         Ok(a) => a,
         Err(e) => return CommandResult::Output(format!("(이벤트 스크립트 컴파일 오류: {})", e)),
     };
     let mut scope = Scope::new();
-    let entry = resume_func
-        .clone()
-        .unwrap_or_else(|| "event".to_string());
+    let entry = resume_func.clone().unwrap_or_else(|| "event".to_string());
     let r = engine.call_fn::<Dynamic>(&mut scope, &ast, &entry, ());
 
     match r {
@@ -614,7 +616,10 @@ pub fn try_mob_event(
         };
         let ok = inst.name == name
             || inst.name.starts_with(name)
-            || data.reaction_names.iter().any(|n| *n == name || n.starts_with(name));
+            || data
+                .reaction_names
+                .iter()
+                .any(|n| *n == name || n.starts_with(name));
         if ok {
             candidates.push((inst, data));
         }
@@ -623,14 +628,25 @@ pub fn try_mob_event(
 
     let words_ref: Vec<&str> = words.iter().map(|s| s.as_str()).collect();
     if candidates.is_empty() {
-        info!("[try_mob_event] no candidates words={:?} zone={} room={}", words_ref, zone, room);
+        info!(
+            "[try_mob_event] no candidates words={:?} zone={} room={}",
+            words_ref, zone, room
+        );
     }
     for (inst, data) in candidates {
         let event_key = match check_event_key(data, &words_ref) {
             Some(k) => k,
             None => {
-                let ev: Vec<&str> = data.events.keys().filter(|k| k.starts_with("이벤트")).map(String::as_str).collect();
-                info!("[try_mob_event] check_event_key=None words={:?} mob_key={} ev_keys={:?}", words_ref, inst.mob_key, ev);
+                let ev: Vec<&str> = data
+                    .events
+                    .keys()
+                    .filter(|k| k.starts_with("이벤트"))
+                    .map(String::as_str)
+                    .collect();
+                info!(
+                    "[try_mob_event] check_event_key=None words={:?} mob_key={} ev_keys={:?}",
+                    words_ref, inst.mob_key, ev
+                );
                 return None;
             }
         };
@@ -722,14 +738,24 @@ fn weapon_upgrade_do_option(
     if val == 0 {
         return Err("☞ 그런 특성치는 없어요.".to_string());
     }
-    let mat_idx = mat_arc.lock().ok().map(|o| o.getString("인덱스")).unwrap_or_default();
+    let mat_idx = mat_arc
+        .lock()
+        .ok()
+        .map(|o| o.getString("인덱스"))
+        .unwrap_or_default();
     let 올숙키 = format!("{}_올숙무기", body.get_name());
-    let my_arc = body.object.find_by_index(&올숙키)
+    let my_arc = body
+        .object
+        .find_by_index(&올숙키)
         .ok_or_else(|| "☞ 무기를 벗고 하세요.".to_string())?;
     if my_arc.lock().map(|o| o.getBool("inUse")).unwrap_or(false) {
         return Err("☞ 무기를 벗고 하세요.".to_string());
     }
-    let mut my_op = my_arc.lock().ok().and_then(|o| o.get_option()).unwrap_or_default();
+    let mut my_op = my_arc
+        .lock()
+        .ok()
+        .and_then(|o| o.get_option())
+        .unwrap_or_default();
     let my_val = *my_op.get(op).unwrap_or(&0);
     if my_val >= val {
         return Err("☞ 현재 특성치 값보다 높아야 합니다.".to_string());
@@ -796,18 +822,41 @@ pub fn run_script_chunk(
             if line.starts_with("$종료") {
                 return (out, ScriptNext::Complete);
             }
-            if line.starts_with("$키입력") || line.starts_with("$단어입력") || line.starts_with("$한줄입력") {
+            if line.starts_with("$키입력")
+                || line.starts_with("$단어입력")
+                || line.starts_with("$한줄입력")
+            {
                 let prompt = if nw.is_empty() {
                     "입력: ".to_string()
                 } else {
                     format!("{} ", nw)
                 };
-                return (out, ScriptNext::Wait { line_num: i + 1, prompt, persist_temp: None, from_confirm: false, script_ob: None, script_resume_op: None });
+                return (
+                    out,
+                    ScriptNext::Wait {
+                        line_num: i + 1,
+                        prompt,
+                        persist_temp: None,
+                        from_confirm: false,
+                        script_ob: None,
+                        script_resume_op: None,
+                    },
+                );
             }
             if line.starts_with("$입력확인") {
                 out.push("입력하신 내용이 맞습니까? (네/취소) : ".to_string());
                 let persist = input.clone();
-                return (out, ScriptNext::Wait { line_num: i + 1, prompt: String::new(), persist_temp: persist, from_confirm: true, script_ob: None, script_resume_op: None });
+                return (
+                    out,
+                    ScriptNext::Wait {
+                        line_num: i + 1,
+                        prompt: String::new(),
+                        persist_temp: persist,
+                        from_confirm: true,
+                        script_ob: None,
+                        script_resume_op: None,
+                    },
+                );
             }
             if line.starts_with("$아이템확인") {
                 let name = temp_input.as_deref().unwrap_or("");
@@ -913,9 +962,7 @@ pub fn run_script_chunk_rhai(
     script_resume_op: Option<String>,
 ) -> (Vec<String>, ScriptNext) {
     let mut out: Vec<String> = Vec::new();
-    let mut ob = script_ob
-        .map(script_hashmap_to_ob)
-        .unwrap_or_else(Map::new);
+    let mut ob = script_ob.map(script_hashmap_to_ob).unwrap_or_else(Map::new);
 
     let res_op = script_resume_op.as_deref().unwrap_or("");
     let res_in = input.as_deref().unwrap_or("");
@@ -926,14 +973,20 @@ pub fn run_script_chunk_rhai(
     let body_ptr = body as *mut Body;
 
     engine.register_fn("send_line", move |_ob: Dynamic, msg: &str| {
-        let line = if msg.is_empty() { "\r\n".to_string() } else { format!("{}\r\n", msg) };
+        let line = if msg.is_empty() {
+            "\r\n".to_string()
+        } else {
+            format!("{}\r\n", msg)
+        };
         unsafe { (*out_ptr).push(line) };
     });
 
     // end_script는 lib/script/common.rhai에 정의 (throw script_complete)
 
     let temp_clone = temp_input.clone();
-    engine.register_fn("get_persisted", move || temp_clone.clone().unwrap_or_default());
+    engine.register_fn("get_persisted", move || {
+        temp_clone.clone().unwrap_or_default()
+    });
 
     let temp_for_ci = temp_input.clone();
     engine.register_fn("confirm_item", move |_ob: Dynamic| -> bool {
@@ -952,8 +1005,13 @@ pub fn run_script_chunk_rhai(
 
     engine.register_fn("option_output", move |_ob: Dynamic| -> String {
         let b = unsafe { &*body_ptr };
-        let Some(ref arc) = b.script_temp_item else { return String::new() };
-        arc.lock().ok().map(|o| o.get_option_str()).unwrap_or_default()
+        let Some(ref arc) = b.script_temp_item else {
+            return String::new();
+        };
+        arc.lock()
+            .ok()
+            .map(|o| o.get_option_str())
+            .unwrap_or_default()
     });
 
     let temp_for_oc = temp_input.clone();
@@ -964,7 +1022,9 @@ pub fn run_script_chunk_rhai(
             Some(m) => m,
             None => return "* 무기강화를 종료합니다.".to_string(),
         };
-        weapon_upgrade_do_option(b, &mat, &op).err().unwrap_or_default()
+        weapon_upgrade_do_option(b, &mat, &op)
+            .err()
+            .unwrap_or_default()
     });
 
     engine.register_fn("delete_item", move |index: &str, cnt: i64| {
@@ -1001,19 +1061,33 @@ pub fn run_script_chunk_rhai(
     if let Err(e) = r {
         if let EvalAltResult::ErrorRuntime(err, _) = *e {
             if let Some(m) = err.clone().try_cast::<Map>() {
-                let t: String = m.get("type").and_then(|v: &Dynamic| v.clone().into_string().ok()).unwrap_or_default();
+                let t: String = m
+                    .get("type")
+                    .and_then(|v: &Dynamic| v.clone().into_string().ok())
+                    .unwrap_or_default();
                 if t == "script_suspend" {
-                    let op: String = m.get("op").and_then(|v: &Dynamic| v.clone().into_string().ok()).unwrap_or_default();
-                    let prompt: String = m.get("prompt").and_then(|v: &Dynamic| v.clone().into_string().ok()).unwrap_or_default();
-                    let persist_temp = m.get("persist").and_then(|v: &Dynamic| v.clone().into_string().ok());
-                    return (out, ScriptNext::Wait {
-                        line_num: 0,
-                        prompt,
-                        persist_temp,
-                        from_confirm: op == "confirm",
-                        script_ob: Some(script_ob_to_hashmap(ob)),
-                        script_resume_op: Some(op),
-                    });
+                    let op: String = m
+                        .get("op")
+                        .and_then(|v: &Dynamic| v.clone().into_string().ok())
+                        .unwrap_or_default();
+                    let prompt: String = m
+                        .get("prompt")
+                        .and_then(|v: &Dynamic| v.clone().into_string().ok())
+                        .unwrap_or_default();
+                    let persist_temp = m
+                        .get("persist")
+                        .and_then(|v: &Dynamic| v.clone().into_string().ok());
+                    return (
+                        out,
+                        ScriptNext::Wait {
+                            line_num: 0,
+                            prompt,
+                            persist_temp,
+                            from_confirm: op == "confirm",
+                            script_ob: Some(script_ob_to_hashmap(ob)),
+                            script_resume_op: Some(op),
+                        },
+                    );
                 }
                 if t == "script_complete" {
                     return (out, ScriptNext::Complete);

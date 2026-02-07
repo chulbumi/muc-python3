@@ -178,19 +178,22 @@ impl Skill {
         }
 
         // 무공스크립 (Mugong script)
-        skill.mugong_script = json.get("무공스크립")
+        skill.mugong_script = json
+            .get("무공스크립")
             .and_then(|v| v.as_str())
             .unwrap_or("")
             .to_string();
 
         // 실패 (Fail message)
-        skill.fail_message = json.get("실패")
+        skill.fail_message = json
+            .get("실패")
             .and_then(|v| v.as_str())
             .unwrap_or("")
             .to_string();
 
         // 방어상태머리말 (Defense head)
-        skill.defense_head = json.get("방어상태머리말")
+        skill.defense_head = json
+            .get("방어상태머리말")
             .and_then(|v| v.as_str())
             .unwrap_or("")
             .to_string();
@@ -205,17 +208,14 @@ impl Skill {
         }
 
         // 확률 (Probability)
-        skill.probability = json.get("확률")
-            .and_then(|v| v.as_i64())
-            .unwrap_or(100);
+        skill.probability = json.get("확률").and_then(|v| v.as_i64()).unwrap_or(100);
 
         // 확률증가 (Probability increase)
-        skill.prob_increase = json.get("확률증가")
-            .and_then(|v| v.as_i64())
-            .unwrap_or(90);
+        skill.prob_increase = json.get("확률증가").and_then(|v| v.as_i64()).unwrap_or(90);
 
         // 계열 (Category)
-        skill.category = json.get("계열")
+        skill.category = json
+            .get("계열")
             .and_then(|v| v.as_str())
             .unwrap_or("")
             .to_string();
@@ -236,12 +236,11 @@ impl Skill {
         }
 
         // 방어시간 (Defense time)
-        skill.defense_time = json.get("방어시간")
-            .and_then(|v| v.as_i64())
-            .unwrap_or(0);
+        skill.defense_time = json.get("방어시간").and_then(|v| v.as_i64()).unwrap_or(0);
 
         // 방어시간증가치 (Defense time increase)
-        skill.defense_time_increase = json.get("방어시간증가치")
+        skill.defense_time_increase = json
+            .get("방어시간증가치")
             .and_then(|v| v.as_i64())
             .unwrap_or(0);
 
@@ -253,9 +252,7 @@ impl Skill {
         let attack_lines: Vec<&str> = if let Some(s) = attack.as_str() {
             vec![s]
         } else if let Some(arr) = attack.as_array() {
-            arr.iter()
-                .filter_map(|v| v.as_str())
-                .collect()
+            arr.iter().filter_map(|v| v.as_str()).collect()
         } else {
             return Ok(());
         };
@@ -279,7 +276,10 @@ impl Skill {
                 message,
             };
 
-            self.pattern.entry(turn).or_insert_with(Vec::new).push(element);
+            self.pattern
+                .entry(turn)
+                .or_insert_with(Vec::new)
+                .push(element);
         }
 
         // Calculate max_turn
@@ -292,9 +292,7 @@ impl Skill {
         let attr_list: Vec<&str> = if let Some(s) = attrs.as_str() {
             vec![s]
         } else if let Some(arr) = attrs.as_array() {
-            arr.iter()
-                .filter_map(|v| v.as_str())
-                .collect()
+            arr.iter().filter_map(|v| v.as_str()).collect()
         } else {
             return Ok(());
         };
@@ -347,9 +345,7 @@ impl Skill {
         let def_list: Vec<&str> = if let Some(s) = def.as_str() {
             vec![s]
         } else if let Some(arr) = def.as_array() {
-            arr.iter()
-                .filter_map(|v| v.as_str())
-                .collect()
+            arr.iter().filter_map(|v| v.as_str()).collect()
         } else {
             return Ok(());
         };
@@ -414,8 +410,8 @@ impl Skill {
     /// - And so on...
     pub fn get_script(&mut self, dex: i64) -> (Vec<PatternElement>, bool, i64) {
         let mut more = true;
-        let start = self.end + 1;  // Continue from where we left off
-        self.curturn += 1;         // Increment turn counter
+        let start = self.end + 1; // Continue from where we left off
+        self.curturn += 1; // Increment turn counter
 
         // Calculate step based on dex (700 dex = 1 step)
         self.step = (dex / 700) as i32;
@@ -447,7 +443,7 @@ impl Skill {
 
         // Check if cycle is complete
         if self.end >= self.max_turn as i32 {
-            self.end = 0;  // Reset for next cycle
+            self.end = 0; // Reset for next cycle
             more = false;
         }
 
@@ -569,18 +565,15 @@ pub fn get_skill_cache() -> &'static RwLock<SkillCache> {
 
 /// 스킬 이름으로 스킬 데이터 가져오기
 pub fn get_skill(name: &str) -> Option<Skill> {
-    get_skill_cache()
-        .read()
-        .ok()?
-        .get(name)
-        .cloned()
+    get_skill_cache().read().ok()?.get(name).cloned()
 }
 
 /// 스킬 이름으로 방어상태머리말 가져오기
 /// This is already in data/mod.rs but keeping for convenience
 pub fn get_skill_defense_head(name: &str) -> String {
     if let Ok(cache) = get_skill_cache().read() {
-        cache.get(name)
+        cache
+            .get(name)
             .map(|s| s.defense_head.clone())
             .unwrap_or_default()
     } else {

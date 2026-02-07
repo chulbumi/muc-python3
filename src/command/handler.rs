@@ -2,16 +2,18 @@
 //!
 //! Provides the core command execution logic and result types.
 
-use std::sync::Arc;
-use crate::player::Body;
 use crate::command::registry::CommandRegistry;
+use crate::player::Body;
+use std::sync::Arc;
 
 /// Multi-step input state (e.g. 암호변경: 이전암호 → 새암호 → 확인)
 #[derive(Debug, Clone, PartialEq)]
 pub enum PendingInput {
     ChangePasswordOld,
     ChangePasswordNew,
-    ChangePasswordConfirm { new_password: String },
+    ChangePasswordConfirm {
+        new_password: String,
+    },
     /// $엔터$: 다음 입력 시 try_mob_event_resume( mob_key, event_key, words, line_num, resume_func ) 호출.
     /// resume_func: Rhai wait_enter 재개용. Some("step1")이면 do_event_rhai에서 step1() 호출. Legacy면 None.
     EventEnter {
@@ -103,19 +105,50 @@ pub enum CommandResult {
         resume_func: Option<String>,
     },
     /// $스크립트호출: data/script/ 무기강화 등. use_rhai면 run_script_chunk_rhai, 아니면 run_script_chunk.
-    StartScript { script_name: String, lines: Vec<String>, use_rhai: bool },
+    StartScript {
+        script_name: String,
+        lines: Vec<String>,
+        use_rhai: bool,
+    },
     /// 쪽지: [이름] [제목] 후 편집 모드. 라인 단위 입력, '.' 또는 10줄이면 종료.
     StartNoteEdit { target_name: String, title: String },
     /// 강제로그아웃: 관리자가 플레이어를 강제로 로그아웃시킴.
     Kick { target_name: String, reason: String },
     /// 계정정지: 관리자가 플레이어를 일정 기간 동안 접속 차단. duration은 초 단위.
-    Ban { target_name: String, duration: i64, reason: String },
+    Ban {
+        target_name: String,
+        duration: i64,
+        reason: String,
+    },
 }
 
 impl CommandResult {
     /// Returns true if the command succeeded
     pub fn is_ok(&self) -> bool {
-        matches!(self, CommandResult::Ok | CommandResult::Output(_) | CommandResult::Move(_) | CommandResult::Combat | CommandResult::NoPrompt | CommandResult::SayToRoom(_, _) | CommandResult::Shout(_) | CommandResult::Notice(_) | CommandResult::Tell(_, _) | CommandResult::Shutdown | CommandResult::EmotionToRoom(_, _, _) | CommandResult::RequestInput { .. } | CommandResult::GiveToPlayer { .. } | CommandResult::BroadcastToPlayers(_, _) | CommandResult::SendToUsers(_) | CommandResult::MobEvent { .. } | CommandResult::MobEventEnter { .. } | CommandResult::StartScript { .. } | CommandResult::StartNoteEdit { .. } | CommandResult::Kick { .. } | CommandResult::Ban { .. })
+        matches!(
+            self,
+            CommandResult::Ok
+                | CommandResult::Output(_)
+                | CommandResult::Move(_)
+                | CommandResult::Combat
+                | CommandResult::NoPrompt
+                | CommandResult::SayToRoom(_, _)
+                | CommandResult::Shout(_)
+                | CommandResult::Notice(_)
+                | CommandResult::Tell(_, _)
+                | CommandResult::Shutdown
+                | CommandResult::EmotionToRoom(_, _, _)
+                | CommandResult::RequestInput { .. }
+                | CommandResult::GiveToPlayer { .. }
+                | CommandResult::BroadcastToPlayers(_, _)
+                | CommandResult::SendToUsers(_)
+                | CommandResult::MobEvent { .. }
+                | CommandResult::MobEventEnter { .. }
+                | CommandResult::StartScript { .. }
+                | CommandResult::StartNoteEdit { .. }
+                | CommandResult::Kick { .. }
+                | CommandResult::Ban { .. }
+        )
     }
 
     /// Returns true if the command should skip the prompt
@@ -183,12 +216,7 @@ impl CommandHandler {
     ///
     /// # Returns
     /// CommandResult indicating the outcome
-    pub fn handle_command(
-        &self,
-        player: &mut Body,
-        command: &str,
-        args: &[&str],
-    ) -> CommandResult {
+    pub fn handle_command(&self, player: &mut Body, command: &str, args: &[&str]) -> CommandResult {
         // Resolve alias
         let resolved = self.registry.resolve_alias(command);
 
@@ -230,12 +258,9 @@ impl CommandHandler {
     /// Option<String> with the help text
     pub fn get_help(&self, command: &str) -> Option<String> {
         let resolved = self.registry.resolve_alias(command);
-        self.registry.get(&resolved).map(|cmd| {
-            format!(
-                "{}\n사용법: {}",
-                cmd.description, cmd.usage
-            )
-        })
+        self.registry
+            .get(&resolved)
+            .map(|cmd| format!("{}\n사용법: {}", cmd.description, cmd.usage))
     }
 
     /// Returns all available commands for a player level
@@ -246,7 +271,8 @@ impl CommandHandler {
     /// # Returns
     /// Vec of command names the player can use
     pub fn available_commands(&self, player_level: i32) -> Vec<String> {
-        self.registry.all_commands()
+        self.registry
+            .all_commands()
             .iter()
             .filter(|cmd| cmd.level <= player_level)
             .map(|cmd| cmd.name.clone())
@@ -339,13 +365,17 @@ mod tests {
         let mut registry = CommandRegistry::new();
 
         // Register test commands
-        registry.register_simple("test", |_, args| {
-            if args.is_empty() {
-                CommandResult::Usage("test <args>".to_string())
-            } else {
-                CommandResult::Ok
-            }
-        }, "Test command");
+        registry.register_simple(
+            "test",
+            |_, args| {
+                if args.is_empty() {
+                    CommandResult::Usage("test <args>".to_string())
+                } else {
+                    CommandResult::Ok
+                }
+            },
+            "Test command",
+        );
 
         registry.register_simple("admin", |_, _| CommandResult::Ok, "Admin command");
         registry.get_mut("admin").unwrap().level = 100;

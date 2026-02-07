@@ -17,10 +17,10 @@ pub enum Direction {
     West,
     Up,
     Down,
-    NorthWest,  // 북서 ↖
-    NorthEast,  // 북동 ↗
-    SouthWest,  // 남서 ↙
-    SouthEast,  // 남동 ↘
+    NorthWest, // 북서 ↖
+    NorthEast, // 북동 ↗
+    SouthWest, // 남서 ↙
+    SouthEast, // 남동 ↘
 }
 
 impl Direction {
@@ -196,7 +196,8 @@ impl Room {
 
     /// Get exit information as a display string
     pub fn get_exits_display(&self) -> String {
-        let mut names: Vec<String> = self.exits
+        let mut names: Vec<String> = self
+            .exits
             .values()
             .filter(|e| e.has_destination() && !e.hidden)
             .map(|e| e.display_name.clone())
@@ -325,14 +326,15 @@ impl RoomCache {
         }
 
         // Read and parse the JSON file
-        let content = std::fs::read_to_string(&file_path)
-            .map_err(|e| RoomError::IoError(e.to_string()))?;
+        let content =
+            std::fs::read_to_string(&file_path).map_err(|e| RoomError::IoError(e.to_string()))?;
 
-        let json: JsonValue = serde_json::from_str(&content)
-            .map_err(|e| RoomError::ParseError(e.to_string()))?;
+        let json: JsonValue =
+            serde_json::from_str(&content).map_err(|e| RoomError::ParseError(e.to_string()))?;
 
         // Extract the 맵정보 object
-        let map_info = json.get("맵정보")
+        let map_info = json
+            .get("맵정보")
             .and_then(|v| v.as_object())
             .ok_or_else(|| RoomError::ParseError("맵정보 not found".to_string()))?;
 
@@ -374,9 +376,13 @@ impl RoomCache {
     }
 
     /// Parse raw room data from JSON object
-    fn parse_raw_room_data(&self, map_info: &serde_json::Map<String, JsonValue>) -> Result<RawRoomData, RoomError> {
+    fn parse_raw_room_data(
+        &self,
+        map_info: &serde_json::Map<String, JsonValue>,
+    ) -> Result<RawRoomData, RoomError> {
         // Parse 맵속성 (properties)
-        let properties = map_info.get("맵속성")
+        let properties = map_info
+            .get("맵속성")
             .and_then(|v| v.as_array())
             .map(|arr| {
                 arr.iter()
@@ -386,7 +392,8 @@ impl RoomCache {
             .unwrap_or_default();
 
         // Parse 설명 (description)
-        let description = map_info.get("설명")
+        let description = map_info
+            .get("설명")
             .and_then(|v| v.as_array())
             .map(|arr| {
                 arr.iter()
@@ -396,19 +403,22 @@ impl RoomCache {
             .unwrap_or_default();
 
         // Parse 이름 (name)
-        let name = map_info.get("이름")
+        let name = map_info
+            .get("이름")
             .and_then(|v| v.as_str())
             .unwrap_or("이름 없는 방")
             .to_string();
 
         // Parse 존이름 (zone name)
-        let zone = map_info.get("존이름")
+        let zone = map_info
+            .get("존이름")
             .and_then(|v| v.as_str())
             .unwrap_or("")
             .to_string();
 
         // Parse 출구 (exits)
-        let exits = map_info.get("출구")
+        let exits = map_info
+            .get("출구")
             .and_then(|v| v.as_array())
             .map(|arr| {
                 arr.iter()
@@ -418,7 +428,8 @@ impl RoomCache {
             .unwrap_or_default();
 
         // Parse 몹 (mob IDs in this room — spawn only on enter)
-        let mob_ids = map_info.get("몹")
+        let mob_ids = map_info
+            .get("몹")
             .and_then(|v| v.as_array())
             .map(|arr| {
                 arr.iter()
@@ -441,7 +452,11 @@ impl RoomCache {
     /// - "북 35", "동 2": 방향+같은존  / "서 절강성:52": 방향+다른존
     /// - "초보수련장 하북성:3001", "출구 낙양성:42": 고유 명칭
     /// - "북" only: 방향만(출구 없음)  / "북$ 35": 숨겨진(표시 제외, 이름으로 이동 가능)
-    fn parse_exits(&self, exit_strings: &[String], current_zone: &str) -> Result<HashMap<String, Exit>, RoomError> {
+    fn parse_exits(
+        &self,
+        exit_strings: &[String],
+        current_zone: &str,
+    ) -> Result<HashMap<String, Exit>, RoomError> {
         let mut exits = HashMap::new();
 
         for exit_str in exit_strings {
@@ -464,7 +479,10 @@ impl RoomCache {
                     let room_id = zone_parts[1].trim().to_string();
                     Some((zone, room_id))
                 } else {
-                    return Err(RoomError::ParseError(format!("Invalid zone format: {}", parts[1])));
+                    return Err(RoomError::ParseError(format!(
+                        "Invalid zone format: {}",
+                        parts[1]
+                    )));
                 }
             } else {
                 Some((current_zone.to_string(), parts[1].to_string()))
@@ -486,15 +504,18 @@ impl RoomCache {
     pub fn preload_zone(&mut self, zone: &str) -> Result<usize, RoomError> {
         let zone_dir = self.data_dir.join(zone);
 
-        eprintln!("[RoomCache] Preloading zone '{}' from dir: {:?}", zone, zone_dir);
+        eprintln!(
+            "[RoomCache] Preloading zone '{}' from dir: {:?}",
+            zone, zone_dir
+        );
 
         if !zone_dir.exists() {
             eprintln!("[RoomCache] Zone directory does not exist: {:?}", zone_dir);
             return Err(RoomError::NotFound(zone.to_string()));
         }
 
-        let entries = std::fs::read_dir(&zone_dir)
-            .map_err(|e| RoomError::IoError(e.to_string()))?;
+        let entries =
+            std::fs::read_dir(&zone_dir).map_err(|e| RoomError::IoError(e.to_string()))?;
 
         let mut count = 0;
         for entry in entries {
@@ -502,12 +523,16 @@ impl RoomCache {
             let path = entry.path();
 
             if path.extension().and_then(|s| s.to_str()) == Some("json") {
-                let name = path.file_stem()
+                let name = path
+                    .file_stem()
                     .and_then(|s| s.to_str())
                     .ok_or_else(|| RoomError::ParseError("Invalid file name".to_string()))?;
 
                 // Load the room (will be cached)
-                eprintln!("[RoomCache] Loading room: {}:{} from {:?}", zone, name, path);
+                eprintln!(
+                    "[RoomCache] Loading room: {}:{} from {:?}",
+                    zone, name, path
+                );
                 match self.get_room(zone, name) {
                     Ok(_) => {
                         count += 1;
@@ -520,8 +545,12 @@ impl RoomCache {
             }
         }
 
-        eprintln!("[RoomCache] Preloaded {} rooms from zone '{}', total cached: {}",
-            count, zone, self.rooms.len());
+        eprintln!(
+            "[RoomCache] Preloaded {} rooms from zone '{}', total cached: {}",
+            count,
+            zone,
+            self.rooms.len()
+        );
         Ok(count)
     }
 
@@ -577,19 +606,13 @@ pub fn get_room(zone: &str, name: &str) -> Result<Arc<RwLock<Room>>, RoomError> 
         static CACHE: std::cell::RefCell<RoomCache> = std::cell::RefCell::new(RoomCache::new());
     }
 
-    CACHE.with(|cache| {
-        cache.borrow_mut().get_room(zone, name)
-    })
+    CACHE.with(|cache| cache.borrow_mut().get_room(zone, name))
 }
 
 /// Handle a player entering a room
 ///
 /// Sends appropriate messages to the player and updates room state.
-pub fn handle_player_enter(
-    room: &mut Room,
-    player_name: &str,
-    mode: EnterMode,
-) -> Vec<String> {
+pub fn handle_player_enter(room: &mut Room, player_name: &str, mode: EnterMode) -> Vec<String> {
     let mut messages = Vec::new();
 
     // Add player to room
@@ -601,9 +624,7 @@ pub fn handle_player_enter(
 
     // List other players in the room
     if !room.players.is_empty() {
-        let others: Vec<&String> = room.players.iter()
-            .filter(|p| *p != &player_name)
-            .collect();
+        let others: Vec<&String> = room.players.iter().filter(|p| *p != &player_name).collect();
         if !others.is_empty() {
             let others_str: Vec<&str> = others.iter().map(|s| s.as_str()).collect();
             messages.push(format!("여기에는: {} 있습니다.", others_str.join(", ")));
@@ -614,9 +635,15 @@ pub fn handle_player_enter(
     let entry_msg = match mode {
         EnterMode::Start => format!("{} 무림지존을 꿈꾸며 강호에 출두합니다.", player_name),
         EnterMode::Walk => format!("{} 왔습니다.", player_name),
-        EnterMode::Flee => format!("{} 신형을 비틀거리며 간신히 도망옵니다. '헉헉~~'", player_name),
+        EnterMode::Flee => format!(
+            "{} 신형을 비틀거리며 간신히 도망옵니다. '헉헉~~'",
+            player_name
+        ),
         EnterMode::Teleport => format!("{} 하늘에서 사뿐히 내려 앉습니다. '척~~~'", player_name),
-        EnterMode::Summon => format!("{} 알수 없는 기운에 휘말려 나타납니다. '고오오오~~~'", player_name),
+        EnterMode::Summon => format!(
+            "{} 알수 없는 기운에 휘말려 나타납니다. '고오오오~~~'",
+            player_name
+        ),
     };
 
     // Broadcast to room (excluding the entering player)
@@ -638,9 +665,18 @@ pub fn handle_player_exit(
 ) -> String {
     let msg = match mode {
         ExitMode::Walk => format!("{} {}으로 갔습니다.", player_name, exit_msg),
-        ExitMode::Flee => format!("{} 신형을 비틀거리며 간신히 도망갑니다. '살리도~~'", player_name),
-        ExitMode::Teleport => format!("{} 경공술을 펼치며 하늘로 치솟아 오릅니다. '무영지신!!!'", player_name),
-        ExitMode::Summon => format!("{} 알수 없는 기운에 휘말려 사라집니다. '고오오오~~~'", player_name),
+        ExitMode::Flee => format!(
+            "{} 신형을 비틀거리며 간신히 도망갑니다. '살리도~~'",
+            player_name
+        ),
+        ExitMode::Teleport => format!(
+            "{} 경공술을 펼치며 하늘로 치솟아 오릅니다. '무영지신!!!'",
+            player_name
+        ),
+        ExitMode::Summon => format!(
+            "{} 알수 없는 기운에 휘말려 사라집니다. '고오오오~~~'",
+            player_name
+        ),
     };
     msg
 }
@@ -688,7 +724,11 @@ pub fn format_room_header(display_name: &str) -> String {
 /// 파이썬 objs/room.initExit longExitStr: 3줄 나침반 + 〔방향/고유명〕쪽으로 이동할 수 있습니다.
 /// 방향 출구만 나침반(◁△▽▷)에 반영; 고유명(초보수련장, 출구)은 ː 이어붙인 str1에만. 숨겨진($) 출구는 표시 제외.
 pub fn format_exits_long(room: &Room) -> String {
-    let has = |d: Direction| room.exits.values().any(|e| e.direction == Some(d) && e.has_destination() && !e.hidden);
+    let has = |d: Direction| {
+        room.exits
+            .values()
+            .any(|e| e.direction == Some(d) && e.has_destination() && !e.hidden)
+    };
 
     // 파이썬 sortExit 순서: 동,서,남,북,위,아래,남동,남서,북동,북서, 그 다음 고유명
     const ORDER: [Direction; 10] = [
@@ -710,7 +750,8 @@ pub fn format_exits_long(room: &Room) -> String {
         }
     }
     // 고유 명칭(방향이 None인 출구) 추가. 표시된 것만, ː 로 이어붙일 대상.
-    let mut named: Vec<String> = room.exits
+    let mut named: Vec<String> = room
+        .exits
         .values()
         .filter(|e| e.direction.is_none() && e.has_destination() && !e.hidden)
         .map(|e| format!("{}{}{}", _ANSI_GREEN, e.display_name.as_str(), _ANSI_RESET))
@@ -839,7 +880,12 @@ mod tests {
 
     #[test]
     fn test_exit_none() {
-        let exit = Exit { display_name: "북".into(), direction: Some(Direction::North), destination: None, hidden: false };
+        let exit = Exit {
+            display_name: "북".into(),
+            direction: Some(Direction::North),
+            destination: None,
+            hidden: false,
+        };
         assert_eq!(exit.direction(), Some(Direction::North));
         assert!(!exit.has_destination());
         assert!(exit.destination("test_zone").is_none());
@@ -847,18 +893,34 @@ mod tests {
 
     #[test]
     fn test_exit_local() {
-        let exit = Exit { display_name: "남".into(), direction: Some(Direction::South), destination: Some(("test_zone".into(), "5".into())), hidden: false };
+        let exit = Exit {
+            display_name: "남".into(),
+            direction: Some(Direction::South),
+            destination: Some(("test_zone".into(), "5".into())),
+            hidden: false,
+        };
         assert_eq!(exit.direction(), Some(Direction::South));
         assert!(exit.has_destination());
-        assert_eq!(exit.destination("test_zone"), Some(("test_zone".to_string(), "5".to_string())));
+        assert_eq!(
+            exit.destination("test_zone"),
+            Some(("test_zone".to_string(), "5".to_string()))
+        );
     }
 
     #[test]
     fn test_exit_remote() {
-        let exit = Exit { display_name: "동".into(), direction: Some(Direction::East), destination: Some(("other_zone".into(), "10".into())), hidden: false };
+        let exit = Exit {
+            display_name: "동".into(),
+            direction: Some(Direction::East),
+            destination: Some(("other_zone".into(), "10".into())),
+            hidden: false,
+        };
         assert_eq!(exit.direction(), Some(Direction::East));
         assert!(exit.has_destination());
-        assert_eq!(exit.destination("test_zone"), Some(("other_zone".to_string(), "10".to_string())));
+        assert_eq!(
+            exit.destination("test_zone"),
+            Some(("other_zone".to_string(), "10".to_string()))
+        );
     }
 
     #[test]
@@ -905,8 +967,14 @@ mod tests {
         assert_eq!(exits.len(), 3);
         let north = exits.get("북").unwrap();
         assert!(north.destination.is_none());
-        assert_eq!(exits.get("동").unwrap().destination, Some(("test_zone".into(), "2".into())));
-        assert_eq!(exits.get("남").unwrap().destination, Some(("test_zone".into(), "24".into())));
+        assert_eq!(
+            exits.get("동").unwrap().destination,
+            Some(("test_zone".into(), "2".into()))
+        );
+        assert_eq!(
+            exits.get("남").unwrap().destination,
+            Some(("test_zone".into(), "24".into()))
+        );
     }
 
     #[test]
@@ -914,7 +982,15 @@ mod tests {
         let mut room = Room::new("test_zone".to_string(), "test_room".to_string());
         room.display_name = "Test Room".to_string();
         room.description = vec!["A nice room.".to_string()];
-        room.exits.insert("북".into(), Exit { display_name: "북".into(), direction: Some(Direction::North), destination: Some(("test_zone".into(), "1".into())), hidden: false });
+        room.exits.insert(
+            "북".into(),
+            Exit {
+                display_name: "북".into(),
+                direction: Some(Direction::North),
+                destination: Some(("test_zone".into(), "1".into())),
+                hidden: false,
+            },
+        );
 
         let messages = handle_player_enter(&mut room, "TestPlayer", EnterMode::Walk);
 

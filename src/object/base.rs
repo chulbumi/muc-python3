@@ -8,10 +8,10 @@
 //! - Object search (findObjName, findObjInven, findObjInUse)
 //! - Korean particle helper methods (han_iga, han_obj, han_un)
 
+use crate::hangul;
+use crate::object::Value;
 use std::collections::HashMap;
 use std::sync::{Arc, Mutex, Weak};
-use crate::object::Value;
-use crate::hangul;
 
 /// Base Object structure for MUD game objects
 ///
@@ -97,7 +97,8 @@ impl Object {
     /// assert_eq!(obj.get("nonexistent"), Value::String("".to_string()));
     /// ```
     pub fn get(&self, key: &str) -> Value {
-        self.attr.get(key)
+        self.attr
+            .get(key)
             .cloned()
             .unwrap_or(Value::String(String::new()))
     }
@@ -214,7 +215,8 @@ impl Object {
     /// assert_eq!(obj.getTemp("temp"), "value");
     /// ```
     pub fn getTemp(&self, key: &str) -> Value {
-        self.temp.get(key)
+        self.temp
+            .get(key)
             .cloned()
             .unwrap_or(Value::String(String::new()))
     }
@@ -239,7 +241,9 @@ impl Object {
     pub fn insert(&mut self, obj: Arc<Mutex<Object>>) {
         // Check if obj is already in objs (by address comparison)
         let obj_ptr = Arc::as_ptr(&obj) as *const ();
-        let already_contains = self.objs.iter()
+        let already_contains = self
+            .objs
+            .iter()
             .any(|o| Arc::as_ptr(o) as *const () == obj_ptr);
 
         if !already_contains {
@@ -274,7 +278,9 @@ impl Object {
     pub fn append(&mut self, obj: Arc<Mutex<Object>>) {
         // Check if obj is already in objs (by address comparison)
         let obj_ptr = Arc::as_ptr(&obj) as *const ();
-        let already_contains = self.objs.iter()
+        let already_contains = self
+            .objs
+            .iter()
             .any(|o| Arc::as_ptr(o) as *const () == obj_ptr);
 
         if !already_contains {
@@ -433,10 +439,7 @@ impl Object {
 
     /// setOption: HashMap → "옵션" 속성. Python item.setOption(option).
     pub fn set_option(&mut self, option: &std::collections::HashMap<String, i64>) {
-        let s: Vec<String> = option
-            .iter()
-            .map(|(k, v)| format!("{} {}", k, v))
-            .collect();
+        let s: Vec<String> = option.iter().map(|(k, v)| format!("{} {}", k, v)).collect();
         self.set("옵션", s.join("\n"));
     }
 
@@ -480,8 +483,8 @@ impl Object {
                 let reaction_names = o.getString("반응이름");
 
                 // Check if name matches or is in reaction names
-                let name_matches = obj_name == name ||
-                    (!reaction_names.is_empty() && reaction_names.contains(name));
+                let name_matches = obj_name == name
+                    || (!reaction_names.is_empty() && reaction_names.contains(name));
 
                 // Skip if has "출력안함" attribute
                 if o.checkAttr("아이템속성", "출력안함") {
@@ -526,8 +529,8 @@ impl Object {
                 let obj_name = o.getName();
                 let reaction_names = o.getString("반응이름");
 
-                let name_matches = obj_name == name ||
-                    (!reaction_names.is_empty() && reaction_names.contains(name));
+                let name_matches = obj_name == name
+                    || (!reaction_names.is_empty() && reaction_names.contains(name));
 
                 // Skip if inUse is true
                 let in_use = o.getBool("inUse");
@@ -558,8 +561,8 @@ impl Object {
                 let obj_name = o.getName();
                 let reaction_names = o.getString("반응이름");
 
-                let name_matches = obj_name == name ||
-                    (!reaction_names.is_empty() && reaction_names.contains(name));
+                let name_matches = obj_name == name
+                    || (!reaction_names.is_empty() && reaction_names.contains(name));
 
                 let in_use = o.getBool("inUse");
 
@@ -647,7 +650,7 @@ impl Object {
         Object {
             attr: self.attr.clone(),
             temp: self.temp.clone(),
-            env: None, // Don't clone env reference
+            env: None,               // Don't clone env reference
             objs: self.objs.clone(), // Shallow copy of Arc references
             inv_stack: self.inv_stack.clone(),
         }
@@ -662,7 +665,9 @@ impl Object {
         let temp = self.temp.clone();
 
         // Deep clone child objects
-        let objs: Vec<Arc<Mutex<Object>>> = self.objs.iter()
+        let objs: Vec<Arc<Mutex<Object>>> = self
+            .objs
+            .iter()
             .map(|o| {
                 if let Ok(inner) = o.lock() {
                     Arc::new(Mutex::new(inner.deepclone()))

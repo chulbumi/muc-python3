@@ -31,8 +31,12 @@ impl Guild {
     }
 
     pub fn load(&mut self) {
-        let Ok(s) = std::fs::read_to_string(&self.path) else { return; };
-        let Ok(root) = serde_json::from_str::<Map<String, Value>>(&s) else { return; };
+        let Ok(s) = std::fs::read_to_string(&self.path) else {
+            return;
+        };
+        let Ok(root) = serde_json::from_str::<Map<String, Value>>(&s) else {
+            return;
+        };
         self.attr.clear();
         for (k, v) in root {
             if let Some(m) = v.as_object() {

@@ -58,10 +58,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         "string_val".to_string(),
         Box::new(ScriptValueInner::String("hello".to_string())),
     );
-    test_segment.insert(
-        "int_val".to_string(),
-        Box::new(ScriptValueInner::Int(123)),
-    );
+    test_segment.insert("int_val".to_string(), Box::new(ScriptValueInner::Int(123)));
 
     let mut full_data = HashMap::new();
     full_data.insert(

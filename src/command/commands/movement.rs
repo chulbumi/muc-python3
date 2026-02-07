@@ -3,11 +3,11 @@
 //! Handles directional movement: 북, 남, 동, 서, 위, 아래
 //! 방 표시 형식은 Python(objs/player.viewMapData, objs/room.longExitStr)을 따릅니다.
 
-use crate::command::{CommandResult, CommandFn};
 use crate::command::registry::CommandRegistry;
+use crate::command::{CommandFn, CommandResult};
 use crate::player::{ActState, Body};
 use crate::script::build_room_objs_grouped;
-use crate::world::{Direction as WorldDir, format_exits_long, format_room_header, get_world_state};
+use crate::world::{format_exits_long, format_room_header, get_world_state, Direction as WorldDir};
 use std::sync::Arc;
 
 /// Helper to convert movement Direction to world Direction
@@ -35,10 +35,10 @@ pub enum MovementDirection {
     West,
     Up,
     Down,
-    NorthWest,  // 북서 ↖
-    NorthEast,  // 북동 ↗
-    SouthWest,  // 남서 ↙
-    SouthEast,  // 남동 ↘
+    NorthWest, // 북서 ↖
+    NorthEast, // 북동 ↗
+    SouthWest, // 남서 ↙
+    SouthEast, // 남동 ↘
 }
 
 impl MovementDirection {
@@ -225,7 +225,10 @@ fn return_command(player: &mut Body, _args: &[&str]) -> CommandResult {
         return CommandResult::Error("☞ 같은 자리에요. ^^".to_string());
     }
 
-    world.set_player_position(&player_name, PlayerPosition::new(dest_zone.clone(), dest_room.clone()));
+    world.set_player_position(
+        &player_name,
+        PlayerPosition::new(dest_zone.clone(), dest_room.clone()),
+    );
     world.spawn_mobs_for_room(&dest_zone, &dest_room);
     drop(world);
     display_room(player, &dest_zone, &dest_room)
@@ -397,11 +400,23 @@ mod tests {
 
     #[test]
     fn test_direction_opposite() {
-        assert_eq!(MovementDirection::North.opposite(), MovementDirection::South);
-        assert_eq!(MovementDirection::South.opposite(), MovementDirection::North);
+        assert_eq!(
+            MovementDirection::North.opposite(),
+            MovementDirection::South
+        );
+        assert_eq!(
+            MovementDirection::South.opposite(),
+            MovementDirection::North
+        );
         assert_eq!(MovementDirection::East.opposite(), MovementDirection::West);
         assert_eq!(MovementDirection::Up.opposite(), MovementDirection::Down);
-        assert_eq!(MovementDirection::NorthWest.opposite(), MovementDirection::SouthEast);
-        assert_eq!(MovementDirection::NorthEast.opposite(), MovementDirection::SouthWest);
+        assert_eq!(
+            MovementDirection::NorthWest.opposite(),
+            MovementDirection::SouthEast
+        );
+        assert_eq!(
+            MovementDirection::NorthEast.opposite(),
+            MovementDirection::SouthWest
+        );
     }
 }

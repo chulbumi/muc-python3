@@ -3,12 +3,12 @@
 //! 게임 데이터를 글로벌하게 캐싱하고 접근하는 시스템입니다.
 //! data/config/*.json 파일들을 로드하고, Rhai 스크립트에서 접근 가능합니다.
 
+use once_cell::sync::Lazy;
+use serde_json::Value as JsonValue;
 use std::collections::HashMap;
 use std::path::PathBuf;
 use std::sync::{Arc, RwLock};
-use once_cell::sync::Lazy;
-use serde_json::Value as JsonValue;
-use tracing::{info, warn, error};
+use tracing::{error, info, warn};
 
 /// data/config/skill.json에서 스킬별 방어상태머리말 캐시. get_desc_for_look 등에서 사용.
 static SKILL_DEFENSE_HEAD_CACHE: Lazy<RwLock<HashMap<String, String>>> = Lazy::new(|| {
@@ -80,7 +80,8 @@ impl GlobalData {
             }
 
             // 파일명에서 확장자 제거
-            let file_name = path.file_stem()
+            let file_name = path
+                .file_stem()
                 .and_then(|s| s.to_str())
                 .unwrap_or("unknown")
                 .to_string();
@@ -178,7 +179,8 @@ impl GlobalData {
 
     /// 특정 파일에 키가 있는지 확인합니다.
     pub fn contains_key(&self, file: &str, key: &str) -> bool {
-        self.data.get(file)
+        self.data
+            .get(file)
             .and_then(|v| v.as_object())
             .map(|obj| obj.contains_key(key))
             .unwrap_or(false)
@@ -191,7 +193,8 @@ impl GlobalData {
 
     /// 특정 파일의 모든 키를 가져옵니다.
     pub fn keys(&self, file: &str) -> Vec<String> {
-        self.data.get(file)
+        self.data
+            .get(file)
             .and_then(|v| v.as_object())
             .map(|obj| obj.keys().cloned().collect())
             .unwrap_or_default()
@@ -228,13 +231,12 @@ pub fn json_to_dynamic(value: &JsonValue) -> rhai::Dynamic {
         }
         JsonValue::String(s) => rhai::Dynamic::from(s.clone()),
         JsonValue::Array(arr) => {
-            let rhai_arr: rhai::Array = arr.iter()
-                .map(json_to_dynamic)
-                .collect();
+            let rhai_arr: rhai::Array = arr.iter().map(json_to_dynamic).collect();
             rhai::Dynamic::from(rhai_arr)
         }
         JsonValue::Object(obj) => {
-            let rhai_map: rhai::Map = obj.iter()
+            let rhai_map: rhai::Map = obj
+                .iter()
                 .map(|(k, v)| (k.clone().into(), json_to_dynamic(v)))
                 .collect();
             rhai::Dynamic::from(rhai_map)
@@ -288,7 +290,10 @@ mod tests {
 
     #[test]
     fn test_json_to_dynamic_array() {
-        let val = JsonValue::Array(vec![JsonValue::Number(1.into()), JsonValue::Number(2.into())]);
+        let val = JsonValue::Array(vec![
+            JsonValue::Number(1.into()),
+            JsonValue::Number(2.into()),
+        ]);
         let dynamic = json_to_dynamic(&val);
         assert!(dynamic.is_array());
     }

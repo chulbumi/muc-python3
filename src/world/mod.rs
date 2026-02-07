@@ -3,36 +3,30 @@
 //! This module contains structures and functionality for managing
 //! the game world including rooms, zones, mobs, items, and navigation.
 
-pub mod room;
-pub mod mob;
-pub mod item;
-pub mod guild;
-pub mod rank;
 pub mod event;
+pub mod guild;
+pub mod item;
+pub mod mob;
+pub mod rank;
+pub mod room;
 pub mod skill;
 
 // Re-export commonly used types
 pub use room::{
-    Room, RoomCache, RoomError, Direction, Exit,
-    get_room, handle_player_enter, handle_player_exit,
-    format_room_header, format_exits_long,
-    EnterMode, ExitMode,
+    format_exits_long, format_room_header, get_room, handle_player_enter, handle_player_exit,
+    Direction, EnterMode, Exit, ExitMode, Room, RoomCache, RoomError,
 };
 
-pub use mob::{
-    MobCache, MobInstance, RawMobData, MobError, EventScript,
-    get_mob_cache,
-};
+pub use mob::{get_mob_cache, EventScript, MobCache, MobError, MobInstance, RawMobData};
 
 pub use skill::{
-    Skill, SkillCache, SkillType, PatternAction, PatternElement,
-    get_skill_cache, get_skill, get_skill_defense_head,
-    calculate_normal_attacks,
+    calculate_normal_attacks, get_skill, get_skill_cache, get_skill_defense_head, PatternAction,
+    PatternElement, Skill, SkillCache, SkillType,
 };
 
 pub use item::{
-    ItemCache, ItemInstance, RawItemData, ItemError,
-    get_item_cache, create_item, find_or_create_item,
+    create_item, find_or_create_item, get_item_cache, ItemCache, ItemError, ItemInstance,
+    RawItemData,
 };
 
 use std::collections::HashMap;
@@ -169,23 +163,30 @@ impl WorldState {
         player_name: &str,
         direction: Direction,
     ) -> Result<(String, String), String> {
-        let current_pos = self.player_positions.get(player_name)
+        let current_pos = self
+            .player_positions
+            .get(player_name)
             .ok_or("Player not in world")?;
 
         // Get current room
-        let room = self.room_cache.get_room(&current_pos.zone, &current_pos.room)
+        let room = self
+            .room_cache
+            .get_room(&current_pos.zone, &current_pos.room)
             .map_err(|e| format!("Failed to get room: {}", e))?;
 
         let room_read = room.read().unwrap();
-        let exit = room_read.get_exit(direction)
+        let exit = room_read
+            .get_exit(direction)
             .ok_or(format!("{}쪽으로 갈 수 없습니다.", direction.korean_name()))?;
 
-        let dest = exit.destination(&current_pos.zone)
+        let dest = exit
+            .destination(&current_pos.zone)
             .ok_or("Invalid exit destination")?;
 
         // Update player position. Exit.destination is (zone, room_id: String).
         let new_pos = PlayerPosition::new(dest.0.clone(), dest.1.clone());
-        self.player_positions.insert(player_name.to_string(), new_pos.clone());
+        self.player_positions
+            .insert(player_name.to_string(), new_pos.clone());
 
         Ok((dest.0, dest.1))
     }
@@ -197,7 +198,13 @@ impl WorldState {
 
     /// Damage a mob in a specific room
     /// Returns (new_hp, died) if mob was found and damaged
-    pub fn damage_mob(&mut self, zone: &str, room: &str, mob_key: &str, damage: i64) -> Option<(i64, bool)> {
+    pub fn damage_mob(
+        &mut self,
+        zone: &str,
+        room: &str,
+        mob_key: &str,
+        damage: i64,
+    ) -> Option<(i64, bool)> {
         self.mob_cache.damage_mob(zone, room, mob_key, damage)
     }
 
@@ -208,22 +215,28 @@ impl WorldState {
         player_name: &str,
         exit_name: &str,
     ) -> Result<(String, String, String), String> {
-        let current_pos = self.player_positions.get(player_name)
+        let current_pos = self
+            .player_positions
+            .get(player_name)
             .ok_or("Player not in world")?;
 
-        let room = self.room_cache.get_room(&current_pos.zone, &current_pos.room)
+        let room = self
+            .room_cache
+            .get_room(&current_pos.zone, &current_pos.room)
             .map_err(|e| format!("Failed to get room: {}", e))?;
 
         let (dest, msg_name) = {
             let room_read = room.read().unwrap();
-            let exit = room_read.get_exit_by_name(exit_name)
+            let exit = room_read
+                .get_exit_by_name(exit_name)
                 .ok_or_else(|| format!("{} (으)로 갈 수 없습니다.", exit_name))?;
             let d = exit.destination("").ok_or("Invalid exit destination")?;
             (d, exit.exit_message_name().to_string())
         };
 
         let new_pos = PlayerPosition::new(dest.0.clone(), dest.1.clone());
-        self.player_positions.insert(player_name.to_string(), new_pos);
+        self.player_positions
+            .insert(player_name.to_string(), new_pos);
         self.spawn_mobs_for_room(&dest.0, &dest.1);
         Ok((dest.0, dest.1, msg_name))
     }
@@ -252,9 +265,7 @@ impl WorldState {
             .room_cache
             .get_room(zone, room)
             .ok()
-            .and_then(|r| {
-                r.read().ok().map(|g| g.mob_ids.clone())
-            })
+            .and_then(|r| r.read().ok().map(|g| g.mob_ids.clone()))
             .unwrap_or_default();
         self.mob_cache.spawn_mobs_for_room(zone, room, &mob_ids);
     }
@@ -277,12 +288,17 @@ impl WorldState {
     /// Get mob instance in a specific room
     pub fn get_mob(&self, zone: &str, room: &str, mob_key: &str) -> Option<&MobInstance> {
         let mobs = self.mob_cache.get_mobs_in_room(zone, room);
-        mobs.iter().find(|m| m.mob_key == mob_key && m.alive).copied()
+        mobs.iter()
+            .find(|m| m.mob_key == mob_key && m.alive)
+            .copied()
     }
 
     /// Search for mobs by name pattern across all rooms
     /// Returns Vec of (zone, room, mob_name, mob_display_name, hp, max_hp)
-    pub fn search_mobs_by_name(&self, name_pattern: &str) -> Vec<(String, String, String, String, i64, i64)> {
+    pub fn search_mobs_by_name(
+        &self,
+        name_pattern: &str,
+    ) -> Vec<(String, String, String, String, i64, i64)> {
         let mut results = Vec::new();
         let pattern_lower = name_pattern.to_lowercase();
 
@@ -300,7 +316,9 @@ impl WorldState {
                     let display_name_lower = display_name.to_lowercase();
 
                     // Match by display name or reaction names
-                    if display_name_lower.contains(&pattern_lower) || mob_data.name.to_lowercase().contains(&pattern_lower) {
+                    if display_name_lower.contains(&pattern_lower)
+                        || mob_data.name.to_lowercase().contains(&pattern_lower)
+                    {
                         results.push((
                             mob.zone.clone(),
                             mob.room.clone(),

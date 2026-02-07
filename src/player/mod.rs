@@ -6,8 +6,10 @@
 pub mod body;
 pub mod player;
 
-pub use body::{ActState, Body, MemoRecord, SendLine, SkillLevel, SkillTraining, ActiveSkill};
-pub use player::{Player, Party, Channel, STATE_INACTIVE, STATE_DOUMI, STATE_NOTICE, STATE_ACTIVE, CFG_OPTIONS};
+pub use body::{ActState, ActiveSkill, Body, MemoRecord, SendLine, SkillLevel, SkillTraining};
+pub use player::{
+    Channel, Party, Player, CFG_OPTIONS, STATE_ACTIVE, STATE_DOUMI, STATE_INACTIVE, STATE_NOTICE,
+};
 
 /// Configuration constants for game mechanics
 pub struct GameConfig;
@@ -23,8 +25,24 @@ impl GameConfig {
 
 /// Item equipment slot levels
 pub static ITEM_EQUIP_LEVELS: &[&str] = &[
-    "투구", "왕관", "머리", "귀걸이", "목걸이", "어깨", "상의", "하의", "장신구",
-    "갑옷", "허리", "팔찌", "장갑", "반지", "슬호", "신발", "무기", "기타",
+    "투구",
+    "왕관",
+    "머리",
+    "귀걸이",
+    "목걸이",
+    "어깨",
+    "상의",
+    "하의",
+    "장신구",
+    "갑옷",
+    "허리",
+    "팔찌",
+    "장갑",
+    "반지",
+    "슬호",
+    "신발",
+    "무기",
+    "기타",
 ];
 
 /// Item level display mapping
@@ -63,7 +81,7 @@ pub fn get_hp_bar_string(current: i64, max: i64) -> &'static str {
 }
 
 static HP_BARS: &[&str] = &[
-    "\x1b[37m━━━━━━━━━━\x1b[37m",  // 0%
+    "\x1b[37m━━━━━━━━━━\x1b[37m",         // 0%
     "\x1b[31m━\x1b[37m━━━━━━━━━\x1b[37m", // 1-10%
     "\x1b[31m━━\x1b[37m━━━━━━━━\x1b[37m", // 11-20%
     "\x1b[31m━━━\x1b[37m━━━━━━━\x1b[37m", // 21-30%
@@ -73,11 +91,14 @@ static HP_BARS: &[&str] = &[
     "\x1b[32m━━━━━━━\x1b[37m━━━\x1b[37m", // 61-70%
     "\x1b[32m━━━━━━━━\x1b[37m━━\x1b[37m", // 71-80%
     "\x1b[32m━━━━━━━━━\x1b[37m━\x1b[37m", // 81-90%
-    "\x1b[32m━━━━━━━━━━\x1b[37m", // 91-100%
+    "\x1b[32m━━━━━━━━━━\x1b[37m",         // 91-100%
 ];
 
 /// Skill level names
-pub static SKILL_LEVEL_NAMES: &[&str] = &[
+pub static SKILL_LEVEL_NAMES: &[&str] = &["초급", "중급", "상급", "고급", "특급", "절정", "초절정"];
+
+/// Skill level type names
+pub static SKILL_LEVEL_TYPES: &[&str] = &[
     "초급",
     "중급",
     "상급",
@@ -85,17 +106,17 @@ pub static SKILL_LEVEL_NAMES: &[&str] = &[
     "특급",
     "절정",
     "초절정",
-];
-
-/// Skill level type names
-pub static SKILL_LEVEL_TYPES: &[&str] = &[
-    "초급", "중급", "상급", "고급", "특급", "절정", "초절정",
-    "회복", "방어", "기타",
+    "회복",
+    "방어",
+    "기타",
 ];
 
 /// Get skill level from name
 pub fn get_skill_level(name: &str) -> Option<u8> {
-    SKILL_LEVEL_NAMES.iter().position(|&s| s == name).map(|i| i as u8 + 1)
+    SKILL_LEVEL_NAMES
+        .iter()
+        .position(|&s| s == name)
+        .map(|i| i as u8 + 1)
 }
 
 #[cfg(test)]

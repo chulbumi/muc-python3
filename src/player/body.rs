@@ -3,11 +3,11 @@
 //! This module provides the Body structure for managing game entities with
 //! stats, combat, skills, and experience system.
 
-use std::collections::HashMap;
-use std::sync::{Arc, Mutex, Weak};
 use crate::data::get_skill_defense_head;
 use crate::object::{Object, Value};
 use crate::world::item::get_item_weight_by_key;
+use std::collections::HashMap;
+use std::sync::{Arc, Mutex, Weak};
 
 /// Action states for game entities (Python: ACT_STAND=0, ACT_FIGHT=1, ACT_DEATH=2, ACT_REGEN=3, ACT_REST=4)
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
@@ -49,12 +49,12 @@ impl ActState {
 /// Skill level names and their numeric values
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
 pub enum SkillLevel {
-    Primary = 1,    // 초급
+    Primary = 1,      // 초급
     Intermediate = 2, // 중급
-    Advanced = 3,   // 상급
-    High = 4,       // 고급
-    Special = 5,    // 특급
-    Peak = 6,       // 절정
+    Advanced = 3,     // 상급
+    High = 4,         // 고급
+    Special = 5,      // 특급
+    Peak = 6,         // 절정
     Transcendent = 7, // 초절정
 }
 
@@ -423,7 +423,10 @@ impl Body {
         self.act = ActState::Fight;
         let weak_target = Arc::downgrade(&target);
         if !self.targets.iter().any(|t| {
-            t.upgrade().as_ref().map(|t| Arc::as_ptr(t) == Arc::as_ptr(&target)).unwrap_or(false)
+            t.upgrade()
+                .as_ref()
+                .map(|t| Arc::as_ptr(t) == Arc::as_ptr(&target))
+                .unwrap_or(false)
         }) {
             self.targets.push(weak_target);
         }
@@ -551,7 +554,8 @@ impl Body {
 
         // Initialize skill if not exists
         if !self.skill_map.contains_key(name) {
-            self.skill_map.insert(name.to_string(), SkillTraining::new(1, 0));
+            self.skill_map
+                .insert(name.to_string(), SkillTraining::new(1, 0));
         }
 
         if let Some(training) = self.skill_map.get_mut(name) {
@@ -575,7 +579,8 @@ impl Body {
 
     /// Sets skill training data
     pub fn set_skill_training(&mut self, skill_name: &str, level: u8, exp: u32) {
-        self.skill_map.insert(skill_name.to_string(), SkillTraining::new(level, exp));
+        self.skill_map
+            .insert(skill_name.to_string(), SkillTraining::new(level, exp));
     }
 
     /// Checks if a skill is on cooldown
@@ -752,7 +757,12 @@ impl Body {
                 }
             }
         }
-        count += self.object.inv_stack.values().map(|&c| c as usize).sum::<usize>();
+        count += self
+            .object
+            .inv_stack
+            .values()
+            .map(|&c| c as usize)
+            .sum::<usize>();
         count
     }
 
@@ -766,7 +776,12 @@ impl Body {
                 }
             }
         }
-        count += self.object.inv_stack.values().map(|&c| c as usize).sum::<usize>();
+        count += self
+            .object
+            .inv_stack
+            .values()
+            .map(|&c| c as usize)
+            .sum::<usize>();
         count
     }
 
@@ -1059,7 +1074,8 @@ impl Body {
         if skills.is_empty() {
             Vec::new()
         } else {
-            skills.split(',')
+            skills
+                .split(',')
                 .map(|s| s.trim().to_string())
                 .filter(|s| !s.is_empty())
                 .collect()
@@ -1235,7 +1251,8 @@ impl Body {
                 self.step_death = 4;
             }
             4 => {
-                messages.push("\r\n코끝을 찌르는 향냄새에 정신을 차려보니 장의사 내부다.".to_string());
+                messages
+                    .push("\r\n코끝을 찌르는 향냄새에 정신을 차려보니 장의사 내부다.".to_string());
                 messages.push("당신은 죽었다가 다시 살아났습니다.".to_string());
 
                 // Reset to alive state
@@ -1361,12 +1378,18 @@ mod tests {
     #[test]
     fn test_skill_level_from_name() {
         assert_eq!(SkillLevel::from_name("초급"), Some(SkillLevel::Primary));
-        assert_eq!(SkillLevel::from_name("중급"), Some(SkillLevel::Intermediate));
+        assert_eq!(
+            SkillLevel::from_name("중급"),
+            Some(SkillLevel::Intermediate)
+        );
         assert_eq!(SkillLevel::from_name("상급"), Some(SkillLevel::Advanced));
         assert_eq!(SkillLevel::from_name("고급"), Some(SkillLevel::High));
         assert_eq!(SkillLevel::from_name("특급"), Some(SkillLevel::Special));
         assert_eq!(SkillLevel::from_name("절정"), Some(SkillLevel::Peak));
-        assert_eq!(SkillLevel::from_name("초절정"), Some(SkillLevel::Transcendent));
+        assert_eq!(
+            SkillLevel::from_name("초절정"),
+            Some(SkillLevel::Transcendent)
+        );
         assert_eq!(SkillLevel::from_name("없음"), None);
     }
 
@@ -1604,7 +1627,8 @@ mod tests {
     fn test_clear_skills() {
         let mut body = Body::new();
         body.skill = Some("기공격".to_string());
-        body.active_skills.push(ActiveSkill::new("방어무공".to_string(), 10));
+        body.active_skills
+            .push(ActiveSkill::new("방어무공".to_string(), 10));
 
         body.clear_skills();
         assert!(body.skill.is_none());

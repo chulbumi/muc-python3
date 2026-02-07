@@ -27,16 +27,16 @@ impl Rank {
     }
 
     pub fn load(&mut self) {
-        let Ok(s) = std::fs::read_to_string(&self.path) else { return; };
+        let Ok(s) = std::fs::read_to_string(&self.path) else {
+            return;
+        };
         let Ok(root) = serde_json::from_str::<HashMap<String, Vec<RankEntry>>>(&s) else {
             return;
         };
         self.attr.clear();
         for (k, arr) in root {
-            self.attr.insert(
-                k,
-                arr.into_iter().map(|e| (e.0, e.1)).collect(),
-            );
+            self.attr
+                .insert(k, arr.into_iter().map(|e| (e.0, e.1)).collect());
         }
     }
 
@@ -136,7 +136,10 @@ fn get_rank() -> &'static std::sync::RwLock<Rank> {
 }
 
 pub fn rank_write(ty: &str, name: &str, value: i64, level: i64) -> i64 {
-    get_rank().write().unwrap().write_rank(ty, name, value, level)
+    get_rank()
+        .write()
+        .unwrap()
+        .write_rank(ty, name, value, level)
 }
 
 pub fn rank_read(ty: &str, name: &str) -> i64 {

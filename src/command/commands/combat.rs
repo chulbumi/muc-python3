@@ -3,14 +3,14 @@
 //! Handles combat-related commands: 쳐 (attack), 도망 (flee), 시전 (cast)
 //! Supports PvP (Player vs Player) and PvM (Player vs Mob) combat.
 
-use crate::command::CommandResult;
 use crate::command::registry::CommandRegistry;
-use crate::player::{ActState, Body};
-use crate::object::Value;
-use crate::world::WorldState;
+use crate::command::CommandResult;
 use crate::hangul;
-use std::sync::Arc;
+use crate::object::Value;
+use crate::player::{ActState, Body};
+use crate::world::WorldState;
 use rand::Rng;
+use std::sync::Arc;
 
 /// PvP combat result
 #[derive(Debug, Clone, PartialEq)]
@@ -43,10 +43,10 @@ pub struct PvPConfig {
 impl Default for PvPConfig {
     fn default() -> Self {
         Self {
-            max_level_diff: 20,      // Allow PvP within 20 levels
-            safe_zone_pvp: false,    // No PvP in safe zones
-            death_penalty_pct: 5,    // 5% exp loss on death
-            kill_exp_reward: 100,    // 100 exp for PvP kill
+            max_level_diff: 20,   // Allow PvP within 20 levels
+            safe_zone_pvp: false, // No PvP in safe zones
+            death_penalty_pct: 5, // 5% exp loss on death
+            kill_exp_reward: 100, // 100 exp for PvP kill
         }
     }
 }
@@ -173,7 +173,10 @@ fn attack_command(player: &mut Body, args: &[&str]) -> CommandResult {
     // The full implementation would check world state for mobs
     // For now, initiate combat state
     player.act = ActState::Fight;
-    player.temp_mut().insert("_attack_target".to_string(), Value::String(target_name.to_string()));
+    player.temp_mut().insert(
+        "_attack_target".to_string(),
+        Value::String(target_name.to_string()),
+    );
 
     CommandResult::Combat
 }
@@ -197,7 +200,8 @@ pub fn initiate_pvp(
     let players_in_room = world.get_players_in_room(&attacker_pos.zone, &attacker_pos.room);
 
     // Find the target
-    let target_found = players_in_room.iter()
+    let target_found = players_in_room
+        .iter()
         .find(|name| *name == target_name || name.contains(target_name));
 
     let target_name = match target_found {
@@ -211,9 +215,15 @@ pub fn initiate_pvp(
     }
 
     // Get room attributes for PvP check
-    let _room_attrs = world.room_attrs
+    let _room_attrs = world
+        .room_attrs
         .get(&format!("{}:{}", attacker_pos.zone, attacker_pos.room))
-        .map(|attrs| attrs.iter().map(|(k, v)| (k.clone(), v.clone())).collect::<Vec<_>>())
+        .map(|attrs| {
+            attrs
+                .iter()
+                .map(|(k, v)| (k.clone(), v.clone()))
+                .collect::<Vec<_>>()
+        })
         .unwrap_or_default();
 
     // For full implementation, would get target Body and check PvP rules
@@ -221,9 +231,16 @@ pub fn initiate_pvp(
 
     attacker.act = ActState::Fight;
     // Store target name in temp attributes for tracking
-    attacker.temp_mut().insert("_pvp_target".to_string(), crate::object::Value::String(target_name.clone()));
+    attacker.temp_mut().insert(
+        "_pvp_target".to_string(),
+        crate::object::Value::String(target_name.clone()),
+    );
 
-    let msg = format!("{} {} 공격을 시작합니다!", target_name, hangul::han_obj(&target_name));
+    let msg = format!(
+        "{} {} 공격을 시작합니다!",
+        target_name,
+        hangul::han_obj(&target_name)
+    );
     (true, msg)
 }
 
@@ -242,7 +259,9 @@ fn flee_command(player: &mut Body, _args: &[&str]) -> CommandResult {
     }
 
     // Set cooldown
-    player.temp_mut().insert("_runaway".to_string(), Value::Int(1));
+    player
+        .temp_mut()
+        .insert("_runaway".to_string(), Value::Int(1));
 
     // Calculate flee chance
     let player_level = player.get_int("레벨");
@@ -305,11 +324,12 @@ fn combat_status_command(player: &mut Body, _args: &[&str]) -> CommandResult {
     let max_mp = player.get_max_mp();
 
     // Get target from temp attributes
-    let target_list = if let Some(crate::object::Value::String(target)) = player.temp().get("_pvp_target") {
-        target.clone()
-    } else {
-        "없음".to_string()
-    };
+    let target_list =
+        if let Some(crate::object::Value::String(target)) = player.temp().get("_pvp_target") {
+            target.clone()
+        } else {
+            "없음".to_string()
+        };
 
     let output = format!(
         "★ {}의 전투 상태 ★\r\n체력: {}/{}\r\n내공: {}/{}\r\n대상: {}",
@@ -360,8 +380,13 @@ pub fn register_combat_commands(registry: &mut CommandRegistry) {
     // 쳐 (Attack)
     registry.register(crate::command::registry::CommandInfo {
         name: "쳐".to_string(),
-        aliases: vec!["공격".to_string(), "때려".to_string(), "attack".to_string(),
-                       "kill".to_string(), "k".to_string()],
+        aliases: vec![
+            "공격".to_string(),
+            "때려".to_string(),
+            "attack".to_string(),
+            "kill".to_string(),
+            "k".to_string(),
+        ],
         handler: Arc::new(attack_command),
         level: 0,
         description: "대상을 공격합니다. PvP 지원.".to_string(),
@@ -391,7 +416,11 @@ pub fn register_combat_commands(registry: &mut CommandRegistry) {
     // 전투상태 (Combat status)
     registry.register(crate::command::registry::CommandInfo {
         name: "전투상태".to_string(),
-        aliases: vec!["전상".to_string(), "combat".to_string(), "status".to_string()],
+        aliases: vec![
+            "전상".to_string(),
+            "combat".to_string(),
+            "status".to_string(),
+        ],
         handler: Arc::new(combat_status_command),
         level: 0,
         description: "현재 전투 상태를 보여줍니다.".to_string(),
@@ -572,7 +601,10 @@ mod tests {
 
         let mut player = create_test_player();
         player.act = ActState::Fight;
-        player.temp_mut().insert("_pvp_target".to_string(), crate::object::Value::String("적".to_string()));
+        player.temp_mut().insert(
+            "_pvp_target".to_string(),
+            crate::object::Value::String("적".to_string()),
+        );
 
         let cmd = registry.get("전투상태").unwrap();
         let result = (cmd.handler)(&mut player, &[]);
@@ -636,9 +668,7 @@ mod tests {
         target.set("레벨", 20i64);
         target.act = ActState::Stand;
 
-        let room_attrs = vec![
-            ("전투금지".to_string(), "".to_string()),
-        ];
+        let room_attrs = vec![("전투금지".to_string(), "".to_string())];
         let result = check_pvp_allowed(&attacker, &target, &room_attrs, &config);
         assert_eq!(result, PvPResult::SafeZone);
     }

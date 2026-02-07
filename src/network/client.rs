@@ -3,28 +3,32 @@
 //! Manages individual TCP client connections with line-based protocol
 //! and login flow.
 
+use bytes::BytesMut;
+use rhai::{Array, Dynamic, Map};
 use std::cell::RefCell;
 use std::net::SocketAddr;
-use std::sync::Arc;
 use std::path::PathBuf;
+use std::sync::Arc;
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
 use tokio::net::TcpStream;
 use tokio::sync::mpsc;
-use bytes::BytesMut;
 use tracing::{debug, error, info, warn};
-use rhai::{Array, Dynamic, Map};
 
+use crate::command::commands::try_move_by_exit_name;
+use crate::command::{CommandParser, CommandRegistry, CommandResult, PendingInput};
 use crate::doumi::{run_doumi_to_result, DoumiRunResult};
 use crate::emotion::{self, EmotionTarget};
 use crate::network::DelimiterCodec;
 use crate::player::{Body, Player, STATE_ACTIVE};
-use crate::command::{CommandParser, CommandRegistry, CommandResult, PendingInput};
-use crate::command::commands::try_move_by_exit_name;
+use crate::script::{
+    build_room_lines, build_room_objs_grouped, clear_precomputed_all_online, load_body_from_json,
+    load_user_password_hash, password_hash, password_verify, save_body_to_json,
+    set_precomputed_all_online,
+};
+use crate::world::event::{run_script_chunk, run_script_chunk_rhai, try_mob_event, ScriptNext};
 use crate::world::item::{get_item_display_name, get_item_weight_by_key};
 use crate::world::{get_world_state, PlayerPosition, RoomCache};
-use crate::world::event::{run_script_chunk, run_script_chunk_rhai, try_mob_event, ScriptNext};
 use std::collections::HashMap;
-use crate::script::{build_room_objs_grouped, build_room_lines, set_precomputed_all_online, clear_precomputed_all_online, save_body_to_json, load_body_from_json, password_hash, password_verify, load_user_password_hash};
 
 /// Client connection state
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -213,7 +217,8 @@ impl Client {
 
     /// Get the player's name
     pub fn player_name(&self) -> String {
-        self.player.as_ref()
+        self.player
+            .as_ref()
             .map(|p| p.body.get_string("이름"))
             .unwrap_or_else(|| "방문자".to_string())
     }
@@ -297,11 +302,17 @@ pub async fn handle_client(
             }
             // Don't add extra \r\n - messages already have proper line endings
             if let Err(e) = writer.write_all(msg.as_bytes()).await {
-                error!("Failed to send to {} (broken pipe/connection reset): {}", addr, e);
+                error!(
+                    "Failed to send to {} (broken pipe/connection reset): {}",
+                    addr, e
+                );
                 break;
             }
             if let Err(e) = writer.flush().await {
-                error!("Failed to flush to {} (broken pipe/connection reset): {}", addr, e);
+                error!(
+                    "Failed to flush to {} (broken pipe/connection reset): {}",
+                    addr, e
+                );
                 break;
             }
             // Send prompt only after login is complete
@@ -425,24 +436,39 @@ async fn process_login_state(
     // Do this in a separate scope to ensure lock is released
     let is_logged_in = {
         let clients = broadcaster.clients.lock();
-        clients.get(&addr)
+        clients
+            .get(&addr)
             .map(|c| c.login_session.is_none())
             .unwrap_or(false)
     };
     // Lock is released here
-    println!("[DEBUG CLIENT] is_logged_in={}, addr={}", is_logged_in, addr);
+    println!(
+        "[DEBUG CLIENT] is_logged_in={}, addr={}",
+        is_logged_in, addr
+    );
 
     if is_logged_in {
         // 다단계 입력 대기 중이면 (암호변경 등) 해당 플로우 처리
         let has_pending = {
             let clients = broadcaster.clients.lock();
-            clients.get(&addr).and_then(|c| c.pending_input.as_ref()).is_some()
+            clients
+                .get(&addr)
+                .and_then(|c| c.pending_input.as_ref())
+                .is_some()
         };
         if has_pending {
             handle_pending_change_password(broadcaster, addr, input).await?;
             return Ok(false);
         }
-        handle_game_command(broadcaster, addr, input, command_registry, room_cache, shutdown_notify).await?;
+        handle_game_command(
+            broadcaster,
+            addr,
+            input,
+            command_registry,
+            room_cache,
+            shutdown_notify,
+        )
+        .await?;
         return Ok(false);
     }
 
@@ -492,12 +518,17 @@ async fn process_login_state(
                 let input_name = input.to_string();
                 session.name = input_name.clone();
                 let is_korean = crate::hangul::is_han(&input_name);
-                let is_special = input_name == "손님" || input_name == "무명객" || input_name == "나만바라바";
+                let is_special =
+                    input_name == "손님" || input_name == "무명객" || input_name == "나만바라바";
 
-                info!("Name validation (from Logo): name='{}', is_korean={}, is_special={}",
-                    input_name, is_korean, is_special);
-                eprintln!("[NAME VALID] from Logo: name='{}', is_korean={}, is_special={}",
-                    input_name, is_korean, is_special);
+                info!(
+                    "Name validation (from Logo): name='{}', is_korean={}, is_special={}",
+                    input_name, is_korean, is_special
+                );
+                eprintln!(
+                    "[NAME VALID] from Logo: name='{}', is_korean={}, is_special={}",
+                    input_name, is_korean, is_special
+                );
 
                 if input_name.is_empty() {
                     LoginAction::AskName
@@ -506,7 +537,11 @@ async fn process_login_state(
                     LoginAction::NameError(input_name)
                 } else if is_special {
                     session.state = LoginState::ScriptMode;
-                    session.script_mode = if input_name == "나만바라바" { 1 } else { 2 };
+                    session.script_mode = if input_name == "나만바라바" {
+                        1
+                    } else {
+                        2
+                    };
                     session.script_position = 0;
                     session.doumi_script_path = if session.script_mode == 1 {
                         "lib/doumi/빠른도우미".to_string()
@@ -514,7 +549,7 @@ async fn process_login_state(
                         "lib/doumi/초기도우미".to_string()
                     };
                     session.doumi_ob = None;
-                    session.doumi_step = None;  // None = step1_welcome부터 시작
+                    session.doumi_step = None; // None = step1_welcome부터 시작
                     session.doumi_resume_op = None;
                     session.doumi_resume_expected = None;
                     LoginAction::StartScript
@@ -527,10 +562,16 @@ async fn process_login_state(
                 let input_name = input.to_string();
                 session.name = input_name.clone();
                 let is_korean = crate::hangul::is_han(&input_name);
-                let is_special = input_name == "손님" || input_name == "무명객" || input_name == "나만바라바";
+                let is_special =
+                    input_name == "손님" || input_name == "무명객" || input_name == "나만바라바";
 
-                info!("Name validation: name='{}', is_korean={}, is_special={}, bytes={:?}",
-                    input_name, is_korean, is_special, input_name.as_bytes());
+                info!(
+                    "Name validation: name='{}', is_korean={}, is_special={}, bytes={:?}",
+                    input_name,
+                    is_korean,
+                    is_special,
+                    input_name.as_bytes()
+                );
 
                 if input_name.is_empty() {
                     // Will ask again for name
@@ -543,7 +584,11 @@ async fn process_login_state(
                     // Directly start helper script mode (like production server)
                     session.state = LoginState::ScriptMode;
                     // "나만바라바" uses quick helper (script_mode=1), others use initial helper (script_mode=2)
-                    session.script_mode = if input_name == "나만바라바" { 1 } else { 2 };
+                    session.script_mode = if input_name == "나만바라바" {
+                        1
+                    } else {
+                        2
+                    };
                     session.script_position = 0;
                     session.doumi_script_path = if session.script_mode == 1 {
                         "lib/doumi/빠른도우미".to_string()
@@ -551,7 +596,7 @@ async fn process_login_state(
                         "lib/doumi/초기도우미".to_string()
                     };
                     session.doumi_ob = None;
-                    session.doumi_step = None;  // None = step1_welcome부터 시작
+                    session.doumi_step = None; // None = step1_welcome부터 시작
                     session.doumi_resume_op = None;
                     session.doumi_resume_expected = None;
                     LoginAction::StartScript
@@ -599,13 +644,14 @@ async fn process_login_state(
                 session.state = LoginState::Complete;
                 LoginAction::EnterGame(name)
             }
-            LoginState::Complete => {
-                LoginAction::GameCommand(name)
-            }
+            LoginState::Complete => LoginAction::GameCommand(name),
             LoginState::ScriptMode => {
                 // If script is outputting (not waiting for input), discard any received input
                 // This prevents buffered input from being processed when wait_enter/wait_input is reached
-                info!("[ScriptMode] waiting_for_input={}, input={:?}", session.waiting_for_input, input);
+                info!(
+                    "[ScriptMode] waiting_for_input={}, input={:?}",
+                    session.waiting_for_input, input
+                );
                 if !session.waiting_for_input {
                     LoginAction::None
                 } else {
@@ -634,7 +680,8 @@ async fn process_login_state(
                 // Check if still in script mode
                 let is_script_mode = {
                     let clients = broadcaster.clients.lock();
-                    clients.get(&addr)
+                    clients
+                        .get(&addr)
                         .and_then(|c| c.login_session.as_ref())
                         .map(|s| s.state == LoginState::ScriptMode)
                         .unwrap_or(false)
@@ -650,8 +697,15 @@ async fn process_login_state(
                     let client = clients.get_mut(&addr);
                     if let Some(client) = client {
                         if let Some(session) = client.login_session_mut() {
-                            let (new_mode, new_pos, waiting, output_msg, wait_for_input, is_complete, delay) =
-                                process_script_line(session, "");
+                            let (
+                                new_mode,
+                                new_pos,
+                                waiting,
+                                output_msg,
+                                wait_for_input,
+                                is_complete,
+                                delay,
+                            ) = process_script_line(session, "");
                             session.script_mode = new_mode;
                             session.script_position = new_pos;
                             session.waiting_for_command = waiting;
@@ -669,7 +723,8 @@ async fn process_login_state(
                     // Check if we should apply line-by-line delays (DOUMI scripts with set_tick)
                     let (delay_per_line, is_doumi) = {
                         let clients = broadcaster.clients.lock();
-                        clients.get(&addr)
+                        clients
+                            .get(&addr)
                             .and_then(|c| c.login_session.as_ref())
                             .map(|s| (s.delay_after_output, !s.doumi_script_path.is_empty()))
                             .unwrap_or((0, false))
@@ -681,7 +736,10 @@ async fn process_login_state(
                             if !line.is_empty() {
                                 broadcaster.send_to(addr, &format!("{}\r\n", line))?;
                                 eprintln!("[ TICK] Line delay: {}ms", delay_per_line);
-                                tokio::time::sleep(tokio::time::Duration::from_millis(delay_per_line)).await;
+                                tokio::time::sleep(tokio::time::Duration::from_millis(
+                                    delay_per_line,
+                                ))
+                                .await;
                             }
                         }
                     } else {
@@ -693,7 +751,8 @@ async fn process_login_state(
                 // Apply tick delay if any (after sending output)
                 let delay_to_apply = {
                     let clients = broadcaster.clients.lock();
-                    clients.get(&addr)
+                    clients
+                        .get(&addr)
                         .and_then(|c| c.login_session.as_ref())
                         .map(|s| s.delay_after_output)
                         .unwrap_or(0)
@@ -715,7 +774,14 @@ async fn process_login_state(
                 }
 
                 if script_complete {
-                    complete_char_creation_and_enter_game(broadcaster, addr, &player_name, command_registry, room_cache).await?;
+                    complete_char_creation_and_enter_game(
+                        broadcaster,
+                        addr,
+                        &player_name,
+                        command_registry,
+                        room_cache,
+                    )
+                    .await?;
                     return Ok(false);
                 }
 
@@ -741,9 +807,19 @@ async fn process_login_state(
                 let client = clients.get_mut(&addr);
                 if let Some(client) = client {
                     if let Some(session) = client.login_session_mut() {
-                        info!("[ScriptContinue] START: step={:?}, mode={}, input={:?}", session.doumi_step, session.script_mode, input);
-                        let (new_mode, new_pos, waiting, output_msg, wait_for_input, is_complete, delay) =
-                            process_script_line(session, input);
+                        info!(
+                            "[ScriptContinue] START: step={:?}, mode={}, input={:?}",
+                            session.doumi_step, session.script_mode, input
+                        );
+                        let (
+                            new_mode,
+                            new_pos,
+                            waiting,
+                            output_msg,
+                            wait_for_input,
+                            is_complete,
+                            delay,
+                        ) = process_script_line(session, input);
                         session.script_mode = new_mode;
                         session.script_position = new_pos;
                         session.waiting_for_command = waiting;
@@ -751,7 +827,14 @@ async fn process_login_state(
                         let has_step = session.doumi_step.is_some();
                         info!("[ScriptContinue] END: step={:?}, wait={}, complete={}, msg_len={}, delay={}",
                             session.doumi_step, wait_for_input, is_complete, output_msg.as_ref().map_or(0, |m| m.len()), delay);
-                        (output_msg, wait_for_input, is_complete, name, delay, has_step)
+                        (
+                            output_msg,
+                            wait_for_input,
+                            is_complete,
+                            name,
+                            delay,
+                            has_step,
+                        )
                     } else {
                         (None, false, false, String::new(), 0, false)
                     }
@@ -767,7 +850,8 @@ async fn process_login_state(
                 // Check if we should apply line-by-line delays (DOUMI scripts with set_tick)
                 let (delay_per_line, is_doumi) = {
                     let clients = broadcaster.clients.lock();
-                    clients.get(&addr)
+                    clients
+                        .get(&addr)
                         .and_then(|c| c.login_session.as_ref())
                         .map(|s| (s.delay_after_output, !s.doumi_script_path.is_empty()))
                         .unwrap_or((0, false))
@@ -779,7 +863,8 @@ async fn process_login_state(
                         if !line.is_empty() {
                             broadcaster.send_to(addr, &format!("{}\r\n", line))?;
                             eprintln!("[ TICK] Line delay: {}ms", delay_per_line);
-                            tokio::time::sleep(tokio::time::Duration::from_millis(delay_per_line)).await;
+                            tokio::time::sleep(tokio::time::Duration::from_millis(delay_per_line))
+                                .await;
                         }
                     }
                 } else {
@@ -791,7 +876,8 @@ async fn process_login_state(
             // Apply tick delay if any (after sending output)
             let delay_to_apply = {
                 let clients = broadcaster.clients.lock();
-                clients.get(&addr)
+                clients
+                    .get(&addr)
                     .and_then(|c| c.login_session.as_ref())
                     .map(|s| s.delay_after_output)
                     .unwrap_or(0)
@@ -814,7 +900,14 @@ async fn process_login_state(
 
             if script_complete {
                 // Script ended - complete character creation
-                complete_char_creation_and_enter_game(broadcaster, addr, &player_name, command_registry, room_cache).await?;
+                complete_char_creation_and_enter_game(
+                    broadcaster,
+                    addr,
+                    &player_name,
+                    command_registry,
+                    room_cache,
+                )
+                .await?;
                 Ok(false)
             } else if should_wait {
                 // Already sent prompt in the message
@@ -827,7 +920,14 @@ async fn process_login_state(
             }
         }
         LoginAction::ScriptComplete(player_name) => {
-            complete_char_creation_and_enter_game(broadcaster, addr, &player_name, command_registry, room_cache).await?;
+            complete_char_creation_and_enter_game(
+                broadcaster,
+                addr,
+                &player_name,
+                command_registry,
+                room_cache,
+            )
+            .await?;
             Ok(false)
         }
         LoginAction::AskPassword(_player_name) => {
@@ -871,10 +971,7 @@ async fn process_login_state(
             Ok(false)
         }
         LoginAction::DisconnectSelf => {
-            broadcaster.send_to(
-                addr,
-                "\r\n\x1b[1;37m접속을 취소합니다.\x1b[0;37m\r\n",
-            )?;
+            broadcaster.send_to(addr, "\r\n\x1b[1;37m접속을 취소합니다.\x1b[0;37m\r\n")?;
             tokio::time::sleep(tokio::time::Duration::from_millis(100)).await;
             return Ok(true);
         }
@@ -887,7 +984,15 @@ async fn process_login_state(
             Ok(false)
         }
         LoginAction::GameCommand(_player_name) => {
-            handle_game_command(broadcaster, addr, input, command_registry, room_cache, shutdown_notify).await?;
+            handle_game_command(
+                broadcaster,
+                addr,
+                input,
+                command_registry,
+                room_cache,
+                shutdown_notify,
+            )
+            .await?;
             Ok(false)
         }
     }
@@ -946,10 +1051,12 @@ async fn send_helper_selection(
     let divider2 = "\x1b[1;37m├─────────────────────────────────────────────┤\x1b[0;37m\r\n";
     broadcaster.send_to(addr, divider2)?;
 
-    let option1 = "\x1b[1;37m│  \x1b[1;33m1.\x1b[0;37m 빠른도우미 - 빠른 케릭터 생성         │\x1b[0;37m\r\n";
+    let option1 =
+        "\x1b[1;37m│  \x1b[1;33m1.\x1b[0;37m 빠른도우미 - 빠른 케릭터 생성         │\x1b[0;37m\r\n";
     broadcaster.send_to(addr, option1)?;
 
-    let option2 = "\x1b[1;37m│  \x1b[1;33m2.\x1b[0;37m 초기도우미 - 스토리 모드            │\x1b[0;37m\r\n";
+    let option2 =
+        "\x1b[1;37m│  \x1b[1;33m2.\x1b[0;37m 초기도우미 - 스토리 모드            │\x1b[0;37m\r\n";
     broadcaster.send_to(addr, option2)?;
 
     let footer = "\x1b[1;37m└─────────────────────────────────────────────┘\x1b[0;37m\r\n";
@@ -989,9 +1096,14 @@ fn process_script_line(
     session: &mut LoginSession,
     input: &str,
 ) -> (u8, usize, Option<String>, Option<String>, bool, bool, u64) {
-    eprintln!("[process_script_line] input='{}', doumi_step={:?}, doumi_resume_op={:?}",
-        input, session.doumi_step, session.doumi_resume_op);
-    eprintln!("[process_script_line] doumi_script_path='{}'", session.doumi_script_path);
+    eprintln!(
+        "[process_script_line] input='{}', doumi_step={:?}, doumi_resume_op={:?}",
+        input, session.doumi_step, session.doumi_resume_op
+    );
+    eprintln!(
+        "[process_script_line] doumi_script_path='{}'",
+        session.doumi_script_path
+    );
     if session.doumi_script_path.is_empty() {
         return (
             session.script_mode,
@@ -1044,7 +1156,10 @@ fn process_script_line(
                 0,
             );
         }
-        if PathBuf::from("data/user").join(format!("{}.json", t)).exists() {
+        if PathBuf::from("data/user")
+            .join(format!("{}.json", t))
+            .exists()
+        {
             session.doumi_ob = Some(doumi_ob_to_hashmap(ob));
             return (
                 session.script_mode,
@@ -1067,7 +1182,10 @@ fn process_script_line(
                     session.script_mode,
                     0,
                     None,
-                    Some(format!("잘못된 입력입니다. 『{}』를(을) 입력해 주세요.\r\n> ", exp)),
+                    Some(format!(
+                        "잘못된 입력입니다. 『{}』를(을) 입력해 주세요.\r\n> ",
+                        exp
+                    )),
                     true,
                     false,
                     0,
@@ -1085,8 +1203,10 @@ fn process_script_line(
     } else {
         input
     };
-    eprintln!("[process_script_line] resume_op={:?}, input={:?}, effective_input={:?}",
-        resume_op, input, effective_input);
+    eprintln!(
+        "[process_script_line] resume_op={:?}, input={:?}, effective_input={:?}",
+        resume_op, input, effective_input
+    );
     let resume = resume_op.as_ref().map(|o| (o.as_str(), effective_input));
 
     eprintln!("[process_script_line] Calling run_doumi_to_result: current_step={:?}, resume_op={:?}, initial_delay={}",
@@ -1101,13 +1221,20 @@ fn process_script_line(
         &mut ob,
         current_step.as_deref(),
         resume,
-        session.delay_after_output,  // Pass existing delay to preserve tick value across steps
+        session.delay_after_output, // Pass existing delay to preserve tick value across steps
     );
 
     match result {
-        DoumiRunResult::Suspend { lines, delay_ms, suspend } => {
+        DoumiRunResult::Suspend {
+            lines,
+            delay_ms,
+            suspend,
+        } => {
             session.doumi_ob = Some(doumi_ob_to_hashmap(ob.clone()));
-            eprintln!("[process_script_line] Suspend: saving ob with {} entries", ob.len());
+            eprintln!(
+                "[process_script_line] Suspend: saving ob with {} entries",
+                ob.len()
+            );
             for (k, v) in ob.iter() {
                 if let Ok(s) = v.clone().into_string() {
                     eprintln!("  ob[{}] = {}", k, s);
@@ -1118,17 +1245,21 @@ fn process_script_line(
             session.doumi_resume_op = Some(suspend.op.clone());
             session.doumi_resume_expected = suspend.expected.clone();
 
-            eprintln!("[process_script_line] Suspend: op={}, next_step={:?}, lines={}",
-                suspend.op, next_step, lines.len());
+            eprintln!(
+                "[process_script_line] Suspend: op={}, next_step={:?}, lines={}",
+                suspend.op,
+                next_step,
+                lines.len()
+            );
 
             // Store delay for line-by-line output
             session.delay_after_output = delay_ms;
 
             // Don't duplicate the prompt if it's already in the lines
             let joined = lines.join("");
-            let has_prompt = joined.contains(&suspend.prompt) ||
-                             joined.contains("엔터키를 누르세요") ||
-                             joined.contains("엔터키를 누르세요】");
+            let has_prompt = joined.contains(&suspend.prompt)
+                || joined.contains("엔터키를 누르세요")
+                || joined.contains("엔터키를 누르세요】");
             let output = if has_prompt {
                 format!("{}\r\n", joined)
             } else {
@@ -1144,7 +1275,11 @@ fn process_script_line(
                 delay_ms,
             )
         }
-        DoumiRunResult::Finished { name, password, gender } => {
+        DoumiRunResult::Finished {
+            name,
+            password,
+            gender,
+        } => {
             let norm = |g: &str| -> String {
                 match g.trim().to_lowercase().as_str() {
                     "남" | "남자" | "m" | "male" => "남".to_string(),
@@ -1173,7 +1308,10 @@ async fn complete_char_creation_and_enter_game(
     _command_registry: Arc<CommandRegistry>,
     room_cache: Arc<std::sync::Mutex<RoomCache>>,
 ) -> Result<(), Box<dyn std::error::Error>> {
-    println!("[DEBUG COMPLETE] complete_char_creation_and_enter_game called with player_name={}", player_name);
+    println!(
+        "[DEBUG COMPLETE] complete_char_creation_and_enter_game called with player_name={}",
+        player_name
+    );
     // Get character creation data and complete login
     let (char_name, char_gender) = {
         let mut clients = broadcaster.clients.lock();
@@ -1183,14 +1321,20 @@ async fn complete_char_creation_and_enter_game(
             let name = if !player_name.is_empty() {
                 player_name.to_string()
             } else {
-                client.login_session.as_ref()
+                client
+                    .login_session
+                    .as_ref()
                     .map(|s| s.char_name.clone())
                     .unwrap_or_else(|| "방문자".to_string())
             };
-            let gender = client.login_session.as_ref()
+            let gender = client
+                .login_session
+                .as_ref()
                 .map(|s| s.char_gender.clone())
                 .unwrap_or_else(|| "남".to_string());
-            let pwd = client.login_session.as_ref()
+            let pwd = client
+                .login_session
+                .as_ref()
                 .map(|s| s.char_password.clone())
                 .unwrap_or_default();
 
@@ -1239,16 +1383,44 @@ async fn complete_char_creation_and_enter_game(
     // Lock is dropped here
 
     // Send creation complete message
-    broadcaster.send_to(addr, "\r\n\x1b[1;37m━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━\x1b[0;37m\r\n")?;
-    broadcaster.send_to(addr, &format!("\x1b[1;37m케릭터가 생성되었습니다.\x1b[0;37m\r\n"))?;
-    broadcaster.send_to(addr, &format!("\x1b[1;37m이름: {}\x1b[0;37m\r\n", char_name))?;
-    broadcaster.send_to(addr, &format!("\x1b[1;37m성별: {}\x1b[0;37m\r\n", if char_gender == "남" { "남자" } else { "여자" }))?;
+    broadcaster.send_to(
+        addr,
+        "\r\n\x1b[1;37m━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━\x1b[0;37m\r\n",
+    )?;
+    broadcaster.send_to(
+        addr,
+        &format!("\x1b[1;37m케릭터가 생성되었습니다.\x1b[0;37m\r\n"),
+    )?;
+    broadcaster.send_to(
+        addr,
+        &format!("\x1b[1;37m이름: {}\x1b[0;37m\r\n", char_name),
+    )?;
+    broadcaster.send_to(
+        addr,
+        &format!(
+            "\x1b[1;37m성별: {}\x1b[0;37m\r\n",
+            if char_gender == "남" {
+                "남자"
+            } else {
+                "여자"
+            }
+        ),
+    )?;
     broadcaster.send_to(addr, "\x1b[1;37m은전: 10000\x1b[0;37m\r\n")?;
-    broadcaster.send_to(addr, "\x1b[1;37m━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━\x1b[0;37m\r\n")?;
+    broadcaster.send_to(
+        addr,
+        "\x1b[1;37m━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━\x1b[0;37m\r\n",
+    )?;
 
     // Send welcome message
-    broadcaster.send_to(addr, "\r\n\x1b[1;37m=== 무림에 입장하셨습니다 ===\x1b[0;37m\r\n")?;
-    broadcaster.send_to(addr, "도움말을 보려면 \x1b[1m도움말\x1b[0;37m 또는 \x1b[1mhelp\x1b[0;37m을 입력하세요.\r\n")?;
+    broadcaster.send_to(
+        addr,
+        "\r\n\x1b[1;37m=== 무림에 입장하셨습니다 ===\x1b[0;37m\r\n",
+    )?;
+    broadcaster.send_to(
+        addr,
+        "도움말을 보려면 \x1b[1m도움말\x1b[0;37m 또는 \x1b[1mhelp\x1b[0;37m을 입력하세요.\r\n",
+    )?;
     broadcaster.send_to(addr, "\r\n")?;
 
     // Show the starting room
@@ -1447,8 +1619,14 @@ async fn complete_login_and_enter_game(
     // Lock is dropped here
 
     // Send welcome message (no lock held)
-    broadcaster.send_to(addr, "\r\n\x1b[1;37m=== 무림에 입장하셨습니다 ===\x1b[0;37m\r\n")?;
-    broadcaster.send_to(addr, "도움말을 보려면 \x1b[1m도움말\x1b[0;37m 또는 \x1b[1mhelp\x1b[0;37m을 입력하세요.\r\n")?;
+    broadcaster.send_to(
+        addr,
+        "\r\n\x1b[1;37m=== 무림에 입장하셨습니다 ===\x1b[0;37m\r\n",
+    )?;
+    broadcaster.send_to(
+        addr,
+        "도움말을 보려면 \x1b[1m도움말\x1b[0;37m 또는 \x1b[1mhelp\x1b[0;37m을 입력하세요.\r\n",
+    )?;
     broadcaster.send_to(addr, "\r\n")?;
 
     // Show the starting room
@@ -1476,7 +1654,8 @@ async fn send_game_prompt(
 ) -> Result<(), Box<dyn std::error::Error>> {
     let prompt = {
         let clients = broadcaster.clients.lock();
-        clients.get(&addr)
+        clients
+            .get(&addr)
             .and_then(|c| c.player())
             .map(|p| {
                 let hp = p.body.get_hp();
@@ -1495,19 +1674,35 @@ async fn send_game_prompt(
 fn format_exit_compass(room: &crate::world::Room) -> String {
     use crate::world::Direction;
 
-    let has = |d: Direction| room.exits.values().any(|e| e.direction == Some(d) && e.has_destination() && !e.hidden);
+    let has = |d: Direction| {
+        room.exits
+            .values()
+            .any(|e| e.direction == Some(d) && e.has_destination() && !e.hidden)
+    };
     let has_north = has(Direction::North);
     let has_south = has(Direction::South);
     let has_east = has(Direction::East);
     let has_west = has(Direction::West);
 
     let mut directions = Vec::new();
-    if has_north { directions.push("북"); }
-    if has_south { directions.push("남"); }
-    if has_east { directions.push("동"); }
-    if has_west { directions.push("서"); }
-    if has(Direction::Up) { directions.push("위"); }
-    if has(Direction::Down) { directions.push("아래"); }
+    if has_north {
+        directions.push("북");
+    }
+    if has_south {
+        directions.push("남");
+    }
+    if has_east {
+        directions.push("동");
+    }
+    if has_west {
+        directions.push("서");
+    }
+    if has(Direction::Up) {
+        directions.push("위");
+    }
+    if has(Direction::Down) {
+        directions.push("아래");
+    }
 
     if directions.is_empty() {
         return "  ○  어느 쪽으로도 이동할 수 없습니다.\r\n".to_string();
@@ -1561,7 +1756,10 @@ fn show_room(
     // Get player name
     let player_name = {
         let clients = broadcaster.clients.lock();
-        clients.get(&addr).map(|c| c.player_name()).unwrap_or_else(|| "방문자".to_string())
+        clients
+            .get(&addr)
+            .map(|c| c.player_name())
+            .unwrap_or_else(|| "방문자".to_string())
     };
     // Lock released
 
@@ -1600,7 +1798,8 @@ async fn show_room_to_player(
     let world = get_world_state().read().unwrap();
     let _room_key = format!("{}:{}", pos.zone, pos.room);
     let room_output = if let Some(room) = world.room_cache.get_room_cached(&pos.zone, &pos.room) {
-        let room_ref = room.read()
+        let room_ref = room
+            .read()
             .map_err(|e| format!("Room read lock error: {}", e))?;
 
         // Room name format
@@ -1610,9 +1809,16 @@ async fn show_room_to_player(
         );
 
         // Get exits (방향은 korean_name, 고유명은 display_name. 숨겨진 제외)
-        let exits: Vec<String> = room_ref.exits.values()
+        let exits: Vec<String> = room_ref
+            .exits
+            .values()
             .filter(|e| e.has_destination() && !e.hidden)
-            .map(|e| e.direction.as_ref().map(|d| d.korean_name().to_string()).unwrap_or_else(|| e.display_name.clone()))
+            .map(|e| {
+                e.direction
+                    .as_ref()
+                    .map(|d| d.korean_name().to_string())
+                    .unwrap_or_else(|| e.display_name.clone())
+            })
             .collect();
         let exits_str = if exits.is_empty() {
             "출구가 없습니다.".to_string()
@@ -1646,7 +1852,8 @@ async fn show_room_to_player(
         let item_str = build_room_objs_grouped(&room_objs, &room_stack);
 
         // 같은 방의 다른 접속 유저. 봐/show_room_to_player_with_world와 동일.
-        let other_descs = get_other_players_desc_in_room(broadcaster.as_ref(), &pos.zone, &pos.room, player_name);
+        let other_descs =
+            get_other_players_desc_in_room(broadcaster.as_ref(), &pos.zone, &pos.room, player_name);
         let other_str = if other_descs.is_empty() {
             String::new()
         } else {
@@ -1661,10 +1868,16 @@ async fn show_room_to_player(
             mob_str,
             item_str,
             other_str,
-            100, 900, 18, 18  // Default HP/MP display
+            100,
+            900,
+            18,
+            18 // Default HP/MP display
         )
     } else {
-        format!("\x1b[1;37m[{}:{}]\x1b[0;37m\r\n알 수 없는 곳입니다.\r\n", pos.zone, pos.room)
+        format!(
+            "\x1b[1;37m[{}:{}]\x1b[0;37m\r\n알 수 없는 곳입니다.\r\n",
+            pos.zone, pos.room
+        )
     };
 
     broadcaster.send_to(addr, "\r\n")?;
@@ -1699,7 +1912,10 @@ fn handle_movement(
     // Get player name
     let player_name = {
         let clients = broadcaster.clients.lock();
-        clients.get(&addr).map(|c| c.player_name()).unwrap_or_else(|| "방문자".to_string())
+        clients
+            .get(&addr)
+            .map(|c| c.player_name())
+            .unwrap_or_else(|| "방문자".to_string())
     };
     // Lock released
 
@@ -1794,7 +2010,9 @@ pub(crate) fn get_other_players_desc_in_room(
 
 /// find_target(봐 [대상])에서 같은 방 다른 유저 매칭용. PRE가 설정돼 있으면 그걸 반환(데드락 회피).
 pub(crate) fn get_other_players_map_for_look() -> HashMap<String, String> {
-    PRE_COMPUTED_OTHER_MAP.with(|c| c.borrow_mut().take()).unwrap_or_default()
+    PRE_COMPUTED_OTHER_MAP
+        .with(|c| c.borrow_mut().take())
+        .unwrap_or_default()
 }
 
 /// 감정표현 대상: 같은 방에서 name으로 플레이어 또는 몹 검색. self_name이면 None.
@@ -1892,7 +2110,10 @@ pub(crate) fn send_to_others_in_room(
 
     // Clean up dead clients
     for addr in dead_addrs {
-        tracing::warn!("Removing dead client {} due to send failure in send_to_others_in_room", addr);
+        tracing::warn!(
+            "Removing dead client {} due to send failure in send_to_others_in_room",
+            addr
+        );
         clients.remove(&addr);
     }
 }
@@ -1925,7 +2146,10 @@ pub(crate) fn broadcast_shout(broadcaster: &crate::network::Broadcaster, msg: &s
 
     // Clean up dead clients
     for addr in dead_addrs {
-        tracing::warn!("Removing dead client {} due to send failure in broadcast_shout", addr);
+        tracing::warn!(
+            "Removing dead client {} due to send failure in broadcast_shout",
+            addr
+        );
         clients.remove(&addr);
     }
 }
@@ -1951,7 +2175,10 @@ pub(crate) fn broadcast_notice(broadcaster: &crate::network::Broadcaster, msg: &
 
     // Clean up dead clients
     for addr in dead_addrs {
-        tracing::warn!("Removing dead client {} due to send failure in broadcast_notice", addr);
+        tracing::warn!(
+            "Removing dead client {} due to send failure in broadcast_notice",
+            addr
+        );
         clients.remove(&addr);
     }
 }
@@ -1980,7 +2207,10 @@ pub(crate) fn send_to_one_user(broadcaster: &crate::network::Broadcaster, name: 
 
     // Clean up dead clients
     for addr in dead_addrs {
-        tracing::warn!("Removing dead client {} due to send failure in send_to_one_user", addr);
+        tracing::warn!(
+            "Removing dead client {} due to send failure in send_to_one_user",
+            addr
+        );
         clients.remove(&addr);
     }
 }
@@ -2020,7 +2250,9 @@ fn show_room_to_player_with_world(
     let world = get_world_state().read().unwrap();
 
     if let Some(room) = world.room_cache.get_room_cached(&pos.zone, &pos.room) {
-        let room_ref = room.read().map_err(|e| format!("Room read lock error: {}", e))?;
+        let room_ref = room
+            .read()
+            .map_err(|e| format!("Room read lock error: {}", e))?;
 
         let room_name_formatted = format_room_header(&room_ref.display_name);
         let exits_str = format_exits_long(&*room_ref);
@@ -2050,7 +2282,8 @@ fn show_room_to_player_with_world(
         let item_str = build_room_objs_grouped(&room_objs, &room_stack);
 
         // 같은 방의 다른 접속 유저. 파이썬 viewMapData: for obj in room.objs: is_player then getDesc.
-        let other_descs = get_other_players_desc_in_room(broadcaster.as_ref(), &pos.zone, &pos.room, player_name);
+        let other_descs =
+            get_other_players_desc_in_room(broadcaster.as_ref(), &pos.zone, &pos.room, player_name);
         let other_str = if other_descs.is_empty() {
             String::new()
         } else {
@@ -2078,7 +2311,13 @@ fn show_room_to_player_with_world(
             broadcaster.send_to(addr, "\r\n")?;
         }
     } else {
-        broadcaster.send_to(addr, &format!("\x1b[1;37m[{}:{}]\x1b[0;37m\r\n알 수 없는 곳입니다.\r\n", pos.zone, pos.room))?;
+        broadcaster.send_to(
+            addr,
+            &format!(
+                "\x1b[1;37m[{}:{}]\x1b[0;37m\r\n알 수 없는 곳입니다.\r\n",
+                pos.zone, pos.room
+            ),
+        )?;
     }
 
     Ok(())
@@ -2114,7 +2353,11 @@ async fn handle_pending_change_password(
         match pending {
             PendingInput::ChangePasswordOld => {
                 if !password_verify(&stored, input) {
-                    (None, "☞ 현재의 암호가 맞지 않아요. ^^\r\n".to_string(), true)
+                    (
+                        None,
+                        "☞ 현재의 암호가 맞지 않아요. ^^\r\n".to_string(),
+                        true,
+                    )
                 } else {
                     (
                         Some(PendingInput::ChangePasswordNew),
@@ -2128,7 +2371,9 @@ async fn handle_pending_change_password(
                     (None, "☞ 3자 이상 입력하세요.\r\n".to_string(), true)
                 } else {
                     (
-                        Some(PendingInput::ChangePasswordConfirm { new_password: input.to_string() }),
+                        Some(PendingInput::ChangePasswordConfirm {
+                            new_password: input.to_string(),
+                        }),
                         "☞ 한번 더 암호를 입력해주세요. \r\n암호확인ː ".to_string(),
                         false,
                     )
@@ -2136,7 +2381,11 @@ async fn handle_pending_change_password(
             }
             PendingInput::ChangePasswordConfirm { new_password } => {
                 if input != new_password {
-                    (None, "☞ 이전 입력과 다릅니다. 암호변경을 취소합니다.\r\n".to_string(), true)
+                    (
+                        None,
+                        "☞ 이전 입력과 다릅니다. 암호변경을 취소합니다.\r\n".to_string(),
+                        true,
+                    )
                 } else {
                     body.set("암호", password_hash(input));
                     let path = format!("data/user/{}.json", body.get_name());
@@ -2149,7 +2398,13 @@ async fn handle_pending_change_password(
                     (None, msg, true)
                 }
             }
-            PendingInput::EventEnter { mob_key, event_key, words, line_num, resume_func } => {
+            PendingInput::EventEnter {
+                mob_key,
+                event_key,
+                words,
+                line_num,
+                resume_func,
+            } => {
                 let (zone, room) = get_world_state()
                     .read()
                     .unwrap()
@@ -2157,16 +2412,29 @@ async fn handle_pending_change_password(
                     .map(|p| (p.zone.clone(), p.room.clone()))
                     .unwrap_or((String::new(), "0".to_string()));
                 let result = crate::world::event::try_mob_event_resume(
-                    body, &zone, &room, &mob_key, &event_key, words, line_num, resume_func,
+                    body,
+                    &zone,
+                    &room,
+                    &mob_key,
+                    &event_key,
+                    words,
+                    line_num,
+                    resume_func,
                 );
                 match result {
-                    Some(CommandResult::MobEvent { output_lines, set_position }) => {
+                    Some(CommandResult::MobEvent {
+                        output_lines,
+                        set_position,
+                    }) => {
                         let mut out = output_lines.join("\r\n");
                         if let Some((z, r)) = set_position {
                             let mut w = get_world_state().write().unwrap();
                             if w.room_cache.get_room(&z, &r).is_ok() {
                                 let pname = body.get_name().to_string();
-                                w.set_player_position(&pname, PlayerPosition::new(z.clone(), r.clone()));
+                                w.set_player_position(
+                                    &pname,
+                                    PlayerPosition::new(z.clone(), r.clone()),
+                                );
                                 w.spawn_mobs_for_room(&z, &r);
                                 room_append = Some((z, r, pname));
                             } else {
@@ -2181,15 +2449,34 @@ async fn handle_pending_change_password(
                     _ => (None, "\r\n".to_string(), true),
                 }
             }
-            PendingInput::Script { name, lines, line_num, temp_input, from_confirm, script_ob, script_resume_op } => {
+            PendingInput::Script {
+                name,
+                lines,
+                line_num,
+                temp_input,
+                from_confirm,
+                script_ob,
+                script_resume_op,
+            } => {
                 if from_confirm && input.eq_ignore_ascii_case("취소") {
                     body.script_temp_item = None;
                     (None, "* 무기강화를 종료합니다.\r\n".to_string(), true)
                 } else {
                     let (out_lines, next) = if script_resume_op.is_some() {
-                        run_script_chunk_rhai(body, &name, Some(input.to_string()), temp_input.clone(), script_ob.clone(), script_resume_op.clone())
+                        run_script_chunk_rhai(
+                            body,
+                            &name,
+                            Some(input.to_string()),
+                            temp_input.clone(),
+                            script_ob.clone(),
+                            script_resume_op.clone(),
+                        )
                     } else {
-                        let input_opt = if from_confirm { None } else { Some(input.to_string()) };
+                        let input_opt = if from_confirm {
+                            None
+                        } else {
+                            Some(input.to_string())
+                        };
                         run_script_chunk(body, &lines, line_num, input_opt, temp_input.clone())
                     };
                     let mut out = out_lines.join("\r\n");
@@ -2201,7 +2488,14 @@ async fn handle_pending_change_password(
                             body.script_temp_item = None;
                             (None, out, true)
                         }
-                        ScriptNext::Wait { line_num: ln, prompt, persist_temp, from_confirm: fc, script_ob: so, script_resume_op: sro } => {
+                        ScriptNext::Wait {
+                            line_num: ln,
+                            prompt,
+                            persist_temp,
+                            from_confirm: fc,
+                            script_ob: so,
+                            script_resume_op: sro,
+                        } => {
                             let next_temp = persist_temp.or(temp_input);
                             let next_state = Some(PendingInput::Script {
                                 name,
@@ -2219,7 +2513,11 @@ async fn handle_pending_change_password(
                     }
                 }
             }
-            PendingInput::NoteEdit { target_name, title, mut lines } => {
+            PendingInput::NoteEdit {
+                target_name,
+                title,
+                mut lines,
+            } => {
                 let end_due_to_dot = input.trim() == ".";
                 let mut end_due_to_limit = false;
                 if !end_due_to_dot {
@@ -2255,7 +2553,11 @@ async fn handle_pending_change_password(
                     };
                     (None, msg, true)
                 } else {
-                    let next = Some(PendingInput::NoteEdit { target_name, title, lines });
+                    let next = Some(PendingInput::NoteEdit {
+                        target_name,
+                        title,
+                        lines,
+                    });
                     (next, ":\r\n".to_string(), false)
                 }
             }
@@ -2310,7 +2612,10 @@ async fn handle_game_command(
     // Get the player
     let _player_name = {
         let clients = broadcaster.clients.lock();
-        clients.get(&addr).map(|c| c.player_name()).unwrap_or_else(|| "방문자".to_string())
+        clients
+            .get(&addr)
+            .map(|c| c.player_name())
+            .unwrap_or_else(|| "방문자".to_string())
     };
     // Lock released
 
@@ -2320,7 +2625,10 @@ async fn handle_game_command(
     // handle_movement → show_room_to_player_with_world 는 다른 유저(get_other_players_desc_in_room) 포함.
     // registry의 move_command → display_room 은 다른 유저 미포함이므로, 모든 이동을 여기서 처리.
     let move_cmd = command_registry.resolve_alias(parsed.command.as_str());
-    if matches!(move_cmd.as_str(), "북" | "남" | "동" | "서" | "위" | "아래" | "북서" | "북동" | "남서" | "남동") {
+    if matches!(
+        move_cmd.as_str(),
+        "북" | "남" | "동" | "서" | "위" | "아래" | "북서" | "북동" | "남서" | "남동"
+    ) {
         handle_movement(broadcaster, addr, &move_cmd, &room_cache)?;
         send_game_prompt(broadcaster, addr).await?;
         return Ok(());
@@ -2337,7 +2645,8 @@ async fn handle_game_command(
     }
 
     // Handle quit/끝/종료 (접속 종료). 보통 앞단에서 처리되나, 이중 확인.
-    if parsed.command.to_lowercase() == "quit" || parsed.command == "끝" || parsed.command == "종료" {
+    if parsed.command.to_lowercase() == "quit" || parsed.command == "끝" || parsed.command == "종료"
+    {
         broadcaster.send_to(addr, "Goodbye!\r\n")?;
         return Ok(());
     }
@@ -2345,7 +2654,8 @@ async fn handle_game_command(
     // Unknown command - try command registry
     let mut response = String::new();
     let mut say_to_room: Option<(String, String, String, String)> = None;
-    let mut emotion_to_room: Option<(String, String, String, String, Option<(String, String)>)> = None; // (pname, zone, room, to_room, to_target)
+    let mut emotion_to_room: Option<(String, String, String, String, Option<(String, String)>)> =
+        None; // (pname, zone, room, to_room, to_target)
     let mut give_pending: Option<(
         std::net::SocketAddr,
         String,
@@ -2403,11 +2713,20 @@ async fn handle_game_command(
             }
             let mut m = Map::new();
             m.insert("이름".into(), Dynamic::from(name.clone()));
-            m.insert("무림별호".into(), Dynamic::from(p.body.get_string("무림별호")));
+            m.insert(
+                "무림별호".into(),
+                Dynamic::from(p.body.get_string("무림별호")),
+            );
             m.insert("성격".into(), Dynamic::from(p.body.get_string("성격")));
-            m.insert("레벨초기화".into(), Dynamic::from(p.body.get_string("레벨초기화")));
+            m.insert(
+                "레벨초기화".into(),
+                Dynamic::from(p.body.get_string("레벨초기화")),
+            );
             m.insert("소속".into(), Dynamic::from(p.body.get_string("소속")));
-            m.insert("설정상태".into(), Dynamic::from(p.body.get_string("설정상태")));
+            m.insert(
+                "설정상태".into(),
+                Dynamic::from(p.body.get_string("설정상태")),
+            );
             if let Some(pos) = world.get_player_position(&name) {
                 m.insert("zone".into(), Dynamic::from(pos.zone.clone()));
                 m.insert("room".into(), Dynamic::from(pos.room.clone()));
@@ -2425,14 +2744,7 @@ async fn handle_game_command(
         let (emotion_param, emotion_target) = if is_emotion {
             let ep = parsed.args.as_str();
             let fip = ep.split_whitespace().next().unwrap_or("");
-            let t = find_emotion_target_in_room(
-                &zone,
-                &room,
-                fip,
-                &player_name,
-                &world,
-                &*clients,
-            );
+            let t = find_emotion_target_in_room(&zone, &room, fip, &player_name, &world, &*clients);
             (ep.to_string(), t)
         } else {
             (String::new(), None)
@@ -2458,11 +2770,18 @@ async fn handle_game_command(
                         .then(|| try_mob_event(&mut player.body, &zone, &room, &parsed.raw))
                         .flatten();
                     if let Some(r) = mob_first {
-                        info!("[CMD] Mob event: {} -> {:?}", parsed.raw, std::mem::discriminant(&r));
+                        info!(
+                            "[CMD] Mob event: {} -> {:?}",
+                            parsed.raw,
+                            std::mem::discriminant(&r)
+                        );
                         Some(r)
                     } else {
                         // [인수] [명령] 한글 어순: 마지막 단어가 미등록이면 첫 단어를 명령으로 시도 (예: 기연삭제 x, 값설정 a b)
-                        let (cmd_lookup, args): (Option<&crate::command::registry::CommandInfo>, Vec<&str>) = {
+                        let (cmd_lookup, args): (
+                            Option<&crate::command::registry::CommandInfo>,
+                            Vec<&str>,
+                        ) = {
                             if let Some(c) = command_registry.get(parsed.command.as_str()) {
                                 (Some(c), parsed.tokens.iter().map(|s| s.as_str()).collect())
                             } else if w.len() >= 2 {
@@ -2478,11 +2797,20 @@ async fn handle_game_command(
                         if let Some(cmd) = cmd_lookup {
                             info!("[CMD] Executing: {}", cmd.name);
                             Some((cmd.handler)(&mut player.body, &args))
-                        } else if let Some(r) = try_mob_event(&mut player.body, &zone, &room, &parsed.raw) {
-                            info!("[CMD] Mob event: {} -> {:?}", parsed.raw, std::mem::discriminant(&r));
+                        } else if let Some(r) =
+                            try_mob_event(&mut player.body, &zone, &room, &parsed.raw)
+                        {
+                            info!(
+                                "[CMD] Mob event: {} -> {:?}",
+                                parsed.raw,
+                                std::mem::discriminant(&r)
+                            );
                             Some(r)
                         } else {
-                            info!("[CMD] Command not found, trying as exit name: {}", parsed.command);
+                            info!(
+                                "[CMD] Command not found, trying as exit name: {}",
+                                parsed.command
+                            );
                             try_move_by_exit_name(&mut player.body, &parsed.command)
                         }
                     }
@@ -2504,7 +2832,7 @@ async fn handle_game_command(
                         format!("{}\r\n", prompt)
                     }
                     Some(CommandResult::Move(_direction)) => {
-                        String::new()  // Movement is handled elsewhere
+                        String::new() // Movement is handled elsewhere
                     }
                     Some(CommandResult::Combat) => {
                         // Process PvM combat
@@ -2512,7 +2840,10 @@ async fn handle_game_command(
                         use crate::player::ActState;
 
                         // Get attack target from player temp
-                        let target_name = player.body.temp().get("_attack_target")
+                        let target_name = player
+                            .body
+                            .temp()
+                            .get("_attack_target")
                             .and_then(|v| match v {
                                 crate::object::Value::String(s) => Some(s.as_str()),
                                 _ => None,
@@ -2523,13 +2854,13 @@ async fn handle_game_command(
                             // First find the mob
                             let world = get_world_state().read().unwrap();
                             if let Some((mob_instance, mob_data)) =
-                                combat::find_mob_in_room(&player_name, target_name, &world) {
-
+                                combat::find_mob_in_room(&player_name, target_name, &world)
+                            {
                                 // Process the attack round
                                 let mut round = combat::process_player_attack(
                                     &mut player.body,
                                     &mob_instance,
-                                    &mob_data
+                                    &mob_data,
                                 );
 
                                 let mut messages = round.player_messages;
@@ -2539,7 +2870,12 @@ async fn handle_game_command(
                                 drop(world);
                                 if round.damage_dealt > 0 {
                                     if let Ok(mut w) = get_world_state().write() {
-                                        w.damage_mob(&zone, &room, &mob_instance.mob_key, round.damage_dealt);
+                                        w.damage_mob(
+                                            &zone,
+                                            &room,
+                                            &mob_instance.mob_key,
+                                            round.damage_dealt,
+                                        );
                                     }
                                 }
 
@@ -2562,7 +2898,9 @@ async fn handle_game_command(
                                     let respawn_hp = (max_hp as f64 * 0.3) as i64; // 30% of max HP
                                     let respawn_mp = (max_mp as f64 * 0.5) as i64; // 50% of max MP
 
-                                    player.body.set("위치", format!("{}/{}", respawn_zone, respawn_room));
+                                    player
+                                        .body
+                                        .set("위치", format!("{}/{}", respawn_zone, respawn_room));
                                     player.body.set("체력", respawn_hp.max(1));
                                     player.body.set("내공", respawn_mp.max(1));
                                     player.body.act = ActState::Stand; // Reset to standing
@@ -2570,7 +2908,10 @@ async fn handle_game_command(
                                     // Update world state position
                                     if let Ok(mut w) = get_world_state().write() {
                                         use crate::world::PlayerPosition;
-                                        let new_pos = PlayerPosition::new(respawn_zone.to_string(), respawn_room.to_string());
+                                        let new_pos = PlayerPosition::new(
+                                            respawn_zone.to_string(),
+                                            respawn_room.to_string(),
+                                        );
                                         w.player_positions.insert(player_name.clone(), new_pos);
                                     }
 
@@ -2588,7 +2929,8 @@ async fn handle_game_command(
                                     // Show room description after respawn (using build_room_lines)
                                     let others = vec![]; // No other players shown in respawn area
                                     if let Ok(room_str) = build_room_lines(&player_name, &others) {
-                                        let _ = broadcaster.send_to(addr, &format!("\r\n{}\r\n", room_str));
+                                        let _ = broadcaster
+                                            .send_to(addr, &format!("\r\n{}\r\n", room_str));
                                     }
 
                                     round.player_died = false; // Reset death flag
@@ -2608,12 +2950,8 @@ async fn handle_game_command(
                             String::new()
                         }
                     }
-                    Some(CommandResult::Ok) => {
-                        String::new()
-                    }
-                    Some(CommandResult::NoPrompt) => {
-                        String::new()
-                    }
+                    Some(CommandResult::Ok) => String::new(),
+                    Some(CommandResult::NoPrompt) => String::new(),
                     Some(CommandResult::SayToRoom(to_self, to_room)) => {
                         say_to_room = Some((player_name.clone(), zone.clone(), room, to_room));
                         format!("{}\r\n", to_self)
@@ -2670,12 +3008,18 @@ async fn handle_game_command(
                         broadcast_to_players = Some((names, msg));
                         String::new()
                     }
-                    Some(CommandResult::MobEvent { output_lines, set_position }) => {
+                    Some(CommandResult::MobEvent {
+                        output_lines,
+                        set_position,
+                    }) => {
                         let mut out = output_lines.join("\r\n");
                         if let Some((z, r)) = set_position {
                             let mut w = get_world_state().write().unwrap();
                             if w.room_cache.get_room(&z, &r).is_ok() {
-                                w.set_player_position(&player_name, PlayerPosition::new(z.clone(), r.clone()));
+                                w.set_player_position(
+                                    &player_name,
+                                    PlayerPosition::new(z.clone(), r.clone()),
+                                );
                                 w.spawn_mobs_for_room(&z, &r);
                                 room_append = Some((z, r, player_name.clone()));
                             } else {
@@ -2701,7 +3045,10 @@ async fn handle_game_command(
                         if let Some((z, r)) = set_position {
                             let mut w = get_world_state().write().unwrap();
                             if w.room_cache.get_room(&z, &r).is_ok() {
-                                w.set_player_position(&player_name, PlayerPosition::new(z.clone(), r.clone()));
+                                w.set_player_position(
+                                    &player_name,
+                                    PlayerPosition::new(z.clone(), r.clone()),
+                                );
                                 w.spawn_mobs_for_room(&z, &r);
                                 room_append = Some((z, r, player_name.clone()));
                             } else {
@@ -2723,9 +3070,20 @@ async fn handle_game_command(
                         out.push_str("\r\n");
                         out
                     }
-                    Some(CommandResult::StartScript { script_name, lines, use_rhai }) => {
+                    Some(CommandResult::StartScript {
+                        script_name,
+                        lines,
+                        use_rhai,
+                    }) => {
                         let (out_lines, next) = if use_rhai {
-                            run_script_chunk_rhai(&mut player.body, &script_name, None, None, None, None)
+                            run_script_chunk_rhai(
+                                &mut player.body,
+                                &script_name,
+                                None,
+                                None,
+                                None,
+                                None,
+                            )
                         } else {
                             run_script_chunk(&mut player.body, &lines, 0, None, None)
                         };
@@ -2735,7 +3093,14 @@ async fn handle_game_command(
                         }
                         match next {
                             ScriptNext::Complete => {}
-                            ScriptNext::Wait { line_num, prompt, persist_temp, from_confirm, script_ob: so, script_resume_op: sro } => {
+                            ScriptNext::Wait {
+                                line_num,
+                                prompt,
+                                persist_temp,
+                                from_confirm,
+                                script_ob: so,
+                                script_resume_op: sro,
+                            } => {
                                 set_pending = Some(PendingInput::Script {
                                     name: script_name,
                                     lines: if use_rhai { vec![] } else { lines },
@@ -2764,17 +3129,22 @@ async fn handle_game_command(
                             target_name
                         )
                     }
-                    Some(CommandResult::Kick { target_name, reason }) => {
+                    Some(CommandResult::Kick {
+                        target_name,
+                        reason,
+                    }) => {
                         _kick_pending = Some((target_name, reason));
                         String::new()
                     }
-                    Some(CommandResult::Ban { target_name, duration, reason }) => {
+                    Some(CommandResult::Ban {
+                        target_name,
+                        duration,
+                        reason,
+                    }) => {
                         _ban_pending = Some((target_name, duration, reason));
                         String::new()
                     }
-                    None => {
-                        "\x1b[1;31m☞ 무슨 말인지 모르겠어요. *^_^*\x1b[0;37m\r\n".to_string()
-                    }
+                    None => "\x1b[1;31m☞ 무슨 말인지 모르겠어요. *^_^*\x1b[0;37m\r\n".to_string(),
                 };
             }
         }
@@ -2811,7 +3181,10 @@ async fn handle_game_command(
                             if p.body.get_string("이름") == tname {
                                 if let Err(_e) = c.sender.send(line.clone()) {
                                     // Target player has broken pipe - mark for cleanup
-                                    tracing::warn!("Failed to send to emotion target {} (broken pipe)", tname);
+                                    tracing::warn!(
+                                        "Failed to send to emotion target {} (broken pipe)",
+                                        tname
+                                    );
                                     dead_addr = Some(a);
                                 }
                                 break;
@@ -2887,7 +3260,10 @@ async fn handle_game_command(
                         give_item_error = Some(("".to_string(), None));
                     } else if target_opt.is_none() {
                         clients.insert(giver_addr, giver_opt.unwrap());
-                        give_item_error = Some(("☞ 물품을 건내줄 무림인을 찾을 수 없어요. ^^".to_string(), None));
+                        give_item_error = Some((
+                            "☞ 물품을 건내줄 무림인을 찾을 수 없어요. ^^".to_string(),
+                            None,
+                        ));
                     } else {
                         let mut giver = giver_opt.unwrap();
                         let mut target = target_opt.unwrap();
@@ -2929,7 +3305,9 @@ async fn handle_game_command(
                                         continue; // 이번 건만 스킵, 다음 후보 계속
                                     }
                                     let w = o.getInt("무게");
-                                    if target_body.get_item_weight() + running_weight + w > target_body.get_str() * 10 {
+                                    if target_body.get_item_weight() + running_weight + w
+                                        > target_body.get_str() * 10
+                                    {
                                         if to_move.is_empty() {
                                             let iga = crate::hangul::han_iga(&target_name);
                                             let go = o.han_obj();
@@ -2940,7 +3318,8 @@ async fn handle_game_command(
                                         }
                                         break;
                                     }
-                                    if target_body.get_item_count() + to_move.len() + 1 > MAX_ITEMS {
+                                    if target_body.get_item_count() + to_move.len() + 1 > MAX_ITEMS
+                                    {
                                         if to_move.is_empty() {
                                             let iga = crate::hangul::han_iga(&target_name);
                                             let go = o.han_obj();
@@ -2986,7 +3365,10 @@ async fn handle_game_command(
                     give_item_error = Some(("".to_string(), None));
                 } else if target_opt.is_none() {
                     clients.insert(giver_addr, giver_opt.unwrap());
-                    give_item_error = Some(("☞ 물품을 건내줄 무림인을 찾을 수 없어요. ^^".to_string(), None));
+                    give_item_error = Some((
+                        "☞ 물품을 건내줄 무림인을 찾을 수 없어요. ^^".to_string(),
+                        None,
+                    ));
                 } else {
                     let mut giver = giver_opt.unwrap();
                     let mut target = target_opt.unwrap();
@@ -2996,11 +3378,18 @@ async fn handle_game_command(
                             let target_body = &mut tp.body;
                             let have = *giver_body.object.inv_stack.get(key).unwrap_or(&0);
                             if have < cnt {
-                                give_item_error = Some(("☞ 그런 아이템이 소지품에 없어요.".to_string(), None));
-                            } else if target_body.get_item_weight() + w * cnt > target_body.get_str() * 10 {
+                                give_item_error =
+                                    Some(("☞ 그런 아이템이 소지품에 없어요.".to_string(), None));
+                            } else if target_body.get_item_weight() + w * cnt
+                                > target_body.get_str() * 10
+                            {
                                 let iga = crate::hangul::han_iga(&target_name);
                                 let disp = get_item_display_name(key);
-                                let go = format!("\x1b[33m{}\x1b[37m{}", disp, crate::hangul::han_obj(&disp));
+                                let go = format!(
+                                    "\x1b[33m{}\x1b[37m{}",
+                                    disp,
+                                    crate::hangul::han_obj(&disp)
+                                );
                                 give_item_error = Some((
                                     format!("\x1b[1m{}\x1b[0;37m{} 무거워서 받지 못합니다.", target_name, iga),
                                     Some(format!("\r\n\x1b[1m{}\x1b[0;37m{} 줄려는 \x1b[36m{}\x1b[37m 무거워서 받지 못합니다.", giver_name, iga, go)),
@@ -3008,21 +3397,27 @@ async fn handle_game_command(
                             } else if target_body.get_item_count() + cnt_u > MAX_ITEMS {
                                 let iga = crate::hangul::han_iga(&target_name);
                                 let disp = get_item_display_name(key);
-                                let go = format!("\x1b[33m{}\x1b[37m{}", disp, crate::hangul::han_obj(&disp));
+                                let go = format!(
+                                    "\x1b[33m{}\x1b[37m{}",
+                                    disp,
+                                    crate::hangul::han_obj(&disp)
+                                );
                                 give_item_error = Some((
                                     format!("\x1b[1m{}\x1b[0;37m{} 수량 한계로 받지 못합니다.", target_name, iga),
                                     Some(format!("\r\n\x1b[1m{}\x1b[0;37m{} 줄려는 \x1b[36m{}\x1b[37m 수량 한계로 받지 못합니다.", giver_name, iga, go)),
                                 ));
                             } else {
                                 let should_remove = {
-                                    let r = giver_body.object.inv_stack.get_mut(key.as_str()).unwrap();
+                                    let r =
+                                        giver_body.object.inv_stack.get_mut(key.as_str()).unwrap();
                                     *r -= cnt;
                                     *r <= 0
                                 };
                                 if should_remove {
                                     giver_body.object.inv_stack.remove(key.as_str());
                                 }
-                                *target_body.object.inv_stack.entry(key.clone()).or_insert(0) += cnt;
+                                *target_body.object.inv_stack.entry(key.clone()).or_insert(0) +=
+                                    cnt;
                             }
                             clients.insert(giver_addr, giver);
                             clients.insert(taddr, target);
@@ -3049,138 +3444,141 @@ async fn handle_game_command(
                     }
                 }
             } else {
-            let (c, post, name_multi) = if give_item.is_some() {
-                let c = to_move.len();
-                if c == 0 {
-                    (0, String::new(), String::new())
-                } else if c == 1 {
-                    let o = to_move[0].lock().unwrap();
-                    (c, o.han_obj(), o.getName())
-                } else {
-                    let o = to_move[0].lock().unwrap();
-                    let n = o.getName();
-                    (c, n.clone(), n)
-                }
-            } else if let Some((ref key, cnt)) = give_item_stack {
-                let c = cnt as usize;
-                let name_multi = get_item_display_name(key);
-                let post = format!("\x1b[33m{}\x1b[37m{}", name_multi, crate::hangul::han_obj(&name_multi));
-                (c, post, name_multi)
-            } else {
-                (0, String::new(), String::new())
-            };
-            {
-                let mut clients = broadcaster.clients.lock();
-                if let Some(target) = clients.get_mut(&taddr).and_then(|c| c.player_mut()) {
-                    if let Some(amt) = give_silver {
-                        let have = target.body.get_int("은전");
-                        target.body.set("은전", have + amt);
-                    } else if let Some(amt) = give_gold {
-                        let have = target.body.get_int("금전");
-                        target.body.set("금전", have + amt);
+                let (c, post, name_multi) = if give_item.is_some() {
+                    let c = to_move.len();
+                    if c == 0 {
+                        (0, String::new(), String::new())
+                    } else if c == 1 {
+                        let o = to_move[0].lock().unwrap();
+                        (c, o.han_obj(), o.getName())
+                    } else {
+                        let o = to_move[0].lock().unwrap();
+                        let n = o.getName();
+                        (c, n.clone(), n)
                     }
-                    // give_item: 위 아이템 블록에서 이미 giver→target 이전함
-                }
-            }
-            let iga = crate::hangul::han_iga(&giver_name);
-            let (to_self, to_target, to_room) = if let Some(amt) = give_silver {
-                (
-                    format!("당신이 {}에게 은전 {}개를 줍니다.", target_name, amt),
-                    format!(
-                        "\r\n{}{} 당신에게 은전 {}개를 줍니다.",
-                        giver_name, iga, amt
-                    ),
-                    format!(
-                        "{}{} {}에게 은전 {}개를 줍니다.",
-                        giver_name, iga, target_name, amt
-                    ),
-                )
-            } else if let Some(amt) = give_gold {
-                (
-                    format!("당신이 {}에게 금전 {}개를 줍니다.", target_name, amt),
-                    format!(
-                        "\r\n{}{} 당신에게 금전 {}개를 줍니다.",
-                        giver_name, iga, amt
-                    ),
-                    format!(
-                        "{}{} {}에게 금전 {}개를 줍니다.",
-                        giver_name, iga, target_name, amt
-                    ),
-                )
-            } else {
-                if c == 0 {
-                    response = "☞ 그런 아이템이 소지품에 없어요.\r\n".to_string();
-                    (String::new(), String::new(), String::new())
+                } else if let Some((ref key, cnt)) = give_item_stack {
+                    let c = cnt as usize;
+                    let name_multi = get_item_display_name(key);
+                    let post = format!(
+                        "\x1b[33m{}\x1b[37m{}",
+                        name_multi,
+                        crate::hangul::han_obj(&name_multi)
+                    );
+                    (c, post, name_multi)
                 } else {
+                    (0, String::new(), String::new())
+                };
+                {
+                    let mut clients = broadcaster.clients.lock();
+                    if let Some(target) = clients.get_mut(&taddr).and_then(|c| c.player_mut()) {
+                        if let Some(amt) = give_silver {
+                            let have = target.body.get_int("은전");
+                            target.body.set("은전", have + amt);
+                        } else if let Some(amt) = give_gold {
+                            let have = target.body.get_int("금전");
+                            target.body.set("금전", have + amt);
+                        }
+                        // give_item: 위 아이템 블록에서 이미 giver→target 이전함
+                    }
+                }
+                let iga = crate::hangul::han_iga(&giver_name);
+                let (to_self, to_target, to_room) = if let Some(amt) = give_silver {
                     (
-                        if c == 1 {
-                            format!(
-                                "당신이 \x1b[1m{}\x1b[0;37m에게 \x1b[36m{}\x1b[37m 줍니다.",
-                                target_name, post
-                            )
-                        } else {
-                            format!(
+                        format!("당신이 {}에게 은전 {}개를 줍니다.", target_name, amt),
+                        format!(
+                            "\r\n{}{} 당신에게 은전 {}개를 줍니다.",
+                            giver_name, iga, amt
+                        ),
+                        format!(
+                            "{}{} {}에게 은전 {}개를 줍니다.",
+                            giver_name, iga, target_name, amt
+                        ),
+                    )
+                } else if let Some(amt) = give_gold {
+                    (
+                        format!("당신이 {}에게 금전 {}개를 줍니다.", target_name, amt),
+                        format!(
+                            "\r\n{}{} 당신에게 금전 {}개를 줍니다.",
+                            giver_name, iga, amt
+                        ),
+                        format!(
+                            "{}{} {}에게 금전 {}개를 줍니다.",
+                            giver_name, iga, target_name, amt
+                        ),
+                    )
+                } else {
+                    if c == 0 {
+                        response = "☞ 그런 아이템이 소지품에 없어요.\r\n".to_string();
+                        (String::new(), String::new(), String::new())
+                    } else {
+                        (
+                            if c == 1 {
+                                format!(
+                                    "당신이 \x1b[1m{}\x1b[0;37m에게 \x1b[36m{}\x1b[37m 줍니다.",
+                                    target_name, post
+                                )
+                            } else {
+                                format!(
                                 "당신이 \x1b[1m{}\x1b[0;37m에게 \x1b[36m{}\x1b[37m {}개를 줍니다.",
                                 target_name, name_multi, c
                             )
-                        },
-                        if c == 1 {
-                            format!(
-                                "\r\n\x1b[1m{}\x1b[0;37m{} 당신에게 \x1b[36m{}\x1b[37m 줍니다.",
-                                giver_name, iga, post
-                            )
-                        } else {
-                            format!(
+                            },
+                            if c == 1 {
+                                format!(
+                                    "\r\n\x1b[1m{}\x1b[0;37m{} 당신에게 \x1b[36m{}\x1b[37m 줍니다.",
+                                    giver_name, iga, post
+                                )
+                            } else {
+                                format!(
                                 "\r\n\x1b[1m{}\x1b[0;37m{} 당신에게 \x1b[36m{}\x1b[37m {}개를 줍니다.",
                                 giver_name, iga, name_multi, c
                             )
-                        },
-                        if c == 1 {
-                            format!(
-                                "{}{} {}에게 \x1b[36m{}\x1b[37m 줍니다.",
-                                giver_name, iga, target_name, post
-                            )
-                        } else {
-                            format!(
-                                "{}{} {}에게 \x1b[36m{}\x1b[37m {}개를 줍니다.",
-                                giver_name, iga, target_name, name_multi, c
-                            )
-                        },
-                    )
+                            },
+                            if c == 1 {
+                                format!(
+                                    "{}{} {}에게 \x1b[36m{}\x1b[37m 줍니다.",
+                                    giver_name, iga, target_name, post
+                                )
+                            } else {
+                                format!(
+                                    "{}{} {}에게 \x1b[36m{}\x1b[37m {}개를 줍니다.",
+                                    giver_name, iga, target_name, name_multi, c
+                                )
+                            },
+                        )
+                    }
+                };
+                if !to_self.is_empty() {
+                    response = format!("{}\r\n", to_self);
+                    let clients = broadcaster.clients.lock();
+                    for (_a, c) in clients.iter() {
+                        if *_a == taddr {
+                            let _ = c.sender.send(format!("\r\n{}\r\n", to_target));
+                            break;
+                        }
+                    }
+                    send_to_others_in_room(
+                        broadcaster,
+                        &z,
+                        &r,
+                        &[giver_name.as_str(), target_name.as_str()],
+                        &to_room,
+                    );
                 }
-            };
-            if !to_self.is_empty() {
-                response = format!("{}\r\n", to_self);
-                let clients = broadcaster.clients.lock();
-                for (_a, c) in clients.iter() {
-                    if *_a == taddr {
-                        let _ = c.sender.send(format!("\r\n{}\r\n", to_target));
-                        break;
+                {
+                    let mut clients = broadcaster.clients.lock();
+                    if let Some(p) = clients.get_mut(&giver_addr).and_then(|c| c.player_mut()) {
+                        let path = format!("data/user/{}.json", p.body.get_name());
+                        let _ = save_body_to_json(&mut p.body, &path);
+                    }
+                    if let Some(p) = clients.get_mut(&taddr).and_then(|c| c.player_mut()) {
+                        let path = format!("data/user/{}.json", p.body.get_name());
+                        let _ = save_body_to_json(&mut p.body, &path);
                     }
                 }
-                send_to_others_in_room(
-                    broadcaster,
-                    &z,
-                    &r,
-                    &[giver_name.as_str(), target_name.as_str()],
-                    &to_room,
-                );
-            }
-            {
-                let mut clients = broadcaster.clients.lock();
-                if let Some(p) = clients.get_mut(&giver_addr).and_then(|c| c.player_mut()) {
-                    let path = format!("data/user/{}.json", p.body.get_name());
-                    let _ = save_body_to_json(&mut p.body, &path);
-                }
-                if let Some(p) = clients.get_mut(&taddr).and_then(|c| c.player_mut()) {
-                    let path = format!("data/user/{}.json", p.body.get_name());
-                    let _ = save_body_to_json(&mut p.body, &path);
-                }
-            }
             } // else of give_item_error (c, post, name_multi, to_self/to_target/to_room)
         } else {
-            response =
-                "☞ 물품을 건내줄 무림인을 찾을 수 없어요. ^^\r\n".to_string();
+            response = "☞ 물품을 건내줄 무림인을 찾을 수 없어요. ^^\r\n".to_string();
         }
     }
     if let Some(ref msg) = shout_to_broadcast {
@@ -3213,7 +3611,10 @@ async fn handle_game_command(
         }
         // Clean up dead clients
         for addr in dead_addrs {
-            tracing::warn!("Removing dead client {} due to send failure in broadcast_to_players", addr);
+            tracing::warn!(
+                "Removing dead client {} due to send failure in broadcast_to_players",
+                addr
+            );
             clients.remove(&addr);
         }
     }
@@ -3237,8 +3638,14 @@ async fn handle_game_command(
                     tell_response = format!("\x1b[1;31m☞ 전음 거부중이에요. ^^\x1b[0;37m\r\n");
                     break;
                 }
-                let msg_to_sender = format!("[\x1b[1m\x1b[36m전음\x1b[0m\x1b[37m] {}에게 보냄 : {}", target_name, message);
-                let msg_to_target = format!("\r\n[\x1b[1m\x1b[36m전음\x1b[0m\x1b[37m] {} : {}\r\n", sender_name, message);
+                let msg_to_sender = format!(
+                    "[\x1b[1m\x1b[36m전음\x1b[0m\x1b[37m] {}에게 보냄 : {}",
+                    target_name, message
+                );
+                let msg_to_target = format!(
+                    "\r\n[\x1b[1m\x1b[36m전음\x1b[0m\x1b[37m] {} : {}\r\n",
+                    sender_name, message
+                );
                 tell_response = format!("{}\r\n", msg_to_sender);
                 tell_target = Some((a, msg_to_target));
                 break;
@@ -3267,7 +3674,6 @@ async fn handle_game_command(
 
     Ok(())
 }
-
 
 /// doumi.json 미사용. 도우미는 lib/doumi/*.rhai 스크립트로 동작.
 /// 관리자 명령 '업데이트 도우미' 호출 시 호환용으로 Ok(()) 반환.

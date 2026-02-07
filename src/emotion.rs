@@ -21,9 +21,8 @@ use crate::player::Body;
 /// emotion.json 로딩. "감정표현" → 키별 [kd0, kd1] 또는 [kd0, kd1, kd2].
 /// 키 "감사 감"처럼 공백으로 여러 alias가 있으면 각 alias마다 같은 Vec를 등록.
 /// RwLock로 감싸 관리자 명령 '업데이트 표현'에서 재로딩 가능.
-static EMOTION_MAP: Lazy<RwLock<HashMap<String, Vec<String>>>> = Lazy::new(|| {
-    RwLock::new(load_emotion_map().unwrap_or_default())
-});
+static EMOTION_MAP: Lazy<RwLock<HashMap<String, Vec<String>>>> =
+    Lazy::new(|| RwLock::new(load_emotion_map().unwrap_or_default()));
 
 #[derive(serde::Deserialize)]
 struct EmotionJson {
@@ -94,13 +93,22 @@ pub fn make_script(line: &str, i: &str, u: Option<&str>, sub: &str) -> (String, 
         return (b1, String::new(), b3);
     }
     let u = u.unwrap();
-    let b1 = line.replace("[공]", "당신").replace("[방]", u).replace("[방성]", u);
+    let b1 = line
+        .replace("[공]", "당신")
+        .replace("[방]", u)
+        .replace("[방성]", u);
     let b1 = post_position_all(&b1);
 
-    let b2 = line.replace("[공]", i).replace("[방]", "당신").replace("[방성]", "당신");
+    let b2 = line
+        .replace("[공]", i)
+        .replace("[방]", "당신")
+        .replace("[방성]", "당신");
     let b2 = post_position_all(&b2);
 
-    let b3 = line.replace("[공]", i).replace("[방]", u).replace("[방성]", u);
+    let b3 = line
+        .replace("[공]", i)
+        .replace("[방]", u)
+        .replace("[방성]", u);
     let b3 = post_position_all(&b3);
     (b1, b2, b3)
 }
@@ -108,10 +116,7 @@ pub fn make_script(line: &str, i: &str, u: Option<&str>, sub: &str) -> (String, 
 /// find_in_room에서 반환. 플레이어면 접촉거부 여부 포함.
 #[derive(Debug, Clone)]
 pub enum EmotionTarget {
-    Player {
-        name: String,
-        contact_refuse: bool,
-    },
+    Player { name: String, contact_refuse: bool },
     Mob { name: String },
 }
 
@@ -160,7 +165,9 @@ pub fn do_emotion(
             let e = if *contact_refuse && kd.len() >= 3 {
                 kd[2].as_str()
             } else {
-                kd.get(1).map(|s| s.as_str()).unwrap_or_else(|| kd[0].as_str())
+                kd.get(1)
+                    .map(|s| s.as_str())
+                    .unwrap_or_else(|| kd[0].as_str())
             };
             make_script(e, &i, u_ref, sub_rest)
         }

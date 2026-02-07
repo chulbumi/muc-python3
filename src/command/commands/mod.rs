@@ -2,38 +2,38 @@
 //!
 //! This module contains the core game commands that players can use.
 
-pub mod movement;
-pub mod info;
-pub mod communication;
-pub mod combat;
-pub mod skills;
-pub mod vision;
-pub mod script;
-pub mod system;
-pub mod give;
-pub mod update;
-pub mod note;
-pub mod equipment;
 pub mod admin;
+pub mod combat;
+pub mod communication;
+pub mod equipment;
+pub mod give;
+pub mod info;
+pub mod movement;
+pub mod note;
+pub mod script;
+pub mod skills;
+pub mod system;
+pub mod update;
+pub mod vision;
 
-pub use movement::*;
-pub use info::*;
-pub use communication::*;
-pub use combat::*;
-pub use skills::*;
-pub use vision::*;
-pub use script::*;
-pub use system::*;
-pub use give::*;
-pub use update::*;
-pub use note::*;
-pub use equipment::*;
 pub use admin::*;
+pub use combat::*;
+pub use communication::*;
+pub use equipment::*;
+pub use give::*;
+pub use info::*;
+pub use movement::*;
+pub use note::*;
+pub use script::*;
+pub use skills::*;
+pub use system::*;
+pub use update::*;
+pub use vision::*;
 
-use std::sync::Arc;
-use crate::command::{CommandResult, CommandFn};
 use crate::command::registry::CommandRegistry;
+use crate::command::{CommandFn, CommandResult};
 use crate::player::Body;
+use std::sync::Arc;
 
 /// Registers all basic commands with the registry
 pub fn register_basic_commands(registry: &mut CommandRegistry) {

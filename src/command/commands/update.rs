@@ -3,10 +3,10 @@
 //! JSON·설정 등을 게임 내에서 다시 로드. 관리자등급 1000 이상.
 //! 파이썬 cmds/업데이트.py 참조. 현재 표현(emotion.json), 도우미(doumi.json) 지원.
 
-use std::sync::Arc;
-use crate::command::CommandResult;
 use crate::command::registry::CommandRegistry;
+use crate::command::CommandResult;
 use crate::player::Body;
+use std::sync::Arc;
 
 fn update_command(player: &mut Body, args: &[&str]) -> CommandResult {
     if player.get_int("관리자등급") < 1000 {
@@ -15,7 +15,8 @@ fn update_command(player: &mut Body, args: &[&str]) -> CommandResult {
     let sub = args.first().copied().unwrap_or("").trim();
     if sub.is_empty() {
         return CommandResult::Output(
-            "* 명령어, 무림별호, 도움말, 무공, 표현, 도우미, 메인설정, 스크립트 중에 선택하세요".to_string(),
+            "* 명령어, 무림별호, 도움말, 무공, 표현, 도우미, 메인설정, 스크립트 중에 선택하세요"
+                .to_string(),
         );
     }
     match sub {

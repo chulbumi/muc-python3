@@ -7,10 +7,10 @@
 //! call_out("func_name", delay_seconds);
 //! ```
 
-use std::collections::HashMap;
-use std::time::{Duration, Instant};
-use std::sync::Arc;
 use parking_lot::RwLock;
+use std::collections::HashMap;
+use std::sync::Arc;
+use std::time::{Duration, Instant};
 use tracing::{debug, warn};
 
 use crate::network::Broadcaster;
@@ -164,17 +164,14 @@ impl CallOutRegistry {
     pub fn get_by_target(&self, target: &str) -> Vec<&CallOutTask> {
         self.by_target
             .get(target)
-            .map(|ids| {
-                ids.iter()
-                    .filter_map(|id| self.tasks.get(id))
-                    .collect()
-            })
+            .map(|ids| ids.iter().filter_map(|id| self.tasks.get(id)).collect())
             .unwrap_or_default()
     }
 
     /// Get all tasks (mutable) for processing
     pub fn get_all_due(&mut self) -> Vec<CallOutTask> {
-        let due_ids: Vec<CallOutId> = self.tasks
+        let due_ids: Vec<CallOutId> = self
+            .tasks
             .iter()
             .filter(|(_, task)| task.is_due())
             .map(|(id, _)| id.clone())
@@ -198,7 +195,8 @@ impl CallOutRegistry {
 }
 
 /// Script runner for call_out: (target, script, function, args) -> Result.
-pub type ScriptRunnerFn = dyn Fn(&str, Option<&str>, &str, Vec<serde_json::Value>) -> Result<(), String> + Send + Sync;
+pub type ScriptRunnerFn =
+    dyn Fn(&str, Option<&str>, &str, Vec<serde_json::Value>) -> Result<(), String> + Send + Sync;
 
 /// Call Out Scheduler - Manages and executes delayed function calls
 pub struct CallOutScheduler {
@@ -255,7 +253,10 @@ impl CallOutScheduler {
         let mut registry = self.registry.write();
         registry.add(task);
 
-        debug!("call_out scheduled: {}::{} in {:?}", target, function, delay);
+        debug!(
+            "call_out scheduled: {}::{} in {:?}",
+            target, function, delay
+        );
         id
     }
 
@@ -280,7 +281,10 @@ impl CallOutScheduler {
         let mut registry = self.registry.write();
         registry.add(task);
 
-        debug!("repeating call_out scheduled: {}::{} every {:?}", target, function, delay);
+        debug!(
+            "repeating call_out scheduled: {}::{} every {:?}",
+            target, function, delay
+        );
         id
     }
 
@@ -369,13 +373,8 @@ impl CallOutScheduler {
 
             // Reschedule if repeating
             if repeating {
-                let new_task = CallOutTask::repeating(
-                    target,
-                    function,
-                    delay,
-                    task.args,
-                    task.script,
-                );
+                let new_task =
+                    CallOutTask::repeating(target, function, delay, task.args, task.script);
                 if let Some(mut registry) = self.registry.try_write() {
                     registry.add(new_task);
                 }
@@ -406,7 +405,10 @@ impl CallOutScheduler {
                     };
                 }
                 Err(e) => {
-                    warn!("call_out script_runner failed {}::{}: {}", task.target, task.function, e);
+                    warn!(
+                        "call_out script_runner failed {}::{}: {}",
+                        task.target, task.function, e
+                    );
                     return CallOutResult {
                         task_id: task.id.clone(),
                         success: false,
@@ -418,7 +420,10 @@ impl CallOutScheduler {
         }
 
         // 알 수 없는 function 또는 script 없음: 로그만
-        warn!("call_out unknown or no script: {}::{}", task.target, task.function);
+        warn!(
+            "call_out unknown or no script: {}::{}",
+            task.target, task.function
+        );
         CallOutResult {
             task_id: task.id.clone(),
             success: true,
@@ -434,27 +439,36 @@ pub fn create_call_out_engine(scheduler: Arc<CallOutScheduler>) -> rhai::Engine 
     let scheduler_clone = scheduler.clone();
 
     // call_out(target, function, delay) — script=None
-    engine.register_fn("call_out", move |target: &str, function: &str, delay: i64| {
-        scheduler_clone.call_out(
-            target,
-            function,
-            Duration::from_secs(delay.max(0) as u64),
-            vec![],
-            None,
-        );
-    });
+    engine.register_fn(
+        "call_out",
+        move |target: &str, function: &str, delay: i64| {
+            scheduler_clone.call_out(
+                target,
+                function,
+                Duration::from_secs(delay.max(0) as u64),
+                vec![],
+                None,
+            );
+        },
+    );
 
     // remove_call_out(target, function)
     let scheduler_clone = scheduler.clone();
-    engine.register_fn("remove_call_out", move |target: &str, function: &str| -> bool {
-        scheduler_clone.remove_call_out_by_name(target, function)
-    });
+    engine.register_fn(
+        "remove_call_out",
+        move |target: &str, function: &str| -> bool {
+            scheduler_clone.remove_call_out_by_name(target, function)
+        },
+    );
 
     // find_call_out(target, function)
     let scheduler_clone = scheduler.clone();
-    engine.register_fn("find_call_out", move |target: &str, function: &str| -> bool {
-        scheduler_clone.find_call_out(target, function).is_some()
-    });
+    engine.register_fn(
+        "find_call_out",
+        move |target: &str, function: &str| -> bool {
+            scheduler_clone.find_call_out(target, function).is_some()
+        },
+    );
 
     engine
 }

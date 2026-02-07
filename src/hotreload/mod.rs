@@ -9,7 +9,7 @@
 
 use std::sync::Arc;
 use tokio::sync::RwLock;
-use tracing::{info, warn, debug};
+use tracing::{debug, info, warn};
 
 use crate::script::ScriptStorage;
 
@@ -102,7 +102,9 @@ pub fn reload_object(
 }
 
 /// Reload all modified objects
-pub fn reload_all_modified(storage: &mut ScriptStorage) -> Result<Vec<ReloadResult>, Box<dyn std::error::Error>> {
+pub fn reload_all_modified(
+    storage: &mut ScriptStorage,
+) -> Result<Vec<ReloadResult>, Box<dyn std::error::Error>> {
     info!("Reloading all modified objects");
 
     let reloaded = storage.reload_all()?;
@@ -128,7 +130,10 @@ impl HotReloadManager {
     }
 
     /// Reload a specific object
-    pub async fn reload(&self, object_path: &str) -> Result<ReloadResult, Box<dyn std::error::Error>> {
+    pub async fn reload(
+        &self,
+        object_path: &str,
+    ) -> Result<ReloadResult, Box<dyn std::error::Error>> {
         let mut storage = self.storage.write().await;
         reload_object(&mut storage, object_path)
     }
@@ -141,9 +146,7 @@ impl HotReloadManager {
 
     /// Start the hot reload watcher task
     pub fn start_watcher(self) -> tokio::task::JoinHandle<()> {
-        tokio::spawn(async move {
-            self.watch_files().await
-        })
+        tokio::spawn(async move { self.watch_files().await })
     }
 
     /// Watch for file changes and auto-reload
@@ -186,9 +189,7 @@ pub fn create_reload_engine(storage: Arc<RwLock<ScriptStorage>>) -> rhai::Engine
     });
 
     // query_hot_reload() - check if enabled
-    engine.register_fn("query_hot_reload", || -> bool {
-        true
-    });
+    engine.register_fn("query_hot_reload", || -> bool { true });
 
     engine
 }
@@ -237,10 +238,7 @@ mod tests {
     #[tokio::test]
     async fn test_hot_reload_manager_new() {
         let storage = Arc::new(RwLock::new(ScriptStorage::new(ScriptConfig::default())));
-        let manager = HotReloadManager::new(
-            storage,
-            ReloadConfig::default(),
-        );
+        let manager = HotReloadManager::new(storage, ReloadConfig::default());
 
         // Should be able to reload all
         let count = manager.reload_all().await.unwrap();

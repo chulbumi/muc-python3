@@ -2,14 +2,23 @@
 //!
 //! Handles displaying player's learned skills and training status.
 
-use crate::command::CommandResult;
 use crate::command::registry::CommandRegistry;
+use crate::command::CommandResult;
 use crate::player::Body;
 use std::sync::Arc;
 
 /// Skill level types matching Python Body.skillLvType
 pub const SKILL_LEVEL_TYPES: &[&str] = &[
-    "초급", "중급", "상급", "고급", "특급", "절정", "초절정", "회복", "방어", "기타"
+    "초급",
+    "중급",
+    "상급",
+    "고급",
+    "특급",
+    "절정",
+    "초절정",
+    "회복",
+    "방어",
+    "기타",
 ];
 
 /// Skill level values matching Python Body.skillLv
@@ -53,7 +62,11 @@ fn mugong_command(player: &mut Body, _args: &[&str]) -> CommandResult {
     let skills: Vec<&str> = if skill_list.is_empty() {
         Vec::new()
     } else {
-        skill_list.split(',').map(|s| s.trim()).filter(|s| !s.is_empty()).collect()
+        skill_list
+            .split(',')
+            .map(|s| s.trim())
+            .filter(|s| !s.is_empty())
+            .collect()
     };
 
     if skills.is_empty() {
@@ -65,7 +78,8 @@ fn mugong_command(player: &mut Body, _args: &[&str]) -> CommandResult {
 
         // Get skill map for levels
         let skill_training = player.get_string("무공숙련도");
-        let skill_levels: std::collections::HashMap<String, i64> = parse_skill_training(&skill_training);
+        let skill_levels: std::collections::HashMap<String, i64> =
+            parse_skill_training(&skill_training);
 
         let mut count = 0;
         for skill_name in &skills {
@@ -97,13 +111,17 @@ fn mugong_command(player: &mut Body, _args: &[&str]) -> CommandResult {
 
         // Currently training
         if !secret_training.is_empty() {
-            output += &format!("\x1b[1m\x1b[33m{}\x1b[0m\x1b[40m\x1b[37m(수련중)\r\n", secret_training);
+            output += &format!(
+                "\x1b[1m\x1b[33m{}\x1b[0m\x1b[40m\x1b[37m(수련중)\r\n",
+                secret_training
+            );
             count += 1;
         }
 
         // Fully learned secret skills
         if !secret_learned.is_empty() {
-            let secrets: Vec<&str> = secret_learned.split(',')
+            let secrets: Vec<&str> = secret_learned
+                .split(',')
                 .map(|s| s.trim())
                 .filter(|s| !s.is_empty())
                 .collect();
@@ -171,7 +189,11 @@ pub fn register_skill_commands(registry: &mut CommandRegistry) {
     // 무공 (Mugong/Skills)
     registry.register(crate::command::registry::CommandInfo {
         name: "무공".to_string(),
-        aliases: vec!["기술".to_string(), "skills".to_string(), "skill".to_string()],
+        aliases: vec![
+            "기술".to_string(),
+            "skills".to_string(),
+            "skill".to_string(),
+        ],
         handler: Arc::new(mugong_command),
         level: 0,
         description: "습득한 무공/기술 목록을 보여줍니다.".to_string(),

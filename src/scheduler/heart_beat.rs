@@ -208,16 +208,19 @@ pub fn create_heart_beat_engine(manager: Arc<HeartBeatManager>) -> rhai::Engine 
 
     // set_heart_beat(enabled)
     let manager_clone = manager.clone();
-    engine.register_fn("set_heart_beat", move |object_id: &str, enabled: bool| -> bool {
-        // Note: This is a synchronous wrapper around an async function
-        // In practice, we'd need to handle this differently
-        let rt = tokio::runtime::Handle::try_current();
-        if let Ok(handle) = rt {
-            handle.block_on(manager_clone.set_heart_beat(object_id, enabled))
-        } else {
-            false
-        }
-    });
+    engine.register_fn(
+        "set_heart_beat",
+        move |object_id: &str, enabled: bool| -> bool {
+            // Note: This is a synchronous wrapper around an async function
+            // In practice, we'd need to handle this differently
+            let rt = tokio::runtime::Handle::try_current();
+            if let Ok(handle) = rt {
+                handle.block_on(manager_clone.set_heart_beat(object_id, enabled))
+            } else {
+                false
+            }
+        },
+    );
 
     // has_heart_beat()
     let manager_clone = manager.clone();

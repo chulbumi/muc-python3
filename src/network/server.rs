@@ -12,7 +12,9 @@ use crate::command::commands::register_basic_commands;
 use crate::command::commands::script::register_script_commands;
 use crate::command::CommandRegistry;
 use crate::network::broadcaster::Broadcaster;
-use crate::network::client::{get_other_players_desc_in_room, get_other_players_map_for_look, handle_client};
+use crate::network::client::{
+    get_other_players_desc_in_room, get_other_players_map_for_look, handle_client,
+};
 use crate::script::{ScriptConfig, ScriptStorage};
 use crate::world::{get_world_state, RoomCache};
 
@@ -80,12 +82,22 @@ pub async fn run_server(config: ServerConfig) -> Result<(), Box<dyn std::error::
             get_other_players_desc_in_room(bc.as_ref(), &pos.zone, &pos.room, exclude)
         }
     });
-    let get_other_players_map: Arc<dyn Fn() -> std::collections::HashMap<String, String> + Send + Sync> =
-        Arc::new(get_other_players_map_for_look);
-    let script_storage = Arc::new(tokio::sync::RwLock::new(ScriptStorage::new(ScriptConfig::default())));
+    let get_other_players_map: Arc<
+        dyn Fn() -> std::collections::HashMap<String, String> + Send + Sync,
+    > = Arc::new(get_other_players_map_for_look);
+    let script_storage = Arc::new(tokio::sync::RwLock::new(ScriptStorage::new(
+        ScriptConfig::default(),
+    )));
     let mut registry = CommandRegistry::new();
     register_basic_commands(&mut registry);
-    register_script_commands(&mut registry, script_storage, Some(get_other_players_desc), Some(get_other_players_map), None).await;
+    register_script_commands(
+        &mut registry,
+        script_storage,
+        Some(get_other_players_desc),
+        Some(get_other_players_map),
+        None,
+    )
+    .await;
     let command_registry = Arc::new(registry);
     let room_cache = Arc::new(Mutex::new(RoomCache::new()));
 
@@ -99,7 +111,16 @@ pub async fn run_server(config: ServerConfig) -> Result<(), Box<dyn std::error::
                 let room_cache = room_cache.clone();
 
                 tokio::spawn(async move {
-                    if let Err(e) = handle_client(stream, addr, broadcaster_clone, command_registry, room_cache, None).await {
+                    if let Err(e) = handle_client(
+                        stream,
+                        addr,
+                        broadcaster_clone,
+                        command_registry,
+                        room_cache,
+                        None,
+                    )
+                    .await
+                    {
                         error!("Error handling client {}: {}", addr, e);
                     }
                 });
@@ -134,12 +155,22 @@ pub async fn run_server_with_broadcaster(
             get_other_players_desc_in_room(bc.as_ref(), &pos.zone, &pos.room, exclude)
         }
     });
-    let get_other_players_map: Arc<dyn Fn() -> std::collections::HashMap<String, String> + Send + Sync> =
-        Arc::new(get_other_players_map_for_look);
-    let script_storage = Arc::new(tokio::sync::RwLock::new(ScriptStorage::new(ScriptConfig::default())));
+    let get_other_players_map: Arc<
+        dyn Fn() -> std::collections::HashMap<String, String> + Send + Sync,
+    > = Arc::new(get_other_players_map_for_look);
+    let script_storage = Arc::new(tokio::sync::RwLock::new(ScriptStorage::new(
+        ScriptConfig::default(),
+    )));
     let mut registry = CommandRegistry::new();
     register_basic_commands(&mut registry);
-    register_script_commands(&mut registry, script_storage, Some(get_other_players_desc), Some(get_other_players_map), None).await;
+    register_script_commands(
+        &mut registry,
+        script_storage,
+        Some(get_other_players_desc),
+        Some(get_other_players_map),
+        None,
+    )
+    .await;
     let command_registry = Arc::new(registry);
     let room_cache = Arc::new(Mutex::new(RoomCache::new()));
 
@@ -153,7 +184,16 @@ pub async fn run_server_with_broadcaster(
                 let room_cache = room_cache.clone();
 
                 tokio::spawn(async move {
-                    if let Err(e) = handle_client(stream, addr, broadcaster_clone, command_registry, room_cache, None).await {
+                    if let Err(e) = handle_client(
+                        stream,
+                        addr,
+                        broadcaster_clone,
+                        command_registry,
+                        room_cache,
+                        None,
+                    )
+                    .await
+                    {
                         error!("Error handling client {}: {}", addr, e);
                     }
                 });
@@ -187,12 +227,22 @@ pub async fn run_echo_server(port: u16) -> Result<(), Box<dyn std::error::Error>
             get_other_players_desc_in_room(bc.as_ref(), &pos.zone, &pos.room, exclude)
         }
     });
-    let get_other_players_map: Arc<dyn Fn() -> std::collections::HashMap<String, String> + Send + Sync> =
-        Arc::new(get_other_players_map_for_look);
-    let script_storage = Arc::new(tokio::sync::RwLock::new(ScriptStorage::new(ScriptConfig::default())));
+    let get_other_players_map: Arc<
+        dyn Fn() -> std::collections::HashMap<String, String> + Send + Sync,
+    > = Arc::new(get_other_players_map_for_look);
+    let script_storage = Arc::new(tokio::sync::RwLock::new(ScriptStorage::new(
+        ScriptConfig::default(),
+    )));
     let mut registry = CommandRegistry::new();
     register_basic_commands(&mut registry);
-    register_script_commands(&mut registry, script_storage, Some(get_other_players_desc), Some(get_other_players_map), None).await;
+    register_script_commands(
+        &mut registry,
+        script_storage,
+        Some(get_other_players_desc),
+        Some(get_other_players_map),
+        None,
+    )
+    .await;
     let command_registry = Arc::new(registry);
     let room_cache = Arc::new(Mutex::new(RoomCache::new()));
 
@@ -206,7 +256,16 @@ pub async fn run_echo_server(port: u16) -> Result<(), Box<dyn std::error::Error>
                 let room_cache = room_cache.clone();
 
                 tokio::spawn(async move {
-                    if let Err(e) = handle_client(stream, addr, broadcaster_clone, command_registry, room_cache, None).await {
+                    if let Err(e) = handle_client(
+                        stream,
+                        addr,
+                        broadcaster_clone,
+                        command_registry,
+                        room_cache,
+                        None,
+                    )
+                    .await
+                    {
                         eprintln!("Error handling client {}: {}", addr, e);
                     }
                 });

@@ -4,13 +4,12 @@
 //! - CFG format: A custom configuration format with segments, keys, and data
 //! - JSON format: Standard JSON files
 
-pub mod script;
 pub mod json;
+pub mod script;
 
 // Re-export main types and functions
-pub use script::{load_script, save_script, ScriptValue, ScriptValueInner};
 pub use json::{load_json, save_json};
-
+pub use script::{load_script, save_script, ScriptValue, ScriptValueInner};
 
 /// Result type for loader operations
 pub type Result<T> = std::result::Result<T, LoaderError>;

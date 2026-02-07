@@ -2,16 +2,16 @@
 //!
 //! Provides TCP server, client handling, and broadcast functionality.
 
+pub mod broadcaster;
 pub mod client;
 pub mod server;
-pub mod broadcaster;
 
-pub use client::{Client, ClientState};
-pub use server::{run_server, run_echo_server};
 pub use broadcaster::Broadcaster;
+pub use client::{Client, ClientState};
+pub use server::{run_echo_server, run_server};
 
-use std::io;
 use bytes::BytesMut;
+use std::io;
 
 /// Maximum line length for client input (한 줄/명령). 1024로 상향(붙여넣기 등).
 pub const MAX_LENGTH: usize = 1024;
@@ -47,7 +47,10 @@ impl DelimiterCodec {
             self.buffer.clear();
             return Err(io::Error::new(
                 io::ErrorKind::InvalidData,
-                format!("한 줄이 {}바이트를 넘습니다. (붙여넣기 시 일부만 넣어 주세요.)", self.max_length),
+                format!(
+                    "한 줄이 {}바이트를 넘습니다. (붙여넣기 시 일부만 넣어 주세요.)",
+                    self.max_length
+                ),
             ));
         }
 

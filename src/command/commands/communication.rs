@@ -2,20 +2,33 @@
 //!
 //! Handles player communication: 말 (say), 외쳐 (shout)
 
-use crate::command::CommandResult;
 use crate::command::registry::CommandRegistry;
-use crate::player::Body;
+use crate::command::CommandResult;
 use crate::hangul;
+use crate::player::Body;
 use std::sync::Arc;
 
 /// 말 메시지 내 {밝},{빨} 등 ANSI 치환. 파이썬 cmds/말.py ANSI()
 fn ansi_replace(msg: &str) -> String {
     const PAIRS: &[(&str, &str)] = &[
-        ("{밝}", "\x1b[1m"), ("{어}", "\x1b[0m"), ("{검}", "\x1b[30m"), ("{빨}", "\x1b[31m"),
-        ("{초}", "\x1b[32m"), ("{노}", "\x1b[33m"), ("{파}", "\x1b[34m"), ("{자}", "\x1b[35m"),
-        ("{하}", "\x1b[36m"), ("{흰}", "\x1b[37m"),
-        ("{배검}", "\x1b[40m"), ("{배빨}", "\x1b[41m"), ("{배초}", "\x1b[42m"), ("{배노}", "\x1b[43m"),
-        ("{배파}", "\x1b[44m"), ("{배자}", "\x1b[45m"), ("{배하}", "\x1b[46m"), ("{배흰}", "\x1b[47m"),
+        ("{밝}", "\x1b[1m"),
+        ("{어}", "\x1b[0m"),
+        ("{검}", "\x1b[30m"),
+        ("{빨}", "\x1b[31m"),
+        ("{초}", "\x1b[32m"),
+        ("{노}", "\x1b[33m"),
+        ("{파}", "\x1b[34m"),
+        ("{자}", "\x1b[35m"),
+        ("{하}", "\x1b[36m"),
+        ("{흰}", "\x1b[37m"),
+        ("{배검}", "\x1b[40m"),
+        ("{배빨}", "\x1b[41m"),
+        ("{배초}", "\x1b[42m"),
+        ("{배노}", "\x1b[43m"),
+        ("{배파}", "\x1b[44m"),
+        ("{배자}", "\x1b[45m"),
+        ("{배하}", "\x1b[46m"),
+        ("{배흰}", "\x1b[47m"),
     ];
     let mut s = msg.to_string();
     for (k, v) in PAIRS {

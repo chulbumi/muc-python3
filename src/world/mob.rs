@@ -159,7 +159,9 @@ impl MobInstance {
     /// Create a new mob instance. room은 "1" 또는 사용자맵 "이름" 등.
     pub fn new(mob_key: String, zone: String, room: impl ToString, data: &RawMobData) -> Self {
         // Load skill names from the skills Vec<(String, i64, i64)>
-        let skill_names: Vec<String> = data.skills.iter()
+        let skill_names: Vec<String> = data
+            .skills
+            .iter()
             .map(|(name, _level, _prob)| name.clone())
             .collect();
 
@@ -317,7 +319,10 @@ impl MobInstance {
                 }
             }
 
-            result.insert(attacker, (exp + reward.bonus_exp, gold + reward.bonus_gold, messages));
+            result.insert(
+                attacker,
+                (exp + reward.bonus_exp, gold + reward.bonus_gold, messages),
+            );
         }
 
         result
@@ -444,14 +449,15 @@ impl MobCache {
         }
 
         // Read and parse JSON
-        let content = std::fs::read_to_string(&file_path)
-            .map_err(|e| MobError::IoError(e.to_string()))?;
+        let content =
+            std::fs::read_to_string(&file_path).map_err(|e| MobError::IoError(e.to_string()))?;
 
-        let json: JsonValue = serde_json::from_str(&content)
-            .map_err(|e| MobError::ParseError(e.to_string()))?;
+        let json: JsonValue =
+            serde_json::from_str(&content).map_err(|e| MobError::ParseError(e.to_string()))?;
 
         // Extract mob info
-        let mob_info = json.get("몹정보")
+        let mob_info = json
+            .get("몹정보")
             .and_then(|v| v.as_object())
             .ok_or_else(|| MobError::ParseError("몹정보 not found".to_string()))?;
 
@@ -465,30 +471,31 @@ impl MobCache {
     }
 
     /// Parse mob data from JSON object
-    fn parse_mob_data(&self, mob_info: &serde_json::Map<String, JsonValue>) -> Result<RawMobData, MobError> {
+    fn parse_mob_data(
+        &self,
+        mob_info: &serde_json::Map<String, JsonValue>,
+    ) -> Result<RawMobData, MobError> {
         let mut data = RawMobData::new();
 
         // Name (이름)
-        data.name = mob_info.get("이름")
+        data.name = mob_info
+            .get("이름")
             .and_then(|v| v.as_str())
             .unwrap_or("이름 없는 몹")
             .to_string();
 
         // Zone (존이름)
-        data.zone = mob_info.get("존이름")
+        data.zone = mob_info
+            .get("존이름")
             .and_then(|v| v.as_str())
             .unwrap_or("")
             .to_string();
 
         // Level (레벨)
-        data.level = mob_info.get("레벨")
-            .and_then(|v| v.as_i64())
-            .unwrap_or(1);
+        data.level = mob_info.get("레벨").and_then(|v| v.as_i64()).unwrap_or(1);
 
         // HP (체력)
-        data.hp = mob_info.get("체력")
-            .and_then(|v| v.as_i64())
-            .unwrap_or(100);
+        data.hp = mob_info.get("체력").and_then(|v| v.as_i64()).unwrap_or(100);
         data.max_hp = data.hp;
 
         // Also check for 맷집
@@ -500,22 +507,20 @@ impl MobCache {
         }
 
         // Inner power (내공)
-        data.inner_power = mob_info.get("내공")
-            .and_then(|v| v.as_i64())
-            .unwrap_or(0);
+        data.inner_power = mob_info.get("내공").and_then(|v| v.as_i64()).unwrap_or(0);
 
         // Strength (힘)
-        data.strength = mob_info.get("힘")
-            .and_then(|v| v.as_i64())
-            .unwrap_or(10);
+        data.strength = mob_info.get("힘").and_then(|v| v.as_i64()).unwrap_or(10);
 
         // Agility (민첩성)
-        data.agility = mob_info.get("민첩성")
+        data.agility = mob_info
+            .get("민첩성")
             .and_then(|v| v.as_i64())
             .unwrap_or(10);
 
         // Description 1 (설명1)
-        data.desc1 = mob_info.get("설명1")
+        data.desc1 = mob_info
+            .get("설명1")
             .and_then(|v| v.as_str())
             .unwrap_or("")
             .to_string();
@@ -523,7 +528,8 @@ impl MobCache {
         // Description 2 (설명2)
         if let Some(desc2) = mob_info.get("설명2") {
             if let Some(arr) = desc2.as_array() {
-                data.desc2 = arr.iter()
+                data.desc2 = arr
+                    .iter()
                     .filter_map(|v| v.as_str().map(|s| s.to_string()))
                     .collect();
             } else if let Some(s) = desc2.as_str() {
@@ -532,7 +538,8 @@ impl MobCache {
         }
 
         // Description 3 (설명3)
-        data.desc3 = mob_info.get("설명3")
+        data.desc3 = mob_info
+            .get("설명3")
             .and_then(|v| v.as_str())
             .unwrap_or("")
             .to_string();
@@ -540,7 +547,8 @@ impl MobCache {
         // Reaction names (반응이름)
         if let Some(names) = mob_info.get("반응이름") {
             if let Some(arr) = names.as_array() {
-                data.reaction_names = arr.iter()
+                data.reaction_names = arr
+                    .iter()
                     .filter_map(|v| v.as_str().map(|s| s.to_string()))
                     .collect();
             }
@@ -563,24 +571,19 @@ impl MobCache {
         }
 
         // Regen time (리젠)
-        data.regen = mob_info.get("리젠")
-            .and_then(|v| v.as_i64())
-            .unwrap_or(300);
+        data.regen = mob_info.get("리젠").and_then(|v| v.as_i64()).unwrap_or(300);
 
         // Talk tick (대화틱)
-        data.talk_tick = mob_info.get("대화틱")
+        data.talk_tick = mob_info
+            .get("대화틱")
             .and_then(|v| v.as_i64())
             .unwrap_or(60);
 
         // Mob type (몹종류)
-        data.mob_type = mob_info.get("몹종류")
-            .and_then(|v| v.as_i64())
-            .unwrap_or(0);
+        data.mob_type = mob_info.get("몹종류").and_then(|v| v.as_i64()).unwrap_or(0);
 
         // Personality (성격)
-        data.personality = mob_info.get("성격")
-            .and_then(|v| v.as_i64())
-            .unwrap_or(0);
+        data.personality = mob_info.get("성격").and_then(|v| v.as_i64()).unwrap_or(0);
 
         // Safe zone from properties
         if let Some(props) = mob_info.get("맵속성") {
@@ -598,7 +601,8 @@ impl MobCache {
         // Auto scripts (자동스크립)
         if let Some(scripts) = mob_info.get("자동스크립") {
             if let Some(arr) = scripts.as_array() {
-                data.auto_scripts = arr.iter()
+                data.auto_scripts = arr
+                    .iter()
                     .filter_map(|v| v.as_str().map(|s| s.to_string()))
                     .collect();
             }
@@ -608,12 +612,15 @@ impl MobCache {
         for (key, value) in mob_info {
             if key.starts_with("이벤트") {
                 if let Some(arr) = value.as_array() {
-                    let event_scripts: Vec<String> = arr.iter()
+                    let event_scripts: Vec<String> = arr
+                        .iter()
                         .filter_map(|v| v.as_str().map(|s| s.to_string()))
                         .collect();
-                    data.events.insert(key.clone(), EventScript::Legacy(event_scripts));
+                    data.events
+                        .insert(key.clone(), EventScript::Legacy(event_scripts));
                 } else if let Some(s) = value.as_str() {
-                    data.events.insert(key.clone(), EventScript::Rhai(s.to_string()));
+                    data.events
+                        .insert(key.clone(), EventScript::Rhai(s.to_string()));
                 }
             }
         }
@@ -637,7 +644,8 @@ impl MobCache {
         // Sale script / menu (물건판매스크립)
         if let Some(scr) = mob_info.get("물건판매스크립") {
             if let Some(arr) = scr.as_array() {
-                data.sale_script = arr.iter()
+                data.sale_script = arr
+                    .iter()
                     .filter_map(|v| v.as_str().map(|s| s.to_string()))
                     .collect();
             } else if let Some(s) = scr.as_str() {
@@ -666,7 +674,10 @@ impl MobCache {
                         if parts.len() >= 2 {
                             let item_name = parts[0].to_string();
                             let count = parts[1].parse::<i64>().unwrap_or(1);
-                            let prob = parts.get(2).and_then(|s| s.parse::<i64>().ok()).unwrap_or(100);
+                            let prob = parts
+                                .get(2)
+                                .and_then(|s| s.parse::<i64>().ok())
+                                .unwrap_or(100);
                             data.use_items.push((item_name, count, prob));
                         }
                     }
@@ -692,33 +703,35 @@ impl MobCache {
         }
 
         // Death script (소멸스크립)
-        data.death_script = mob_info.get("소멸스크립")
+        data.death_script = mob_info
+            .get("소멸스크립")
             .and_then(|v| v.as_str())
             .unwrap_or("")
             .to_string();
 
         // Combat start script (전투시작)
-        data.combat_start_script = mob_info.get("전투시작")
+        data.combat_start_script = mob_info
+            .get("전투시작")
             .and_then(|v| v.as_str())
             .unwrap_or("")
             .to_string();
 
         // Combat script (전투스크립)
-        data.combat_script = mob_info.get("전투스크립")
+        data.combat_script = mob_info
+            .get("전투스크립")
             .and_then(|v| v.as_str())
             .unwrap_or("주먹")
             .to_string();
 
         // HP display type (체력스크립)
-        data.hp_display_type = mob_info.get("체력스크립")
+        data.hp_display_type = mob_info
+            .get("체력스크립")
             .and_then(|v| v.as_str())
             .unwrap_or("사람")
             .to_string();
 
         // Corpse time (시체)
-        data.corpse_time = mob_info.get("시체")
-            .and_then(|v| v.as_i64())
-            .unwrap_or(10);
+        data.corpse_time = mob_info.get("시체").and_then(|v| v.as_i64()).unwrap_or(10);
 
         Ok(data)
     }
@@ -731,8 +744,7 @@ impl MobCache {
             return Err(MobError::NotFound(zone.to_string()));
         }
 
-        let entries = std::fs::read_dir(&zone_dir)
-            .map_err(|e| MobError::IoError(e.to_string()))?;
+        let entries = std::fs::read_dir(&zone_dir).map_err(|e| MobError::IoError(e.to_string()))?;
 
         let mut count = 0;
         for entry in entries {
@@ -740,7 +752,8 @@ impl MobCache {
             let path = entry.path();
 
             if path.extension().and_then(|s| s.to_str()) == Some("json") {
-                let name = path.file_stem()
+                let name = path
+                    .file_stem()
                     .and_then(|s| s.to_str())
                     .ok_or_else(|| MobError::ParseError("Invalid file name".to_string()))?;
 
@@ -771,13 +784,18 @@ impl MobCache {
                 None => continue,
             };
 
-            let exists = self.instances.get(&room_key)
+            let exists = self
+                .instances
+                .get(&room_key)
                 .map(|instances| instances.iter().any(|m| m.alive && m.mob_key == key))
                 .unwrap_or(false);
 
             if !exists {
                 let instance = MobInstance::new(key.clone(), zone.to_string(), room, data);
-                self.instances.entry(room_key.clone()).or_insert_with(Vec::new).push(instance);
+                self.instances
+                    .entry(room_key.clone())
+                    .or_insert_with(Vec::new)
+                    .push(instance);
             }
         }
     }
@@ -785,7 +803,8 @@ impl MobCache {
     /// Get active mobs in a room
     pub fn get_mobs_in_room(&self, zone: &str, room: &str) -> Vec<&MobInstance> {
         let room_key = format!("{}:{}", zone, room);
-        self.instances.get(&room_key)
+        self.instances
+            .get(&room_key)
             .map(|instances| instances.iter().filter(|m| m.alive).collect())
             .unwrap_or_default()
     }
@@ -810,8 +829,11 @@ impl MobCache {
                         Some(x) => x.clone(),
                         None => continue,
                     };
-                    let ok = inst.name == name || inst.name.contains(name)
-                        || d.reaction_names.iter().any(|n| n == name || n.contains(name));
+                    let ok = inst.name == name
+                        || inst.name.contains(name)
+                        || d.reaction_names
+                            .iter()
+                            .any(|n| n == name || n.contains(name));
                     if ok {
                         to_respawn = Some((inst.mob_key.clone(), d));
                         break;
@@ -838,7 +860,13 @@ impl MobCache {
 
     /// Damage a mob in the given room (reduce HP)
     /// Returns (new_hp, died) if mob was found and damaged
-    pub fn damage_mob(&mut self, zone: &str, room: &str, mob_key: &str, damage: i64) -> Option<(i64, bool)> {
+    pub fn damage_mob(
+        &mut self,
+        zone: &str,
+        room: &str,
+        mob_key: &str,
+        damage: i64,
+    ) -> Option<(i64, bool)> {
         let room_key = format!("{}:{}", zone, room);
         if let Some(instances) = self.instances.get_mut(&room_key) {
             for mob in instances.iter_mut() {
@@ -860,7 +888,8 @@ impl MobCache {
         let now = chrono::Utc::now().timestamp();
 
         // Collect all mob data needed for respawn
-        let mut respawn_data: std::collections::HashMap<String, RawMobData> = std::collections::HashMap::new();
+        let mut respawn_data: std::collections::HashMap<String, RawMobData> =
+            std::collections::HashMap::new();
 
         for (_room_key, instances) in &self.instances {
             for instance in instances {
@@ -906,7 +935,10 @@ impl MobCache {
     pub fn kill_mob(&mut self, zone: &str, room: &str, mob_key: &str) -> bool {
         let room_key = format!("{}:{}", zone, room);
         if let Some(instances) = self.instances.get_mut(&room_key) {
-            if let Some(mob) = instances.iter_mut().find(|m| m.mob_key == mob_key && m.alive) {
+            if let Some(mob) = instances
+                .iter_mut()
+                .find(|m| m.mob_key == mob_key && m.alive)
+            {
                 mob.kill();
                 return true;
             }
@@ -917,11 +949,19 @@ impl MobCache {
     /// Add a mob instance to the cache (for script spawning)
     pub fn add_mob_instance(&mut self, mob: MobInstance) {
         let room_key = format!("{}:{}", mob.zone, mob.room);
-        self.instances.entry(room_key).or_insert_with(Vec::new).push(mob);
+        self.instances
+            .entry(room_key)
+            .or_insert_with(Vec::new)
+            .push(mob);
     }
 
     /// Get a mutable reference to a mob instance
-    pub fn get_mob_instance_mut(&mut self, zone: &str, room: &str, mob_key: &str) -> Option<&mut MobInstance> {
+    pub fn get_mob_instance_mut(
+        &mut self,
+        zone: &str,
+        room: &str,
+        mob_key: &str,
+    ) -> Option<&mut MobInstance> {
         let room_key = format!("{}:{}", zone, room);
         if let Some(instances) = self.instances.get_mut(&room_key) {
             instances.iter_mut().find(|m| m.mob_key == mob_key)
@@ -933,11 +973,11 @@ impl MobCache {
     /// Get all mob instances across all rooms (for admin search functions)
     /// Returns Vec of (room_key, instances) tuples
     pub fn get_all_instances(&self) -> Vec<(String, Vec<&MobInstance>)> {
-        self.instances.iter()
+        self.instances
+            .iter()
             .map(|(key, instances)| {
-                let alive_instances: Vec<&MobInstance> = instances.iter()
-                    .filter(|m| m.alive)
-                    .collect();
+                let alive_instances: Vec<&MobInstance> =
+                    instances.iter().filter(|m| m.alive).collect();
                 (key.clone(), alive_instances)
             })
             .filter(|(_, instances)| !instances.is_empty())
@@ -1128,7 +1168,13 @@ impl HerbDrop {
     ///
     /// # Returns
     /// Some(herb) if drop occurs, None otherwise
-    pub fn calculate(mob_level: i64, target_level: i64, difficulty: i64, herb_list: &[String], base_chance: f64) -> Option<HerbDrop> {
+    pub fn calculate(
+        mob_level: i64,
+        target_level: i64,
+        difficulty: i64,
+        herb_list: &[String],
+        base_chance: f64,
+    ) -> Option<HerbDrop> {
         if mob_level < target_level {
             return None;
         }
@@ -1268,7 +1314,9 @@ mod tests {
     /// "왕대협 편지 대화" 입력 시 83_편지.rhai가 선택되려면 이 키가 있어야 함.
     #[test]
     fn test_load_83_has_편지_event_key() {
-        let data_dir = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("data").join("mob");
+        let data_dir = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
+            .join("data")
+            .join("mob");
         let mut cache = MobCache::with_data_dir(data_dir);
         let data = match cache.load_mob("낙양성", "83") {
             Ok(d) => d,
@@ -1277,7 +1325,11 @@ mod tests {
                 return;
             }
         };
-        let ev_keys: Vec<&String> = data.events.keys().filter(|k| k.starts_with("이벤트")).collect();
+        let ev_keys: Vec<&String> = data
+            .events
+            .keys()
+            .filter(|k| k.starts_with("이벤트"))
+            .collect();
         assert!(
             data.events.contains_key("이벤트: $대화 $대 편지"),
             "83.json must have '이벤트: $대화 $대 편지', event keys: {:?}",
@@ -1288,7 +1340,9 @@ mod tests {
     /// Test mob spawning for starting room
     #[test]
     fn test_spawn_mobs_starting_room() {
-        let data_dir = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("data").join("mob");
+        let data_dir = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
+            .join("data")
+            .join("mob");
         let mut cache = MobCache::with_data_dir(data_dir);
 
         // Spawn mobs for room 1 (starting room) with mob_ids from map data
@@ -1297,11 +1351,22 @@ mod tests {
 
         // Check if mobs were spawned
         let mobs = cache.get_mobs_in_room("낙양성", "1");
-        eprintln!("test_spawn_mobs_starting_room: Found {} mobs in room 낙양성:1", mobs.len());
+        eprintln!(
+            "test_spawn_mobs_starting_room: Found {} mobs in room 낙양성:1",
+            mobs.len()
+        );
 
         for mob in &mobs {
-            eprintln!("  - Mob: {}, key: {}, desc1: {}", mob.name, mob.mob_key,
-                if let Some(data) = cache.get_mob(&mob.mob_key) { &data.desc1 } else { "?" });
+            eprintln!(
+                "  - Mob: {}, key: {}, desc1: {}",
+                mob.name,
+                mob.mob_key,
+                if let Some(data) = cache.get_mob(&mob.mob_key) {
+                    &data.desc1
+                } else {
+                    "?"
+                }
+            );
         }
 
         // Verify mobs exist (this test will fail if mob loading is broken)
@@ -1311,33 +1376,50 @@ mod tests {
     /// Test loading room and spawning mobs from room data
     #[test]
     fn test_room_and_mob_spawn_integration() {
-        let mob_data_dir = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("data").join("mob");
-        let room_data_dir = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("data").join("map");
+        let mob_data_dir = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
+            .join("data")
+            .join("mob");
+        let room_data_dir = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
+            .join("data")
+            .join("map");
         let mut mob_cache = MobCache::with_data_dir(mob_data_dir);
         let mut room_cache = crate::world::RoomCache::with_data_dir(room_data_dir);
 
         // Load room 1
         let room_result = room_cache.get_room("낙양성", "1");
-        assert!(room_result.is_ok(), "Failed to load room: {:?}", room_result);
+        assert!(
+            room_result.is_ok(),
+            "Failed to load room: {:?}",
+            room_result
+        );
 
         let room = room_result.unwrap();
         let room_ref = room.read().unwrap();
         let mob_ids = room_ref.mob_ids.clone();
-        eprintln!("test_room_and_mob_spawn_integration: Room mob_ids = {:?}", mob_ids);
+        eprintln!(
+            "test_room_and_mob_spawn_integration: Room mob_ids = {:?}",
+            mob_ids
+        );
 
         // Spawn mobs using the mob_ids from the room
         mob_cache.spawn_mobs_for_room("낙양성", "1", &mob_ids);
 
         // Check if mobs were spawned
         let mobs = mob_cache.get_mobs_in_room("낙양성", "1");
-        eprintln!("test_room_and_mob_spawn_integration: Found {} mobs in room 낙양성:1", mobs.len());
+        eprintln!(
+            "test_room_and_mob_spawn_integration: Found {} mobs in room 낙양성:1",
+            mobs.len()
+        );
 
         for mob in &mobs {
             eprintln!("  - Mob: {}, key: {}", mob.name, mob.mob_key);
         }
 
         // Verify mobs exist
-        assert!(!mobs.is_empty(), "No mobs found in room 낙양성:1 after spawn");
+        assert!(
+            !mobs.is_empty(),
+            "No mobs found in room 낙양성:1 after spawn"
+        );
         assert_eq!(mobs.len(), 2, "Expected 2 mobs in room 낙양성:1");
     }
 
@@ -1353,36 +1435,52 @@ mod tests {
 
         // Check if room was loaded
         let room = world.room_cache.get_room_cached("낙양성", "1");
-        eprintln!("test_worldstate_spawn_integration: Room found in cache: {}", room.is_some());
+        eprintln!(
+            "test_worldstate_spawn_integration: Room found in cache: {}",
+            room.is_some()
+        );
 
         if let Some(room) = room {
             let room_ref = room.read().unwrap();
-            eprintln!("test_worldstate_spawn_integration: Room mob_ids = {:?}", room_ref.mob_ids);
+            eprintln!(
+                "test_worldstate_spawn_integration: Room mob_ids = {:?}",
+                room_ref.mob_ids
+            );
         }
 
         // Check if mobs were spawned
         let mobs = world.get_mobs_in_room("낙양성", "1");
-        eprintln!("test_worldstate_spawn_integration: Found {} mobs in room 낙양성:1", mobs.len());
+        eprintln!(
+            "test_worldstate_spawn_integration: Found {} mobs in room 낙양성:1",
+            mobs.len()
+        );
 
         for mob in &mobs {
             eprintln!("  - Mob: {}, key: {}", mob.name, mob.mob_key);
         }
 
         // Verify mobs exist
-        assert!(!mobs.is_empty(), "No mobs found in room 낙양성:1 after WorldState spawn");
+        assert!(
+            !mobs.is_empty(),
+            "No mobs found in room 낙양성:1 after WorldState spawn"
+        );
         assert_eq!(mobs.len(), 2, "Expected 2 mobs in room 낙양성:1");
     }
 
     /// Test loading mob data directly
     #[test]
     fn test_load_mob_밍밍_범죄자() {
-        let data_dir = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("data").join("mob");
+        let data_dir = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
+            .join("data")
+            .join("mob");
         let mut cache = MobCache::with_data_dir(data_dir);
 
         match cache.load_mob("낙양성", "밍밍-범죄자") {
             Ok(data) => {
-                eprintln!("test_load_mob_밍밍_범죄자: name={}, zone={}, desc1={}",
-                    data.name, data.zone, data.desc1);
+                eprintln!(
+                    "test_load_mob_밍밍_범죄자: name={}, zone={}, desc1={}",
+                    data.name, data.zone, data.desc1
+                );
                 assert_eq!(data.name, "밍밍");
             }
             Err(e) => {

@@ -4,7 +4,7 @@
 //! with automatic conversion to/from ScriptValue types.
 
 use crate::loader::{LoaderError, Result, ScriptValue, ScriptValueInner};
-use serde_json::{Value as JsonValue};
+use serde_json::Value as JsonValue;
 use std::path::Path;
 
 /// Load a JSON file and convert it to ScriptValue
@@ -77,9 +77,9 @@ fn script_to_json(script: &ScriptValue) -> JsonValue {
     match &**script {
         ScriptValueInner::String(s) => JsonValue::String(s.clone()),
         ScriptValueInner::Int(i) => JsonValue::Number((*i).into()),
-        ScriptValueInner::Float(f) => {
-            serde_json::Number::from_f64(*f).map(JsonValue::Number).unwrap_or(JsonValue::Null)
-        }
+        ScriptValueInner::Float(f) => serde_json::Number::from_f64(*f)
+            .map(JsonValue::Number)
+            .unwrap_or(JsonValue::Null),
         ScriptValueInner::List(items) => {
             let arr: Vec<JsonValue> = items.iter().map(script_to_json).collect();
             JsonValue::Array(arr)
@@ -111,9 +111,9 @@ fn script_to_json_sorted(script: &ScriptValue) -> JsonValue {
     match &**script {
         ScriptValueInner::String(s) => JsonValue::String(s.clone()),
         ScriptValueInner::Int(i) => JsonValue::Number((*i).into()),
-        ScriptValueInner::Float(f) => {
-            serde_json::Number::from_f64(*f).map(JsonValue::Number).unwrap_or(JsonValue::Null)
-        }
+        ScriptValueInner::Float(f) => serde_json::Number::from_f64(*f)
+            .map(JsonValue::Number)
+            .unwrap_or(JsonValue::Null),
         ScriptValueInner::List(items) => {
             let arr: Vec<JsonValue> = items.iter().map(script_to_json_sorted).collect();
             JsonValue::Array(arr)
@@ -139,7 +139,10 @@ mod tests {
     #[tokio::test]
     async fn test_json_round_trip() {
         let mut data = HashMap::new();
-        data.insert("key1".to_string(), Box::new(ScriptValueInner::String("value1".to_string())));
+        data.insert(
+            "key1".to_string(),
+            Box::new(ScriptValueInner::String("value1".to_string())),
+        );
         data.insert("key2".to_string(), Box::new(ScriptValueInner::Int(42)));
 
         let mut list = Vec::new();
@@ -205,7 +208,10 @@ mod tests {
     #[test]
     fn test_script_to_json_conversion() {
         let mut data = HashMap::new();
-        data.insert("key".to_string(), Box::new(ScriptValueInner::String("value".to_string())));
+        data.insert(
+            "key".to_string(),
+            Box::new(ScriptValueInner::String("value".to_string())),
+        );
         let script = Box::new(ScriptValueInner::Dict(data));
 
         let json = script_to_json(&script);

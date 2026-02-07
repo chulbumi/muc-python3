@@ -7,9 +7,9 @@
 //! - https://www.fluffos.info/
 //! - https://documentation.help/MudOS-v21c2-zh/chapter21.html
 
+use rhai::{Dynamic, Engine, Scope};
 use std::sync::Arc;
 use tokio::sync::RwLock;
-use rhai::{Engine, Scope, Dynamic};
 use tracing::{debug, error, info, warn};
 
 use crate::player::Body;
@@ -64,10 +64,7 @@ struct MasterFunctions {
 
 impl MasterObject {
     /// Create a new master object
-    pub fn new(
-        script_storage: Arc<RwLock<ScriptStorage>>,
-        config: MasterConfig,
-    ) -> Self {
+    pub fn new(script_storage: Arc<RwLock<ScriptStorage>>, config: MasterConfig) -> Self {
         let master = Self {
             script_storage,
             config,
@@ -112,7 +109,8 @@ impl MasterObject {
 
     /// Get the master script name (without extension)
     fn script_name(&self) -> String {
-        self.config.master_script
+        self.config
+            .master_script
             .trim_end_matches(".rhai")
             .to_string()
     }
@@ -189,7 +187,10 @@ impl MasterObject {
 
         // Only allow cmds/ and lib/ directories
         if !path.starts_with("cmds/") && !path.starts_with("lib/") {
-            warn!("Security: Attempted to compile outside allowed dirs: {}", path);
+            warn!(
+                "Security: Attempted to compile outside allowed dirs: {}",
+                path
+            );
             return false;
         }
 
@@ -246,7 +247,11 @@ impl MasterObject {
     ///
     /// This is called when a living object encounters another object
     pub fn init(&self, object: &str, living: &Body) {
-        debug!("Master::init() - {} encountered by {}", object, living.get_name());
+        debug!(
+            "Master::init() - {} encountered by {}",
+            object,
+            living.get_name()
+        );
 
         // In full implementation, would call object's init() function
         // This is where add_action() would be called to register commands
@@ -296,10 +301,7 @@ impl MasterObject {
     pub fn preload(&self) -> Vec<String> {
         // Return list of objects to preload
         // In full implementation, would read from a configuration file
-        vec![
-            "cmds/도움말.rhai".to_string(),
-            "cmds/저장.rhai".to_string(),
-        ]
+        vec!["cmds/도움말.rhai".to_string(), "cmds/저장.rhai".to_string()]
     }
 
     /// EPILOG apply - Called after all objects are loaded
@@ -392,7 +394,10 @@ mod tests {
         let storage = Arc::new(RwLock::new(ScriptStorage::new(ScriptConfig::default())));
         let master = MasterObject::default_storage(storage);
 
-        assert_eq!(master.domain_file("domains/test/room"), Some("domains/test".to_string()));
+        assert_eq!(
+            master.domain_file("domains/test/room"),
+            Some("domains/test".to_string())
+        );
         assert_eq!(master.domain_file("cmds/test"), None);
     }
 

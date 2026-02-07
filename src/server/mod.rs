@@ -7,7 +7,7 @@
 
 pub mod game_loop;
 
-pub use game_loop::{GameLoop, GameLoopConfig, run_game_loop};
+pub use game_loop::{run_game_loop, GameLoop, GameLoopConfig};
 
 use std::sync::Arc;
 use std::sync::Mutex;
@@ -118,12 +118,10 @@ impl MudServer {
     ///
     /// Preloads rooms, mobs, and items into the world state cache
     async fn load_game_data(&self) -> Result<(), Box<dyn std::error::Error>> {
-        
-
         let world = crate::world::get_world_state();
-        let mut world_write = world.write().map_err(|e| {
-            format!("Failed to get world write lock: {}", e)
-        })?;
+        let mut world_write = world
+            .write()
+            .map_err(|e| format!("Failed to get world write lock: {}", e))?;
 
         // Get list of available zones
         let map_dir = std::path::Path::new("data/map");
@@ -196,10 +194,14 @@ impl MudServer {
                 get_other_players_desc_in_room(bc.as_ref(), &pos.zone, &pos.room, exclude)
             }
         });
-        let get_other_players_map: Arc<dyn Fn() -> std::collections::HashMap<String, String> + Send + Sync> =
-            Arc::new(get_other_players_map_for_look);
-        let script_storage = Arc::new(tokio::sync::RwLock::new(ScriptStorage::new(ScriptConfig::default())));
-        let script_runner = create_call_out_script_runner(script_storage.clone(), self.broadcaster.clone());
+        let get_other_players_map: Arc<
+            dyn Fn() -> std::collections::HashMap<String, String> + Send + Sync,
+        > = Arc::new(get_other_players_map_for_look);
+        let script_storage = Arc::new(tokio::sync::RwLock::new(ScriptStorage::new(
+            ScriptConfig::default(),
+        )));
+        let script_runner =
+            create_call_out_script_runner(script_storage.clone(), self.broadcaster.clone());
         let call_out_scheduler = Arc::new(CallOutScheduler::new(
             self.broadcaster.clone(),
             Duration::from_millis(100),
@@ -228,7 +230,13 @@ impl MudServer {
         let game_loop_config = self.config.game_loop.clone();
         let call_out_for_loop = call_out_scheduler.clone();
         tokio::spawn(async move {
-            run_game_loop(broadcaster, players, game_loop_config, Some(call_out_for_loop)).await;
+            run_game_loop(
+                broadcaster,
+                players,
+                game_loop_config,
+                Some(call_out_for_loop),
+            )
+            .await;
         });
 
         // 셧다운/CTRL+C/kill(SIGTERM) 시 서버 종료 시퀀스 트리거

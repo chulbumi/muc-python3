@@ -24,11 +24,14 @@ impl ParsedCommand {
         let tokens = if args.is_empty() {
             Vec::new()
         } else {
-            args.split_whitespace()
-                .map(|s| s.to_string())
-                .collect()
+            args.split_whitespace().map(|s| s.to_string()).collect()
         };
-        ParsedCommand { raw, command, args, tokens }
+        ParsedCommand {
+            raw,
+            command,
+            args,
+            tokens,
+        }
     }
 
     /// Creates an empty ParsedCommand
@@ -77,11 +80,16 @@ impl CommandParser {
         }
 
         // Check if line ends with sentence-ending punctuation or space (treat as 'say' command)
-        if line.ends_with(' ') || line.ends_with('.') || line.ends_with('!')
-            || line.ends_with('?') || line.ends_with(',') {
+        if line.ends_with(' ')
+            || line.ends_with('.')
+            || line.ends_with('!')
+            || line.ends_with('?')
+            || line.ends_with(',')
+        {
             // In Python: last char triggers 'say' command
             // The command is the full line (except trailing punctuation), args are the message
-            let cmd = line.trim_end_matches(|c| c == ' ' || c == '.' || c == '!' || c == '?' || c == ',');
+            let cmd =
+                line.trim_end_matches(|c| c == ' ' || c == '.' || c == '!' || c == '?' || c == ',');
             return ParsedCommand::new(line.to_string(), "말".to_string(), cmd.to_string());
         }
 
@@ -110,21 +118,23 @@ impl CommandParser {
         let resolved_cmd = Self::resolve_alias(cmd);
 
         // Check if this is a movement command - if so, filter out pickup-related keywords
-        let is_direction = matches!(resolved_cmd.as_str(), "동" | "서" | "남" | "북" | "위" | "아래" | "북동" | "북서" | "남동" | "남서");
+        let is_direction = matches!(
+            resolved_cmd.as_str(),
+            "동" | "서" | "남" | "북" | "위" | "아래" | "북동" | "북서" | "남동" | "남서"
+        );
         let pickup_keywords = ["주워", "집어", "집", "가져"];
 
         let tokens = if param.is_empty() {
             Vec::new()
         } else if is_direction {
             // Filter out pickup keywords when followed by a direction
-            param.split_whitespace()
+            param
+                .split_whitespace()
                 .filter(|s| !pickup_keywords.contains(s))
                 .map(|s| s.to_string())
                 .collect()
         } else {
-            param.split_whitespace()
-                .map(|s| s.to_string())
-                .collect()
+            param.split_whitespace().map(|s| s.to_string()).collect()
         };
 
         ParsedCommand {
@@ -213,8 +223,11 @@ impl CommandParser {
         // Don't trim first - we need to check the actual last character
         // But trim trailing newlines for user input
         let line = line.trim_end_matches('\n').trim_end_matches('\r');
-        line.ends_with(' ') || line.ends_with('.') || line.ends_with('!')
-            || line.ends_with('?') || line.ends_with(',')
+        line.ends_with(' ')
+            || line.ends_with('.')
+            || line.ends_with('!')
+            || line.ends_with('?')
+            || line.ends_with(',')
     }
 }
 

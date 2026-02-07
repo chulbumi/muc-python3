@@ -3,10 +3,10 @@
 //! Provides command registration, lookup, and management functionality.
 //! Supports aliases, permission levels, and command metadata.
 
+use crate::command::CommandResult;
+use crate::player::Body;
 use std::collections::HashMap;
 use std::sync::Arc;
-use crate::player::Body;
-use crate::command::CommandResult;
 
 /// Function type for command handlers
 ///
@@ -340,7 +340,8 @@ impl CommandRegistry {
     /// # Returns
     /// The resolved command name
     pub fn resolve_alias(&self, name: &str) -> String {
-        self.aliases.get(name)
+        self.aliases
+            .get(name)
             .cloned()
             .unwrap_or_else(|| name.to_string())
     }

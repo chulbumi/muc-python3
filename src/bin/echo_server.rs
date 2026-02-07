@@ -2,8 +2,8 @@
 //!
 //! Simple TCP echo server that broadcasts received messages to all connected clients.
 
-use std::env;
 use muc_engine::network::run_echo_server;
+use std::env;
 
 #[tokio::main]
 async fn main() -> Result<(), Box<dyn std::error::Error>> {

@@ -3,11 +3,11 @@
 //! [이름] [제목] 쪽지: 편집 모드. 라인 단위 입력, '.' 또는 10줄이면 저장 후 종료.
 //! 쪽지 (인자 없음): 도착 쪽지 보기.
 
-use std::sync::Arc;
 use chrono::Local;
+use std::sync::Arc;
 
-use crate::command::CommandResult;
 use crate::command::registry::CommandRegistry;
+use crate::command::CommandResult;
 use crate::player::{Body, MemoRecord};
 use crate::script::{load_body_from_json, save_body_to_json};
 use crate::world::get_world_state;
@@ -40,7 +40,12 @@ fn note_command(body: &mut Body, args: &[&str]) -> CommandResult {
         return CommandResult::Output("정보수집소에서 할 수 있습니다.".to_string());
     }
 
-    if get_world_state().read().ok().map(|w| w.get_player_position(target_name).is_some()).unwrap_or(false) {
+    if get_world_state()
+        .read()
+        .ok()
+        .map(|w| w.get_player_position(target_name).is_some())
+        .unwrap_or(false)
+    {
         return CommandResult::Output("접속중인 사용자에게는 보낼 수 없습니다.".to_string());
     }
 
@@ -52,7 +57,9 @@ fn note_command(body: &mut Body, args: &[&str]) -> CommandResult {
 
     let memo_key = format!("메모:{}", body.get_name());
     if target_body.memos.contains_key(&memo_key) {
-        return CommandResult::Output("한번 보냈던 사용자에게는 다시 보낼 수 없습니다.".to_string());
+        return CommandResult::Output(
+            "한번 보냈던 사용자에게는 다시 보낼 수 없습니다.".to_string(),
+        );
     }
 
     let time_str = Local::now().format("%Y-%m-%d %H:%M:%S").to_string();
@@ -100,7 +107,8 @@ pub fn register_note_commands(registry: &mut CommandRegistry) {
         aliases: vec!["메모보냄".to_string()],
         handler: Arc::new(note_command),
         level: 0,
-        description: "쪽지 보내기/보기. 정보수집소(낙양성:11)에서만. [이름] [제목] 쪽지".to_string(),
+        description: "쪽지 보내기/보기. 정보수집소(낙양성:11)에서만. [이름] [제목] 쪽지"
+            .to_string(),
         usage: "[이름] [제목] 쪽지".to_string(),
     });
 }

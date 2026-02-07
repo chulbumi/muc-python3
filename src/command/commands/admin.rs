@@ -2,10 +2,10 @@
 //!
 //! Includes: 아이템생성 (spawn item), etc.
 
-use crate::command::{CommandResult, registry::CommandRegistry};
-use crate::player::Body;
-use crate::object::Object;
+use crate::command::{registry::CommandRegistry, CommandResult};
 use crate::hangul;
+use crate::object::Object;
+use crate::player::Body;
 use std::sync::{Arc, Mutex};
 
 /// Creates a test item in player's inventory
@@ -22,8 +22,16 @@ fn spawn_item_command(player: &mut Body, args: &[&str]) -> CommandResult {
 
     let name = args[0];
     let item_type = if args.len() > 1 { args[1] } else { "무기" };
-    let attack = if args.len() > 2 { args[2].parse::<i32>().unwrap_or(10) } else { 10 };
-    let defense = if args.len() > 3 { args[3].parse::<i32>().unwrap_or(5) } else { 5 };
+    let attack = if args.len() > 2 {
+        args[2].parse::<i32>().unwrap_or(10)
+    } else {
+        10
+    };
+    let defense = if args.len() > 3 {
+        args[3].parse::<i32>().unwrap_or(5)
+    } else {
+        5
+    };
 
     // Create the item
     let item = Arc::new(Mutex::new(Object::new()));
@@ -110,7 +118,11 @@ pub fn register_admin_commands(registry: &mut CommandRegistry) {
     // 아이템생성 (Spawn item)
     registry.register(crate::command::registry::CommandInfo {
         name: "아이템생성".to_string(),
-        aliases: vec!["생성".to_string(), "spawn".to_string(), "create".to_string()],
+        aliases: vec![
+            "생성".to_string(),
+            "spawn".to_string(),
+            "create".to_string(),
+        ],
         handler: Arc::new(spawn_item_command),
         level: 0,
         description: "아이템을 생성합니다 (관리자).".to_string(),
@@ -120,7 +132,11 @@ pub fn register_admin_commands(registry: &mut CommandRegistry) {
     // 위치이동 (Warp)
     registry.register(crate::command::registry::CommandInfo {
         name: "위치이동".to_string(),
-        aliases: vec!["warp".to_string(), "이동".to_string(), "teleport".to_string()],
+        aliases: vec![
+            "warp".to_string(),
+            "이동".to_string(),
+            "teleport".to_string(),
+        ],
         handler: Arc::new(warp_command),
         level: 0,
         description: "해당 위치로 이동합니다 (관리자).".to_string(),

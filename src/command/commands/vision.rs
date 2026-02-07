@@ -2,8 +2,8 @@
 //!
 //! Handles secret skill (비전) system - learning and training legendary skills.
 
-use crate::command::CommandResult;
 use crate::command::registry::CommandRegistry;
+use crate::command::CommandResult;
 use crate::player::Body;
 use std::sync::Arc;
 
@@ -107,7 +107,11 @@ pub fn register_vision_commands(registry: &mut CommandRegistry) {
     // 비전목록 (Show Learned Visions)
     registry.register(crate::command::registry::CommandInfo {
         name: "비전목록".to_string(),
-        aliases: vec!["비전목록".to_string(), "secrets".to_string(), "learned_secrets".to_string()],
+        aliases: vec![
+            "비전목록".to_string(),
+            "secrets".to_string(),
+            "learned_secrets".to_string(),
+        ],
         handler: Arc::new(show_learned_visions_command),
         level: 0,
         description: "배운 비전 목록을 보여줍니다.".to_string(),

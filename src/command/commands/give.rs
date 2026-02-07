@@ -2,7 +2,6 @@
 //!
 //! 플레이어에게 은전/금전/아이템을 건네줌. cmds/줘.py 기준.
 
-
 use crate::command::parser::CommandParser;
 use crate::command::registry::CommandRegistry;
 use crate::command::CommandResult;
@@ -85,7 +84,11 @@ fn give_command(body: &mut Body, args: &[&str]) -> CommandResult {
         return CommandResult::Error("☞ 그런 아이템이 소지품에 없어요.".to_string());
     }
     // 파이썬: order != 1 이면 1개만 (2.검 5 → 1개만)
-    let count = if order > 1 { 1 } else { count.min(50).max(1) as usize };
+    let count = if order > 1 {
+        1
+    } else {
+        count.min(50).max(1) as usize
+    };
 
     CommandResult::GiveToPlayer {
         target_name,

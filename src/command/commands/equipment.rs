@@ -2,9 +2,9 @@
 //!
 //! Handles item management: 입고 (equip), 벗고 (unequip), 소지품 (inventory), 장비 (equipment)
 
-use crate::command::{CommandResult, registry::CommandRegistry};
-use crate::player::Body;
+use crate::command::{registry::CommandRegistry, CommandResult};
 use crate::hangul;
+use crate::player::Body;
 use std::sync::Arc;
 
 /// Equipment slot types
@@ -104,7 +104,10 @@ fn equipment_command(player: &mut Body, _args: &[&str]) -> CommandResult {
                 } else {
                     String::new()
                 };
-                output.push_str(&format!("\x1b[33m무기\x1b[0;37m: {}{}\r\n", name, attack_str));
+                output.push_str(&format!(
+                    "\x1b[33m무기\x1b[0;37m: {}{}\r\n",
+                    name, attack_str
+                ));
                 has_equipment = true;
             }
         }
@@ -153,7 +156,10 @@ fn equipment_command(player: &mut Body, _args: &[&str]) -> CommandResult {
                     _ => String::new(),
                 };
 
-                output.push_str(&format!("\x1b[33m{}\x1b[0;37m: {}{}\r\n", item_type, name, bonus));
+                output.push_str(&format!(
+                    "\x1b[33m{}\x1b[0;37m: {}{}\r\n",
+                    item_type, name, bonus
+                ));
                 has_equipment = true;
             }
         }
@@ -227,14 +233,19 @@ fn equip_command(player: &mut Body, args: &[&str]) -> CommandResult {
                 match itype.as_str() {
                     "무기" => {
                         if player.weapon_item.is_some() {
-                            return CommandResult::Error("☞ 이미 무기를 장착하고 있습니다.".to_string());
+                            return CommandResult::Error(
+                                "☞ 이미 무기를 장착하고 있습니다.".to_string(),
+                            );
                         }
                     }
                     "방어구" | "투구" | "신발" | "장신구" => {
                         for other_obj in &player.object.objs {
                             if let Ok(other) = other_obj.lock() {
                                 if other.getBool("inUse") && other.getString("타입") == itype {
-                                    return CommandResult::Error(format!("☞ 이미 {}를 장착하고 있습니다.", itype));
+                                    return CommandResult::Error(format!(
+                                        "☞ 이미 {}를 장착하고 있습니다.",
+                                        itype
+                                    ));
                                 }
                             }
                         }
@@ -292,7 +303,9 @@ fn equip_command(player: &mut Body, args: &[&str]) -> CommandResult {
 /// Unequips an item by name or slot
 fn unequip_command(player: &mut Body, args: &[&str]) -> CommandResult {
     if args.is_empty() {
-        return CommandResult::Usage("벗고 [아이템이름 또는 무기/방어구/투구/신발/장신구]".to_string());
+        return CommandResult::Usage(
+            "벗고 [아이템이름 또는 무기/방어구/투구/신발/장신구]".to_string(),
+        );
     }
 
     let target = args[0];
@@ -407,7 +420,10 @@ fn unequip_slot(player: &mut Body, slot: EquipmentSlot) -> CommandResult {
             }
             CommandResult::Error("☞ 무기를 장착하고 있지 않습니다.".to_string())
         }
-        EquipmentSlot::Armor | EquipmentSlot::Helmet | EquipmentSlot::Boots | EquipmentSlot::Accessory => {
+        EquipmentSlot::Armor
+        | EquipmentSlot::Helmet
+        | EquipmentSlot::Boots
+        | EquipmentSlot::Accessory => {
             let slot_name = slot.display_name();
             let mut found = false;
             let mut item_name = String::new();
@@ -508,7 +524,10 @@ fn item_info_command(player: &mut Body, args: &[&str]) -> CommandResult {
                 }
 
                 let in_use = item.getBool("inUse");
-                output.push_str(&format!("상태: {}\r\n", if in_use { "장착중" } else { "소지중" }));
+                output.push_str(&format!(
+                    "상태: {}\r\n",
+                    if in_use { "장착중" } else { "소지중" }
+                ));
 
                 return CommandResult::Output(output);
             }
@@ -518,7 +537,10 @@ fn item_info_command(player: &mut Body, args: &[&str]) -> CommandResult {
     // Also check stackable items
     for (key, count) in player.object.inv_stack.iter() {
         if key.contains(item_name) {
-            return CommandResult::Output(format!("\x1b[1;36m{}\x1b[0;37m\r\n수량: {}개\r\n(소지품)", key, count));
+            return CommandResult::Output(format!(
+                "\x1b[1;36m{}\x1b[0;37m\r\n수량: {}개\r\n(소지품)",
+                key, count
+            ));
         }
     }
 
@@ -533,7 +555,12 @@ pub fn register_equipment_commands(registry: &mut CommandRegistry) {
     // 장비 (Equipment)
     registry.register(crate::command::registry::CommandInfo {
         name: "장비".to_string(),
-        aliases: vec!["장착".to_string(), "입고".to_string(), "equipment".to_string(), "eq".to_string()],
+        aliases: vec![
+            "장착".to_string(),
+            "입고".to_string(),
+            "equipment".to_string(),
+            "eq".to_string(),
+        ],
         handler: Arc::new(equipment_command),
         level: 0,
         description: "장착한 장비를 보여줍니다.".to_string(),
@@ -553,7 +580,11 @@ pub fn register_equipment_commands(registry: &mut CommandRegistry) {
     // 벗고 (Unequip item)
     registry.register(crate::command::registry::CommandInfo {
         name: "벗고".to_string(),
-        aliases: vec!["해제".to_string(), "unequip".to_string(), "remove".to_string()],
+        aliases: vec![
+            "해제".to_string(),
+            "unequip".to_string(),
+            "remove".to_string(),
+        ],
         handler: Arc::new(unequip_command),
         level: 0,
         description: "아이템을 해제합니다.".to_string(),

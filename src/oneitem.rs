@@ -70,7 +70,11 @@ impl OneitemState {
             }
         }
 
-        info!("ONEITEM loaded: attr={} index={}", self.attr.len(), self.index.len());
+        info!(
+            "ONEITEM loaded: attr={} index={}",
+            self.attr.len(),
+            self.index.len()
+        );
         Ok(())
     }
 
@@ -105,19 +109,22 @@ impl OneitemState {
 
     /// 버림: attr[index]= "name 버림", save. (이름 충돌 회피로 do_drop)
     pub fn do_drop(&mut self, index: &str, name: &str) -> Result<(), Box<dyn std::error::Error>> {
-        self.attr.insert(index.to_string(), format!("{} 버림", name));
+        self.attr
+            .insert(index.to_string(), format!("{} 버림", name));
         self.save()
     }
 
     /// 떨굼: attr[index]= "name 떨굼", save.
     pub fn drop2(&mut self, index: &str, name: &str) -> Result<(), Box<dyn std::error::Error>> {
-        self.attr.insert(index.to_string(), format!("{} 떨굼", name));
+        self.attr
+            .insert(index.to_string(), format!("{} 떨굼", name));
         self.save()
     }
 
     /// 보관: attr[index]= "name 보관", save.
     pub fn keep(&mut self, index: &str, name: &str) -> Result<(), Box<dyn std::error::Error>> {
-        self.attr.insert(index.to_string(), format!("{} 보관", name));
+        self.attr
+            .insert(index.to_string(), format!("{} 보관", name));
         self.save()
     }
 
