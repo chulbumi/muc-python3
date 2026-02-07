@@ -17,7 +17,6 @@ use std::time::Duration;
 use tokio::sync::RwLock;
 use tracing::{debug, warn};
 
-use crate::player::Body;
 use crate::script::ScriptStorage;
 
 /// Heart beat configuration

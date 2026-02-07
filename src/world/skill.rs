@@ -5,8 +5,7 @@
 
 use serde_json::Value as JsonValue;
 use std::collections::HashMap;
-use std::sync::{Arc, RwLock};
-use once_cell::sync::Lazy;
+use std::sync::RwLock;
 
 /// 무공 타입 (Mugong/Skill Type)
 #[derive(Debug, Clone, PartialEq)]

@@ -235,7 +235,7 @@ impl MasterObject {
     /// RESET apply - Called periodically to refresh objects
     ///
     /// This is called for rooms, mobs, items to regenerate them
-    pub fn reset(&self, object_path: &str, object_data: &mut rhai::Map) {
+    pub fn reset(&self, object_path: &str, _object_data: &mut rhai::Map) {
         debug!("Master::reset() - {}", object_path);
 
         // In full implementation, would call object's reset() function
@@ -266,7 +266,7 @@ impl MasterObject {
     }
 
     /// GET_BB_UID apply - Get the base UID for an object
-    pub fn get_bb_uid(&self, object: &str) -> Option<String> {
+    pub fn get_bb_uid(&self, _object: &str) -> Option<String> {
         Some("mudlib".to_string())
     }
 

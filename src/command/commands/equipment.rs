@@ -308,11 +308,11 @@ fn unequip_command(player: &mut Body, args: &[&str]) -> CommandResult {
     let mut display_name = String::new();
     let mut stat_attack = 0i32;
     let mut stat_defense = 0i32;
-    let mut stat_strength = 0i32;
+    let stat_strength = 0i32;
     let mut stat_dexterity = 0i32;
     let mut stat_armor = 0i32;
     let mut stat_hp = 0i32;
-    let mut stat_mp = 0i32;
+    let stat_mp = 0i32;
 
     // Check weapon by name
     if let Some(weapon_ref) = &player.weapon_item {

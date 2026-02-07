@@ -73,7 +73,7 @@ pub fn attack_mob_command(
 }
 
 /// Register combat commands
-pub fn register_combat_commands(registry: &mut CommandRegistry) {
+pub fn register_combat_commands(_registry: &mut CommandRegistry) {
     // Note: This is handled by the combat.rs module
     // This is just a placeholder for any additional combat-related commands
 }

@@ -2,7 +2,6 @@
 //!
 //! 플레이어에게 은전/금전/아이템을 건네줌. cmds/줘.py 기준.
 
-use std::sync::Arc;
 
 use crate::command::parser::CommandParser;
 use crate::command::registry::CommandRegistry;
@@ -98,6 +97,6 @@ fn give_command(body: &mut Body, args: &[&str]) -> CommandResult {
     }
 }
 
-pub fn register_give_commands(registry: &mut CommandRegistry) {
+pub fn register_give_commands(_registry: &mut CommandRegistry) {
     // 주다: Rhai 전환 (cmds/주다.rhai). aliases는 register_script_commands에서 스크립트 등록 시 부여.
 }

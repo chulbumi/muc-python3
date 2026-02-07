@@ -39,7 +39,7 @@ pub fn fill_space(text: &str, width: usize) -> String {
 ///
 /// Based on cmds/무공.py
 fn mugong_command(player: &mut Body, _args: &[&str]) -> CommandResult {
-    let name = player.get_name();
+    let _name = player.get_name();
 
     let mut output = format!(
         "\r\n━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━\r\n\

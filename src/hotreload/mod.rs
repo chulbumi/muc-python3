@@ -9,7 +9,6 @@
 
 use std::sync::Arc;
 use tokio::sync::RwLock;
-use rhai::Dynamic;
 use tracing::{info, warn, debug};
 
 use crate::script::ScriptStorage;

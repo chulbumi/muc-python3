@@ -358,7 +358,7 @@ impl CallOutScheduler {
         let mut results = Vec::new();
 
         for task in due_tasks.drain(..) {
-            let task_id = task.id.clone();
+            let _task_id = task.id.clone();
             let repeating = task.repeating;
             let target = task.target.clone();
             let function = task.function.clone();

@@ -290,8 +290,8 @@ impl WorldState {
         for (room_key, instances) in self.mob_cache.get_all_instances() {
             // Parse room_key into zone and room
             let parts: Vec<&str> = room_key.splitn(2, ':').collect();
-            let zone = parts.get(0).unwrap_or(&"");
-            let room = parts.get(1).unwrap_or(&"");
+            let _zone = parts.get(0).unwrap_or(&"");
+            let _room = parts.get(1).unwrap_or(&"");
 
             for mob in instances {
                 // Check mob data for display name

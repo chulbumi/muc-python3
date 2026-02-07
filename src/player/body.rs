@@ -439,7 +439,7 @@ impl Body {
                     let is_same = ptr != t_ptr;
                     if !is_same {
                         // Clear reverse target
-                        if let Ok(mut obj) = strong.lock() {
+                        if let Ok(_obj) = strong.lock() {
                             // Note: This would need access to the target's Body
                             // For now, just remove from our list
                         }

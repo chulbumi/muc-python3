@@ -1029,8 +1029,8 @@ pub fn run_script_chunk_rhai(
 /// resume_func: Rhai wait_enter 시 Some("step1") 등. Legacy면 None.
 pub fn try_mob_event_resume(
     body: &mut Body,
-    zone: &str,
-    room: &str,
+    _zone: &str,
+    _room: &str,
     mob_key: &str,
     event_key: &str,
     words: Vec<String>,

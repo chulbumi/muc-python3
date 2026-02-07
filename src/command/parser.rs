@@ -100,7 +100,7 @@ impl CommandParser {
         // This is opposite of typical MUD parsing but matches the Python implementation
         let cmd = words[words.len() - 1];
         let param_start = line.find(cmd).unwrap_or(0);
-        let mut param = if param_start > 0 {
+        let param = if param_start > 0 {
             line[..param_start].trim().to_string()
         } else {
             String::new()

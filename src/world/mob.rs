@@ -13,7 +13,7 @@ pub enum EventScript {
 }
 use std::collections::HashMap;
 use std::path::{Path, PathBuf};
-use std::sync::{Arc, RwLock};
+use std::sync::RwLock;
 
 /// Raw mob data from JSON
 #[derive(Debug, Clone)]
@@ -252,8 +252,8 @@ impl MobInstance {
         }
 
         // Calculate rewards for each attacker
-        let base_exp_per_attacker = mob_data.level; // Simplified
-        let base_gold_per_attacker = mob_data.level + 14;
+        let _base_exp_per_attacker = mob_data.level; // Simplified
+        let _base_gold_per_attacker = mob_data.level + 14;
 
         for attacker in damage_map.get_attackers() {
             let damage = damage_map.get_damage(&attacker);
@@ -263,7 +263,7 @@ impl MobInstance {
 
             // Calculate reward based on damage ratio
             let total_hp = mob_data.max_hp;
-            let ratio = if total_hp > 0 {
+            let _ratio = if total_hp > 0 {
                 (damage as f64 / total_hp as f64).min(1.0)
             } else {
                 0.0
@@ -302,7 +302,7 @@ impl MobInstance {
 
             // Herb drop message (for first attacker if mob level >= attacker level)
             if attacker == *damage_map.get_attackers().first().unwrap_or(&String::new()) {
-                if let Some(herb) = HerbDrop::calculate(
+                if let Some(_herb) = HerbDrop::calculate(
                     mob_data.level,
                     mob_data.level,
                     0,

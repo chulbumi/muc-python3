@@ -16,7 +16,7 @@ use crate::player::{Body, MemoRecord};
 use crate::object::{Object, Value};
 use crate::scheduler::CallOutScheduler;
 use std::time::Duration;
-use crate::data::{GlobalData, SharedGlobalData};
+use crate::data::SharedGlobalData;
 use crate::command::parser::CommandParser;
 use crate::command::CommandResult;
 use crate::player::{get_hp_bar_string, get_item_level_display, ITEM_EQUIP_LEVELS};
@@ -3433,7 +3433,7 @@ pub fn create_engine_with_body_and_output(
     });
 
     // exit_show(ob, name): 출구 드러냄. 성공 true.
-    let oc_es = oc.clone();
+    let _oc_es = oc.clone();
     engine.register_fn("exit_show", move |ob: &mut rhai::Map, name: &str| -> bool {
         let name_body = ob.get("이름").and_then(|v| v.clone().into_string().ok()).unwrap_or_default();
         let (zone, room) = match get_world_state().read().ok().and_then(|w| w.get_player_position(&name_body).map(|p| (p.zone.clone(), p.room.clone()))) {
@@ -4345,7 +4345,7 @@ pub fn create_engine_with_body_and_output(
 
     // mob_say(mob_name, message) - 몹이 말하기
     let body_ptr_say = body_ptr;
-    engine.register_fn("mob_say", move |ob: &mut rhai::Map, mob_name: &str, message: &str| -> bool {
+    engine.register_fn("mob_say", move |_ob: &mut rhai::Map, mob_name: &str, message: &str| -> bool {
         let body = unsafe { &*body_ptr_say };
 
         // 플레이어 위치 가져오기
@@ -4401,7 +4401,7 @@ pub fn create_engine_with_body_and_output(
 
     // mob_follow(mob_name, target_name) - 몹이 대상 따라가기
     let body_ptr_follow = body_ptr;
-    engine.register_fn("mob_follow", move |ob: &mut rhai::Map, mob_name: &str, target_name: &str| -> bool {
+    engine.register_fn("mob_follow", move |_ob: &mut rhai::Map, mob_name: &str, target_name: &str| -> bool {
         let body = unsafe { &*body_ptr_follow };
 
         // 플레이어 위치 가져오기
@@ -4467,7 +4467,7 @@ pub fn create_engine_with_body_and_output(
 
     // get_mob_hp(ob, mob_name) - 몹의 현재 HP 조회
     let body_ptr_get_hp = body_ptr;
-    engine.register_fn("get_mob_hp", move |ob: &mut rhai::Map, mob_name: &str| -> i64 {
+    engine.register_fn("get_mob_hp", move |_ob: &mut rhai::Map, mob_name: &str| -> i64 {
         let body = unsafe { &*body_ptr_get_hp };
 
         // 플레이어 위치 가져오기
@@ -4511,7 +4511,7 @@ pub fn create_engine_with_body_and_output(
 
     // set_mob_hp(ob, mob_name, hp) - 몹의 HP 설정
     let body_ptr_set_hp = body_ptr;
-    engine.register_fn("set_mob_hp", move |ob: &mut rhai::Map, mob_name: &str, hp: i64| -> bool {
+    engine.register_fn("set_mob_hp", move |_ob: &mut rhai::Map, mob_name: &str, hp: i64| -> bool {
         let body = unsafe { &*body_ptr_set_hp };
 
         // 플레이어 위치 가져오기
@@ -4583,7 +4583,7 @@ pub fn create_engine_with_body_and_output(
             Ok(g) => g,
             Err(_) => return Dynamic::UNIT,
         };
-        let room_key = format!("{}:{}", zone, room_id);
+        let _room_key = format!("{}:{}", zone, room_id);
         if let Some(arc) = w.room_cache.get_room_cached(zone, room_id) {
             if let Ok(room_ref) = arc.read() {
                 let mut m = rhai::Map::new();
@@ -5304,7 +5304,7 @@ pub fn create_engine_with_body_and_output(
     // use_skill(ob, skill_name, target) - 무공 스킬 사용
     // Returns "" on success, error string on failure
     let body_ptr_use_skill = body_ptr;
-    engine.register_fn("use_skill", move |ob: &mut rhai::Map, skill_name: &str, _target: &str| -> String {
+    engine.register_fn("use_skill", move |_ob: &mut rhai::Map, skill_name: &str, _target: &str| -> String {
         let body = unsafe { &mut *body_ptr_use_skill };
 
         // Check if player has the skill
@@ -5360,7 +5360,7 @@ pub fn create_engine_with_body_and_output(
     // learn_skill(ob, skill_name) - 새 스킬 학습
     // Returns "" on success, error string on failure
     let body_ptr_learn = body_ptr;
-    engine.register_fn("learn_skill", move |ob: &mut rhai::Map, skill_name: &str| -> String {
+    engine.register_fn("learn_skill", move |_ob: &mut rhai::Map, skill_name: &str| -> String {
         let body = unsafe { &mut *body_ptr_learn };
 
         // Check if already learned
@@ -5396,7 +5396,7 @@ pub fn create_engine_with_body_and_output(
     // forget_skill(ob, skill_name) - 스킬 잊기
     // Returns true on success
     let body_ptr_forget = body_ptr;
-    engine.register_fn("forget_skill", move |ob: &mut rhai::Map, skill_name: &str| -> bool {
+    engine.register_fn("forget_skill", move |_ob: &mut rhai::Map, skill_name: &str| -> bool {
         let body = unsafe { &mut *body_ptr_forget };
 
         // Check if has the skill
@@ -5493,7 +5493,7 @@ pub fn create_engine_with_body_and_output(
     // cast_spell(ob, spell_name, target) - 주문 시전
     // Similar to use_skill but for spells (could use spell.json in future)
     let body_ptr_cast = body_ptr;
-    engine.register_fn("cast_spell", move |ob: &mut rhai::Map, spell_name: &str, _target: &str| -> String {
+    engine.register_fn("cast_spell", move |_ob: &mut rhai::Map, spell_name: &str, _target: &str| -> String {
         let body = unsafe { &mut *body_ptr_cast };
 
         // Check if player has the spell
@@ -5681,7 +5681,7 @@ pub fn create_engine_with_body_and_output(
     let body_ptr_jp = body_ptr;
     engine.register_fn("join_party", move |_ob: &mut rhai::Map, party_name: &str| -> String {
         let body = unsafe { &mut *body_ptr_jp };
-        let my_name = body.get_name();
+        let _my_name = body.get_name();
 
         if party_name.trim().is_empty() {
             return "파티 이름을 입력해주세요.".to_string();
@@ -5737,7 +5737,7 @@ pub fn create_engine_with_body_and_output(
 
     // get_party_members(ob) - 파티 멤버 목록 반환 (Array of names)
     let body_ptr_gpm = body_ptr;
-    engine.register_fn("get_party_members", move |ob: &mut rhai::Map| -> rhai::Array {
+    engine.register_fn("get_party_members", move |_ob: &mut rhai::Map| -> rhai::Array {
         let body = unsafe { &*body_ptr_gpm };
         let mut members = rhai::Array::new();
 
@@ -5757,7 +5757,7 @@ pub fn create_engine_with_body_and_output(
     // send_party_message(ob, message) - 파티 메시지 전송. 성공 시 true
     let spec_pm = spec.clone();
     let body_ptr_pm = body_ptr;
-    engine.register_fn("send_party_message", move |ob: &mut rhai::Map, msg: &str| -> bool {
+    engine.register_fn("send_party_message", move |_ob: &mut rhai::Map, msg: &str| -> bool {
         let body = unsafe { &*body_ptr_pm };
         let my_name = body.get_name();
         let my_party = body.get_string("소속파티");
@@ -6178,7 +6178,7 @@ pub fn create_engine_with_body_and_output(
         }
         let body = unsafe { &mut *body_ptr_gitm };
 
-        let mut w = match get_world_state().write() {
+        let w = match get_world_state().write() {
             Ok(w) => w,
             Err(_) => return false,
         };
@@ -6460,7 +6460,7 @@ pub fn create_engine_with_body_and_output(
     // set_player_level(admin_ob, target_name, level) - 플레이어 레벨 설정
     // Returns true on success
     // Admin level 2000 required
-    let body_ptr_set_lvl = body_ptr;
+    let _body_ptr_set_lvl = body_ptr;
     engine.register_fn("set_player_level", move |admin_ob: &mut rhai::Map, target_name: &str, level: i64| -> bool {
         // 관리자 권한 확인
         let admin_level = admin_ob.get("관리자등급")
@@ -6489,7 +6489,7 @@ pub fn create_engine_with_body_and_output(
     // set_player_money(admin_ob, target_name, amount) - 플레이어 돈 설정
     // Returns true on success
     // Admin level 2000 required
-    let body_ptr_set_money = body_ptr;
+    let _body_ptr_set_money = body_ptr;
     engine.register_fn("set_player_money", move |admin_ob: &mut rhai::Map, target_name: &str, amount: i64| -> bool {
         // 관리자 권한 확인
         let admin_level = admin_ob.get("관리자등급")
@@ -6518,7 +6518,7 @@ pub fn create_engine_with_body_and_output(
     // set_player_hp(admin_ob, target_name, hp) - 플레이어 HP 설정
     // Returns true on success
     // Admin level 2000 required
-    let body_ptr_set_hp_player = body_ptr;
+    let _body_ptr_set_hp_player = body_ptr;
     engine.register_fn("set_player_hp", move |admin_ob: &mut rhai::Map, target_name: &str, hp: i64| -> bool {
         // 관리자 권한 확인
         let admin_level = admin_ob.get("관리자등급")
@@ -6601,7 +6601,7 @@ pub fn create_engine_with_body_and_output(
     // warp_player(admin_ob, target_name, zone, room) - 플레이어를 특정 위치로 이동
     // Returns "" on success, error string on failure
     // Admin level 2000 required
-    let body_ptr_warp = body_ptr;
+    let _body_ptr_warp = body_ptr;
     engine.register_fn("warp_player", move |admin_ob: &mut rhai::Map, target_name: &str, zone: &str, room: &str| -> String {
         // 관리자 권한 확인
         let admin_level = admin_ob.get("관리자등급")
@@ -6890,7 +6890,7 @@ pub fn create_engine_with_body_and_output(
     // Returns: "" on success, error code on failure
     // Error codes: "no_merchant", "not_for_sale", "no_money", "inv_full", "too_heavy"
     let body_ptr_buy_shop = body_ptr;
-    engine.register_fn("buy_from_shop", move |ob: &mut rhai::Map, mob_name: &str, item_name: &str, count: i64| -> String {
+    engine.register_fn("buy_from_shop", move |_ob: &mut rhai::Map, mob_name: &str, item_name: &str, count: i64| -> String {
         let body = unsafe { &mut *body_ptr_buy_shop };
         let pname = body.get_name();
         let w = match get_world_state().read() {
@@ -6977,7 +6977,7 @@ pub fn create_engine_with_body_and_output(
     // Returns: "" on success, error code on failure
     // Error codes: "no_merchant", "no_item", "cant_sell"
     let body_ptr_sell_shop = body_ptr;
-    engine.register_fn("sell_to_shop", move |ob: &mut rhai::Map, mob_name: &str, item_name: &str, count: i64| -> String {
+    engine.register_fn("sell_to_shop", move |_ob: &mut rhai::Map, mob_name: &str, item_name: &str, count: i64| -> String {
         let body = unsafe { &mut *body_ptr_sell_shop };
         let pname = body.get_name();
         let w = match get_world_state().read() {
@@ -7010,7 +7010,7 @@ pub fn create_engine_with_body_and_output(
         }
 
         let count = count.max(1).min(100) as usize;
-        let mut sold = 0usize;
+        let _sold = 0usize;
         let mut total = 0i64;
 
         // 스택 아이템 먼저 확인
@@ -7230,7 +7230,7 @@ pub fn create_engine_with_body_and_output(
     // Helper function: 방파 멤버의 직위를 설정 (data/user/*.json에 직접 저장)
     fn set_guild_member_position(member_name: &str, position: &str) -> bool {
         let path = format!("data/user/{}.json", member_name);
-        if let Ok(mut content) = std::fs::read_to_string(&path) {
+        if let Ok(content) = std::fs::read_to_string(&path) {
             if let Ok(mut json) = serde_json::from_str::<serde_json::Value>(&content) {
                 if let Some(uso) = json.get_mut("사용자오브젝트").and_then(|v| v.as_object_mut()) {
                     if let Some(attr) = uso.get_mut("attr").and_then(|v| v.as_object_mut()) {
@@ -7300,7 +7300,7 @@ pub fn create_engine_with_body_and_output(
     // guild_join(ob, guild_name) - 방파 가입
     // Returns "" on success, error string on failure
     let body_ptr_gj = body_ptr;
-    engine.register_fn("guild_join", move |ob: &mut rhai::Map, guild_name: &str| -> String {
+    engine.register_fn("guild_join", move |_ob: &mut rhai::Map, guild_name: &str| -> String {
         let body = unsafe { &mut *body_ptr_gj };
 
         // 빈 방파 이름 체크
@@ -7335,7 +7335,7 @@ pub fn create_engine_with_body_and_output(
     // guild_leave(ob) - 방파 탈퇴
     // Returns true on success
     let body_ptr_gl = body_ptr;
-    engine.register_fn("guild_leave", move |ob: &mut rhai::Map| -> bool {
+    engine.register_fn("guild_leave", move |_ob: &mut rhai::Map| -> bool {
         let body = unsafe { &mut *body_ptr_gl };
 
         let current_guild = body.get_string("소속");
@@ -7385,7 +7385,7 @@ pub fn create_engine_with_body_and_output(
 
     // guild_get_leader(ob, guild_name) - 방파 방주 이름 가져오기
     // Returns leader name
-    let body_ptr_gglead = body_ptr;
+    let _body_ptr_gglead = body_ptr;
     engine.register_fn("guild_get_leader", move |_ob: &mut rhai::Map, guild_name: &str| -> String {
         if guild_name.is_empty() {
             return String::new();
@@ -7543,7 +7543,7 @@ pub fn create_engine_with_body_and_output(
     // guild_chat(ob, message) - 방파 채팅
     // Already exists as send_broadcast_to_guild, but add alias
     let spec_gchat = spec.clone();
-    let body_ptr_gchat = body_ptr;
+    let _body_ptr_gchat = body_ptr;
     engine.register_fn("guild_chat", move |ob: &mut rhai::Map, msg: &str| -> String {
         if msg.trim().is_empty() {
             return "usage".to_string();
@@ -7640,7 +7640,7 @@ pub fn create_engine_with_body_and_output(
             set_guild_member_position(member_name, "");
             // 직접 파일을 수정하여 소속 제거
             let path = format!("data/user/{}.json", member_name);
-            if let Ok(mut content) = std::fs::read_to_string(&path) {
+            if let Ok(content) = std::fs::read_to_string(&path) {
                 if let Ok(mut json) = serde_json::from_str::<serde_json::Value>(&content) {
                     if let Some(uso) = json.get_mut("사용자오브젝트").and_then(|v| v.as_object_mut()) {
                         if let Some(attr) = uso.get_mut("attr").and_then(|v| v.as_object_mut()) {
@@ -7679,7 +7679,7 @@ pub fn create_engine_with_global_data(global_data: SharedGlobalData) -> Engine {
     let mut engine = create_engine();
 
     // 글로벌 데이터를 clone하여 캡처
-    let gd = global_data.clone();
+    let _gd = global_data.clone();
 
     // ============================================================
     // GLOBAL DATA ACCESS FUNCTIONS
@@ -8054,7 +8054,7 @@ impl ScriptStorage {
         );
         let mut scope = Scope::new();
 
-        let mut player_data = build_ob_from_body(player);
+        let player_data = build_ob_from_body(player);
         scope.push("player", player_data.clone());
         scope.push("me", player_data.clone());
         scope.push("ob", player_data.clone());

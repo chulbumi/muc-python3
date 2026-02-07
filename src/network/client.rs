@@ -24,7 +24,7 @@ use crate::world::item::{get_item_display_name, get_item_weight_by_key};
 use crate::world::{get_world_state, PlayerPosition, RoomCache};
 use crate::world::event::{run_script_chunk, run_script_chunk_rhai, try_mob_event, ScriptNext};
 use std::collections::HashMap;
-use crate::script::{build_room_objs_grouped, build_room_lines, format_room_objs_display, set_precomputed_all_online, clear_precomputed_all_online, save_body_to_json, load_body_from_json, password_hash, password_verify, load_user_password_hash};
+use crate::script::{build_room_objs_grouped, build_room_lines, set_precomputed_all_online, clear_precomputed_all_online, save_body_to_json, load_body_from_json, password_hash, password_verify, load_user_password_hash};
 
 /// Client connection state
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -736,7 +736,7 @@ async fn process_login_state(
         }
         LoginAction::ScriptContinue => {
             // Get script output to send
-            let (msg, should_wait, script_complete, player_name, delay_ms, has_step) = {
+            let (msg, should_wait, script_complete, player_name, _delay_ms, _has_step) = {
                 let mut clients = broadcaster.clients.lock();
                 let client = clients.get_mut(&addr);
                 if let Some(client) = client {
@@ -1598,7 +1598,7 @@ async fn show_room_to_player(
 
     // Get room from cache
     let world = get_world_state().read().unwrap();
-    let room_key = format!("{}:{}", pos.zone, pos.room);
+    let _room_key = format!("{}:{}", pos.zone, pos.room);
     let room_output = if let Some(room) = world.room_cache.get_room_cached(&pos.zone, &pos.room) {
         let room_ref = room.read()
             .map_err(|e| format!("Room read lock error: {}", e))?;
@@ -1704,7 +1704,7 @@ fn handle_movement(
     // Lock released
 
     // Try to move player using WorldState
-    let (new_zone, new_room) = {
+    let (_new_zone, _new_room) = {
         let mut world = get_world_state().write().unwrap();
         match world.move_player(&player_name, dir) {
             Ok(pos) => {
@@ -2308,7 +2308,7 @@ async fn handle_game_command(
     }
 
     // Get the player
-    let player_name = {
+    let _player_name = {
         let clients = broadcaster.clients.lock();
         clients.get(&addr).map(|c| c.player_name()).unwrap_or_else(|| "방문자".to_string())
     };

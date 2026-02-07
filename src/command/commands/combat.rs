@@ -8,7 +8,6 @@ use crate::command::registry::CommandRegistry;
 use crate::player::{ActState, Body};
 use crate::object::Value;
 use crate::world::WorldState;
-use crate::combat;
 use crate::hangul;
 use std::sync::Arc;
 use rand::Rng;
@@ -186,7 +185,7 @@ pub fn initiate_pvp(
     attacker: &mut Body,
     target_name: &str,
     world: &WorldState,
-    config: &PvPConfig,
+    _config: &PvPConfig,
 ) -> (bool, String) {
     // Get attacker position
     let attacker_pos = match world.get_player_position(&attacker.get_name()) {
@@ -279,7 +278,7 @@ fn flee_command(player: &mut Body, _args: &[&str]) -> CommandResult {
 /// Uses a skill (시전)
 ///
 /// Supports both PvM and PvP skills
-fn cast_command(player: &mut Body, args: &[&str]) -> CommandResult {
+fn cast_command(_player: &mut Body, args: &[&str]) -> CommandResult {
     if args.is_empty() {
         return CommandResult::Error("☞ 사용법: 시전 [스킬명] ([대상])".to_string());
     }
@@ -345,13 +344,13 @@ fn duel_command(player: &mut Body, args: &[&str]) -> CommandResult {
 }
 
 /// Accepts a duel request (결투수락)
-fn accept_duel_command(player: &mut Body, _args: &[&str]) -> CommandResult {
+fn accept_duel_command(_player: &mut Body, _args: &[&str]) -> CommandResult {
     // In full implementation, check for pending duel requests
     CommandResult::Output("☞ 대기 중인 결투 신청이 없습니다.".to_string())
 }
 
 /// Declines a duel request (결투거절)
-fn decline_duel_command(player: &mut Body, _args: &[&str]) -> CommandResult {
+fn decline_duel_command(_player: &mut Body, _args: &[&str]) -> CommandResult {
     // In full implementation, check for and decline pending duel requests
     CommandResult::Output("☞ 대기 중인 결투 신청이 없습니다.".to_string())
 }

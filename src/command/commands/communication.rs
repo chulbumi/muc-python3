@@ -74,7 +74,7 @@ fn shout_command(player: &mut Body, args: &[&str]) -> CommandResult {
     let personality = player.get_string("성격");
 
     // Determine shout type based on personality
-    let shout_type = if personality == "선인" {
+    let _shout_type = if personality == "선인" {
         "창룡후"
     } else if personality == "기인" {
         "사자후"

@@ -429,7 +429,7 @@ impl Player {
         if self.body.get_int("투명상태") != 1 {
             match mode {
                 "시작" => {
-                    let msg = format!("{} 무림지존을 꿈꾸며 강호에 출두합니다.",
+                    let _msg = format!("{} 무림지존을 꿈꾸며 강호에 출두합니다.",
                         self.body.han_iga());
                     // self.channel.send_to_all_in_out(&msg, self);
                 }
@@ -727,7 +727,7 @@ impl Player {
 
     /// Gets player description
     pub fn get_desc(&self) -> String {
-        let name = self.body.get_name();
+        let _name = self.body.get_name();
         let nickname = self.body.get_string("무림별호");
 
         let title = if nickname.is_empty() {
@@ -774,7 +774,7 @@ impl Player {
 
         self.followers.push(Arc::downgrade(&follower));
 
-        if let Ok(mut f) = follower.lock() {
+        if let Ok(f) = follower.lock() {
             f.send_line(&format!("당신은 {} 따라다니기 시작합니다.", self.body.han_obj()));
         }
     }
