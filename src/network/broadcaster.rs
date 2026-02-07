@@ -246,11 +246,51 @@ impl Broadcaster {
 
     /// Send a message to all clients in a room (environment)
     ///
-    /// This is a placeholder for future room-based messaging.
-    pub fn tell_room(&self, _room_id: &str, message: &str, exclude: Option<SocketAddr>) {
-        // TODO: Implement room-based filtering
-        // For now, just broadcast to all
-        self.broadcast(message, exclude);
+    /// Filters clients by their current location (위치 field in player data).
+    /// room_id format: "area:room_number" (e.g., "낙양성:42", "시작/시작")
+    pub fn tell_room(&self, room_id: &str, message: &str, exclude: Option<SocketAddr>) {
+        let mut clients = self.clients.lock();
+        let mut dead_addrs = Vec::new();
+
+        for (&addr, client) in clients.iter() {
+            if Some(addr) != exclude {
+                // Check if player is in the specified room
+                let in_room = client.player.as_ref().map_or(false, |player| {
+                    let location = player.body.get_string("위치");
+                    // Match room_id - for "낙양성:42", we match "낙양성:42" exactly
+                    // For "시작/시작", we need to handle both formats
+                    location == room_id || {
+                        // Also handle cases where room_id might be a partial match
+                        // e.g., room_id="낙양성" would match "낙양성:42"
+                        location.starts_with(&format!("{}:", room_id))
+                    }
+                });
+
+                if in_room {
+                    // Get player name and replace templates for each client
+                    let player_name = client.player.as_ref()
+                        .map(|p| {
+                            let name = p.body.get_string("이름");
+                            if name.is_empty() { "방문자".to_string() } else { name }
+                        })
+                        .unwrap_or_else(|| "방문자".to_string());
+
+                    let processed_message = replace_player_templates(message, &player_name);
+
+                    if let Err(_e) = client.sender.send(processed_message) {
+                        // Send failed - client's send task likely exited (broken pipe)
+                        debug!("Failed to send to {} (connection dead), marking for cleanup", addr);
+                        dead_addrs.push(addr);
+                    }
+                }
+            }
+        }
+
+        // Clean up dead clients to prevent memory leaks and cascading errors
+        for addr in dead_addrs {
+            warn!("Removing dead client {} due to send failure (broken pipe)", addr);
+            clients.remove(&addr);
+        }
     }
 }
 
