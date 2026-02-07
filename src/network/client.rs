@@ -605,6 +605,7 @@ async fn process_login_state(
             LoginState::ScriptMode => {
                 // If script is outputting (not waiting for input), discard any received input
                 // This prevents buffered input from being processed when wait_enter/wait_input is reached
+                info!("[ScriptMode] waiting_for_input={}, input={:?}", session.waiting_for_input, input);
                 if !session.waiting_for_input {
                     LoginAction::None
                 } else {
@@ -1009,6 +1010,13 @@ fn process_script_line(
         .map(doumi_hashmap_to_ob)
         .unwrap_or_else(Map::new);
 
+    eprintln!("[process_script_line] loaded ob with {} entries", ob.len());
+    for (k, v) in ob.iter() {
+        if let Ok(s) = v.clone().into_string() {
+            eprintln!("  ob[{}] = {}", k, s);
+        }
+    }
+
     // get_name 전용 검증: doumi_resume_op == "get_name"일 때 입력 검사. 실패 시 ob 복원 후 return.
     if session.doumi_resume_op.as_deref() == Some("get_name") {
         let t = input.trim();
@@ -1071,7 +1079,15 @@ fn process_script_line(
     // 현재 단계와 resume 정보 가져오기
     let current_step = session.doumi_step.take();
     let resume_op = session.doumi_resume_op.take();
-    let resume = resume_op.as_ref().map(|o| (o.as_str(), input));
+    // wait_enter의 경우 Enter 키를 입력으로 사용하지 않음 (빈 문자열 전달)
+    let effective_input = if resume_op.as_deref() == Some("wait_enter") {
+        ""
+    } else {
+        input
+    };
+    eprintln!("[process_script_line] resume_op={:?}, input={:?}, effective_input={:?}",
+        resume_op, input, effective_input);
+    let resume = resume_op.as_ref().map(|o| (o.as_str(), effective_input));
 
     eprintln!("[process_script_line] Calling run_doumi_to_result: current_step={:?}, resume_op={:?}, initial_delay={}",
         current_step, resume_op, session.delay_after_output);
@@ -1090,7 +1106,13 @@ fn process_script_line(
 
     match result {
         DoumiRunResult::Suspend { lines, delay_ms, suspend } => {
-            session.doumi_ob = Some(doumi_ob_to_hashmap(ob));
+            session.doumi_ob = Some(doumi_ob_to_hashmap(ob.clone()));
+            eprintln!("[process_script_line] Suspend: saving ob with {} entries", ob.len());
+            for (k, v) in ob.iter() {
+                if let Ok(s) = v.clone().into_string() {
+                    eprintln!("  ob[{}] = {}", k, s);
+                }
+            }
             let next_step = suspend.next_step.clone();
             session.doumi_step = next_step.clone();
             session.doumi_resume_op = Some(suspend.op.clone());

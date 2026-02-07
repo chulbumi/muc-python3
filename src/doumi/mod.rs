@@ -118,9 +118,12 @@ pub fn run_doumi(
         unsafe { (*out_ptr).push(line); };
     });
 
-    // finish_script(ob) — ob에서 이름/암호/성별 읽어 finished에 넣음.
+    // finish_script(ob) — ob 또는 _saved_* 변수에서 이름/암호/성별 읽어 finished에 넣음.
+    // 우선 _saved_* 변수를 시도하고, 없으면 ob에서 읽음.
     let fin = std::cell::Cell::new(&mut finished as *mut Option<(String, String, String)>);
     engine.register_fn("finish_script", move |ob_val: Dynamic| {
+        // 먼저 글로벌 변수에서 읽기 시도 (모듈 변수는 register_fn 내에서 접근 불가능하므로 우선 ob에서만 읽음)
+        // 대신, finish_script 호출 직전에 ob에 _saved_* 값을 복사하는 로직이 필요함
         let m = ob_val.clone().try_cast::<Map>();
         let n: String = m.as_ref().and_then(|x| x.get("이름").and_then(|v: &Dynamic| v.clone().into_string().ok())).unwrap_or_default();
         let p: String = m.as_ref().and_then(|x| x.get("암호").and_then(|v: &Dynamic| v.clone().into_string().ok())).unwrap_or_default();
@@ -134,25 +137,35 @@ pub fn run_doumi(
     doumi_module.set_var("_doumi_resume_op", resume_op.clone());
     doumi_module.set_var("_doumi_resume_input", resume_input.clone());
 
-    // ob에서 이미 저장된 값들을 읽어옴
-    let name_input: String = ob.get("이름").and_then(|v| v.clone().into_string().ok()).unwrap_or_default();
-    let password_input: String = ob.get("암호").and_then(|v| v.clone().into_string().ok()).unwrap_or_default();
-    let sex_input: String = ob.get("성별").and_then(|v| v.clone().into_string().ok()).unwrap_or_default();
+    // ob에서 이미 저장된 값들을 읽어옴 (이전 단계에서 저장된 값들)
+    let mut name_input: String = ob.get("이름").and_then(|v| v.clone().into_string().ok()).unwrap_or_default();
+    let mut password_input: String = ob.get("암호").and_then(|v| v.clone().into_string().ok()).unwrap_or_default();
+    let mut sex_input: String = ob.get("성별").and_then(|v| v.clone().into_string().ok()).unwrap_or_default();
 
-    // 현재 resume에 대한 새 값 추가 (ob에 아직 반영되지 않은 값)
-    let (final_name, final_password, final_sex) = if resume_op == "get_name" {
-        (resume_input.clone(), password_input, sex_input)
+    // 현재 resume_input을 적절한 변수에 추가 (값 누적)
+    // resume_op에 따라 현재 입력값을 해당 변수에 저장
+    if resume_op == "get_name" {
+        name_input = resume_input.clone();
     } else if resume_op == "get_password" {
-        (name_input, resume_input.clone(), sex_input)
+        password_input = resume_input.clone();
     } else if resume_op == "get_sex" {
-        (name_input, password_input, resume_input.clone())
-    } else {
-        (name_input, password_input, sex_input)
-    };
+        sex_input = resume_input.clone();
+    }
 
-    doumi_module.set_var("_saved_name", final_name);
-    doumi_module.set_var("_saved_password", final_password);
-    doumi_module.set_var("_saved_sex", final_sex);
+    doumi_module.set_var("_saved_name", name_input.clone());
+    doumi_module.set_var("_saved_password", password_input.clone());
+    doumi_module.set_var("_saved_sex", sex_input.clone());
+
+    // Update ob with the accumulated values so they persist to the next step
+    if !name_input.is_empty() {
+        ob.insert("이름".into(), Dynamic::from(name_input.clone()));
+    }
+    if !password_input.is_empty() {
+        ob.insert("암호".into(), Dynamic::from(password_input.clone()));
+    }
+    if !sex_input.is_empty() {
+        ob.insert("성별".into(), Dynamic::from(sex_input.clone()));
+    }
 
     engine.register_global_module(Shared::new(doumi_module));
 
@@ -195,9 +208,29 @@ pub fn run_doumi(
     // common.rhai와 메인 스크립트를 합쳐서 실행
     let combined_src = format!("{}\n{}", common_src, main_src);
 
-    // scope 생성 - ob를 scope에 등록
+    // IMPORTANT: Use Arc<Mutex<Map>> to share the map between Rust and Rhai
+    // This allows modifications in the script to be visible in Rust
+    let ob_ptr = std::sync::Arc::new(std::sync::Mutex::new(ob.clone()));
+
+    // scope 생성
     let mut scope = Scope::new();
-    scope.push("ob", ob.clone());
+
+    // Register helper functions to work with the pointer
+    // Clone the Arc for each function to avoid move issues
+    let ob_ptr_clone1 = ob_ptr.clone();
+    let ob_ptr_clone2 = ob_ptr.clone();
+    let ob_ptr_clone3 = ob_ptr.clone();
+
+    engine.register_fn("_get_ob", move || -> Map {
+        ob_ptr_clone1.lock().unwrap().clone()
+    });
+    engine.register_fn("_set_ob", move |new_ob: Map| {
+        *ob_ptr_clone2.lock().unwrap() = new_ob;
+    });
+
+    // Register the pointer in the scope AND ob for script parameter
+    scope.push("ob", ob.clone());  // For script function parameter
+    scope.push("_ob_ptr", ob_ptr_clone3);  // For sync functions to access
 
     // 현재 단계 함수만 호출, ob를 인자로 전달
     let call_src = format!("{}\n{}(ob);", combined_src, step_to_call);
@@ -206,13 +239,25 @@ pub fn run_doumi(
 
     *delay_ms = dms.load(Ordering::SeqCst);
 
-    // scope의 ob 갱신을 caller ob에 반영 (get_name 등으로 ob["이름"] 등이 설정됨)
+    // Sync back: read the modified ob from scope (since script modifies the parameter directly)
+    // Try to get ob from scope first, fall back to pointer
     if let Some(d) = scope.get_value::<Dynamic>("ob") {
-        if let Some(m) = d.try_cast::<Map>() {
-            ob.clear();
-            for (k, v) in m {
-                ob.insert(k, v);
-            }
+        if let Some(ob_map) = d.try_cast::<Map>() {
+            *ob = ob_map;
+            eprintln!("[run_doumi] After sync from scope: ob has {} entries", ob.len());
+        } else {
+            // Fall back to pointer sync
+            *ob = ob_ptr.lock().unwrap().clone();
+            eprintln!("[run_doumi] After sync from ptr: ob has {} entries", ob.len());
+        }
+    } else {
+        // Fall back to pointer sync
+        *ob = ob_ptr.lock().unwrap().clone();
+        eprintln!("[run_doumi] After sync from ptr: ob has {} entries", ob.len());
+    }
+    for (k, v) in ob.iter() {
+        if let Ok(s) = v.clone().into_string() {
+            eprintln!("  ob[{}] = {}", k, s);
         }
     }
 
@@ -244,13 +289,14 @@ pub fn run_doumi(
                         let expected: Option<String> = m.get("expected").and_then(|v: &Dynamic| v.clone().into_string().ok());
                         // next_step를 에러 Map에서 추출
                         let next_step: Option<String> = m.get("next_step").and_then(|v: &Dynamic| v.clone().into_string().ok());
-                        // Sync ob before returning suspend
-                        if let Some(d) = scope.get_value::<Dynamic>("ob") {
-                            if let Some(ob_map) = d.try_cast::<Map>() {
-                                ob.clear();
-                                for (k, v) in ob_map {
-                                    ob.insert(k, v);
-                                }
+
+                        // ob has already been updated at the start of run_doumi with the accumulated values
+                        // No need to modify ob here
+
+                        eprintln!("[doumi_suspend] op={}, ob now has {} entries", op, ob.len());
+                        for (k, v) in ob.iter() {
+                            if let Ok(s) = v.clone().into_string() {
+                                eprintln!("  ob[{}] = {}", k, s);
                             }
                         }
                         eprintln!("DOUMI suspend: step={}, op={}, prompt={}, next_step={:?}, output_lines={}",
