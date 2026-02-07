@@ -894,6 +894,16 @@ pub fn create_engine() -> Engine {
     engine.register_fn("trim", |s: &str| -> String {
         s.trim().to_string()
     });
+    engine.register_fn("substring", |s: &str, start: i64, end: i64| -> String {
+        let chars: Vec<char> = s.chars().collect();
+        let start_idx = if start < 0 { 0 } else { start as usize };
+        let end_idx = if end < 0 { chars.len() } else { end as usize };
+        if start_idx >= chars.len() {
+            return String::new();
+        }
+        let end_idx = end_idx.min(chars.len());
+        chars[start_idx..end_idx].iter().collect()
+    });
     engine.register_fn("length", |s: &str| -> i64 {
         s.chars().count() as i64
     });
@@ -1080,13 +1090,48 @@ pub fn create_engine() -> Engine {
         obj_data.get("objs").cloned().unwrap_or(Dynamic::UNIT)
     });
 
-    // present(name, env) - Find object by name in environment
-    // Simplified version - returns UNIT for now
-    // TODO: Implement full search in objs array
-    engine.register_fn("present", |name: &str, _env: rhai::Map| -> Dynamic {
-        // For now, just return UNIT
-        // Full implementation would search through env["objs"] array
-        let _ = (name, _env); // Suppress unused warning
+    // present(env, name) - Find object by name in environment
+    // Searches through env["objs"] array for matching name/반응이름/설명1
+    engine.register_fn("present", |env: &mut rhai::Map, name: &str| -> Dynamic {
+        use rhai::Dynamic;
+
+        // Get objs array from environment
+        if let Some(objs_value) = env.get("objs") {
+            if let Some(objs) = objs_value.clone().try_cast::<rhai::Array>() {
+                for obj in &objs {
+                    if let Some(obj_map) = obj.clone().try_cast::<rhai::Map>() {
+                        // Check 이름
+                        if let Some(name_value) = obj_map.get("이름") {
+                            if let Some(obj_name) = name_value.clone().try_cast::<String>() {
+                                if obj_name == name {
+                                    return obj.clone();
+                                }
+                            }
+                        }
+                        // Check 반응이름 (array)
+                        if let Some(reactions_value) = obj_map.get("반응이름") {
+                            if let Some(reactions) = reactions_value.clone().try_cast::<rhai::Array>() {
+                                for reaction in &reactions {
+                                    if let Some(reaction_str) = reaction.clone().try_cast::<String>() {
+                                        if reaction_str == name {
+                                            return obj.clone();
+                                        }
+                                    }
+                                }
+                            }
+                        }
+                        // Check 설명1 (display name)
+                        if let Some(desc_value) = obj_map.get("설명1") {
+                            if let Some(desc1) = desc_value.clone().try_cast::<String>() {
+                                if desc1 == name {
+                                    return obj.clone();
+                                }
+                            }
+                        }
+                    }
+                }
+            }
+        }
         Dynamic::UNIT
     });
 
@@ -1849,6 +1894,16 @@ pub fn create_engine_with_output(output_collector: Arc<Mutex<Vec<String>>>) -> E
     engine.register_fn("trim", |s: &str| -> String {
         s.trim().to_string()
     });
+    engine.register_fn("substring", |s: &str, start: i64, end: i64| -> String {
+        let chars: Vec<char> = s.chars().collect();
+        let start_idx = if start < 0 { 0 } else { start as usize };
+        let end_idx = if end < 0 { chars.len() } else { end as usize };
+        if start_idx >= chars.len() {
+            return String::new();
+        }
+        let end_idx = end_idx.min(chars.len());
+        chars[start_idx..end_idx].iter().collect()
+    });
     engine.register_fn("length", |s: &str| -> i64 {
         s.chars().count() as i64
     });
@@ -2103,8 +2158,23 @@ pub fn create_engine_with_output(output_collector: Arc<Mutex<Vec<String>>>) -> E
         adm >= min_level
     });
 
-    // Note: Text formatting functions (format_item_action_self, format_item_action_target,
-    // format_hp_bar, format_time, format_item_name, format_mob_name) are now implemented
+    // Text formatting functions for item actions
+    engine.register_fn("format_item_action_self", |name: &str, action: &str, count: i64| -> String {
+        if count > 1 {
+            format!("{} {} {}개를 {}.", name, action, count, han_iga(name))
+        } else {
+            format!("{} {} {}.", name, han_iga(name), action)
+        }
+    });
+    engine.register_fn("format_item_action_target", |name: &str, target: &str, action: &str, count: i64| -> String {
+        if count > 1 {
+            format!("{} {} {}개를 {} {}.", name, action, count, han_eun(target), target)
+        } else {
+            format!("{} {} {} {}.", name, han_eun(target), target, action)
+        }
+    });
+
+    // Note: format_hp_bar, format_time, format_item_name, format_mob_name are now implemented
     // in lib/format.rhai for hot-reload capability. They are loaded as library scripts.
 
     // ============================================================
@@ -2188,6 +2258,32 @@ pub fn create_engine_with_output(output_collector: Arc<Mutex<Vec<String>>>) -> E
             }
             Err(_) => Dynamic::UNIT,
         }
+    });
+
+    // find_mobs(search_term): 몹 검색. 관리자 명령어용.
+    // Returns Array of [zone, room, mob_name, display_name, hp, max_hp]
+    engine.register_fn("find_mobs", |search_term: &str| -> rhai::Array {
+        use crate::world::get_world_state;
+        let w = match get_world_state().read() {
+            Ok(g) => g,
+            Err(_) => return rhai::Array::new(),
+        };
+
+        let results = w.search_mobs_by_name(search_term);
+        let mut arr = rhai::Array::new();
+
+        for (zone, room, mob_name, display_name, hp, max_hp) in results {
+            let mut m = rhai::Map::new();
+            m.insert("zone".into(), Dynamic::from(zone));
+            m.insert("room".into(), Dynamic::from(room));
+            m.insert("mob_name".into(), Dynamic::from(mob_name));
+            m.insert("display_name".into(), Dynamic::from(display_name));
+            m.insert("hp".into(), Dynamic::from(hp));
+            m.insert("max_hp".into(), Dynamic::from(max_hp));
+            arr.push(Dynamic::from(m));
+        }
+
+        arr
     });
 
     // get_help(topic): data/config/help.json의 {"도움말": { "도움말": [...], ... }}에서
@@ -4029,14 +4125,78 @@ pub fn create_engine_with_body_and_output(
     // find_mob_in_room(ob, mob_name) - 현재 방에서 몹 찾기
     // 몹이 있으면 몹 데이터를 반환, 없으면 UNIT
     let body_ptr_mob = body_ptr;
-    engine.register_fn("find_mob_in_room", move |_ob: &mut rhai::Map, mob_name: &str| -> Dynamic {
-        let _body = unsafe { &*body_ptr_mob };
-        // TODO: 현재 방의 몹 목록에서 mob_name 찾기
-        // 현재는 스텁: 몹 이름을 포함한 Map 반환
-        let mut mob_data = rhai::Map::new();
-        mob_data.insert("이름".into(), Dynamic::from(mob_name.to_string()));
-        mob_data.insert("표시".into(), Dynamic::from(mob_name.to_string()));
-        Dynamic::from(mob_data)
+    engine.register_fn("find_mob_in_room", move |ob: &mut rhai::Map, mob_name: &str| -> Dynamic {
+        let body = unsafe { &*body_ptr_mob };
+
+        // 플레이어 이름과 위치 가져오기
+        let player_name = ob.get("이름")
+            .and_then(|v| v.clone().into_string().ok())
+            .unwrap_or_default();
+
+        if player_name.is_empty() {
+            return Dynamic::UNIT;
+        }
+
+        // 위치 정보 파싱 (zone/room 형식)
+        let location = body.get_string("위치");
+        let parts: Vec<&str> = location.splitn(2, '/').collect();
+        if parts.len() != 2 {
+            return Dynamic::UNIT;
+        }
+        let zone = parts[0];
+        let room = parts[1];
+
+        // WorldState에서 현재 방의 몹 검색
+        if let Ok(world) = get_world_state().read() {
+            let mobs = world.get_mobs_in_room(zone, room);
+
+            // mob_name으로 검색 (이름 또는 반응 이름 일치)
+            for mob in mobs {
+                if !mob.alive {
+                    continue;
+                }
+
+                // 몹 데이터로 표시 이름 확인
+                if let Some(mob_data) = world.get_mob_data(&mob.mob_key) {
+                    let display_name = &mob_data.desc1;
+                    let mob_name_lower = mob_name.to_lowercase();
+                    let display_name_lower = display_name.to_lowercase();
+
+                    // 정확히 일치하거나 포함
+                    if display_name_lower == mob_name_lower || display_name_lower.contains(&mob_name_lower) {
+                        // 몹 데이터 반환
+                        let mut mob_info = rhai::Map::new();
+                        mob_info.insert("이름".into(), Dynamic::from(mob_data.name.clone()));
+                        mob_info.insert("표시".into(), Dynamic::from(display_name.clone()));
+                        mob_info.insert("hp".into(), Dynamic::from(mob.hp));
+                        mob_info.insert("max_hp".into(), Dynamic::from(mob.max_hp));
+                        mob_info.insert("level".into(), Dynamic::from(mob_data.level));
+                        mob_info.insert("zone".into(), Dynamic::from(mob.zone.clone()));
+                        mob_info.insert("room".into(), Dynamic::from(mob.room.clone()));
+                        mob_info.insert("mob_key".into(), Dynamic::from(mob.mob_key.clone()));
+                        return Dynamic::from(mob_info);
+                    }
+
+                    // 반응 이름들도 확인
+                    for reaction in &mob_data.reaction_names {
+                        if reaction.to_lowercase() == mob_name_lower {
+                            let mut mob_info = rhai::Map::new();
+                            mob_info.insert("이름".into(), Dynamic::from(mob_data.name.clone()));
+                            mob_info.insert("표시".into(), Dynamic::from(display_name.clone()));
+                            mob_info.insert("hp".into(), Dynamic::from(mob.hp));
+                            mob_info.insert("max_hp".into(), Dynamic::from(mob.max_hp));
+                            mob_info.insert("level".into(), Dynamic::from(mob_data.level));
+                            mob_info.insert("zone".into(), Dynamic::from(mob.zone.clone()));
+                            mob_info.insert("room".into(), Dynamic::from(mob.room.clone()));
+                            mob_info.insert("mob_key".into(), Dynamic::from(mob.mob_key.clone()));
+                            return Dynamic::from(mob_info);
+                        }
+                    }
+                }
+            }
+        }
+
+        Dynamic::UNIT
     });
 
     // get_mob_by_name(ob, mob_name) - 데이터베이스에서 몹 정보 조회
@@ -4065,87 +4225,350 @@ pub fn create_engine_with_body_and_output(
 
     // kill_mob(ob, mob_name) - 몹 처치
     let body_ptr_kill = body_ptr;
-    engine.register_fn("kill_mob", move |_ob: &mut rhai::Map, mob_name: &str| -> bool {
-        let _body = unsafe { &*body_ptr_kill };
-        // TODO: 몹 찾아서 처치 로직 구현 필요
-        // 현재는 로그만 출력하고 true 반환
-        println!("[SCRIPT] kill_mob called for: {}", mob_name);
-        true
+    engine.register_fn("kill_mob", move |ob: &mut rhai::Map, mob_name: &str| -> bool {
+        let body = unsafe { &*body_ptr_kill };
+
+        // 플레이어 이름과 위치 가져오기
+        let player_name = ob.get("이름")
+            .and_then(|v| v.clone().into_string().ok())
+            .unwrap_or_default();
+
+        if player_name.is_empty() {
+            return false;
+        }
+
+        // 위치 정보 파싱 (zone/room 형식)
+        let location = body.get_string("위치");
+        let parts: Vec<&str> = location.splitn(2, '/').collect();
+        if parts.len() != 2 {
+            return false;
+        }
+        let zone = parts[0];
+        let room = parts[1];
+
+        // WorldState에서 현재 방의 몹 검색 후 처치
+        // 먼저 읽기 lock으로 몹 찾기
+        let mob_key_to_kill = if let Ok(world) = get_world_state().read() {
+            let mobs = world.get_mobs_in_room(zone, room);
+            let mob_name_lower = mob_name.to_lowercase();
+            let mut found_key = None;
+
+            for mob in mobs {
+                if !mob.alive {
+                    continue;
+                }
+
+                // 몹 데이터로 표시 이름 확인
+                if let Some(mob_data) = world.get_mob_data(&mob.mob_key) {
+                    let display_name = &mob_data.desc1;
+                    let display_name_lower = display_name.to_lowercase();
+
+                    // 정확히 일치하거나 포함
+                    if display_name_lower == mob_name_lower || display_name_lower.contains(&mob_name_lower) {
+                        found_key = Some(mob.mob_key.clone());
+                        break;
+                    }
+
+                    // 반응 이름들도 확인
+                    for reaction in &mob_data.reaction_names {
+                        if reaction.to_lowercase() == mob_name_lower {
+                            found_key = Some(mob.mob_key.clone());
+                            break;
+                        }
+                    }
+                }
+            }
+            found_key
+        } else {
+            None
+        };
+
+        // 찾은 몹 처치 (쓰기 lock)
+        if let Some(mob_key) = mob_key_to_kill {
+            if let Ok(mut world) = get_world_state().write() {
+                world.kill_mob(zone, room, &mob_key);
+                return true;
+            }
+        }
+
+        false
     });
 
     // create_mob(ob, mob_name, zone, room) - 새 몹 생성
     let body_ptr_create = body_ptr;
     engine.register_fn("create_mob", move |_ob: &mut rhai::Map, mob_name: &str, zone: &str, room: &str| -> String {
         let _body = unsafe { &*body_ptr_create };
-        // TODO: 실제 몹 생성 로직 구현 필요
-        // 몹 데이터 파일 확인
-        let full_path = format!("data/mob/{}.json", mob_name);
-        match std::fs::read_to_string(&full_path) {
-            Ok(_) => {
-                println!("[SCRIPT] create_mob: {} at {}:{}", mob_name, zone, room);
-                String::new() // 성공 시 빈 문자열 반환
+
+        // 몹 데이터 로드 - WorldState를 통해 로드
+        let mob_data = if let Ok(mut world) = get_world_state().write() {
+            match world.mob_cache.load_mob(zone, mob_name) {
+                Ok(data) => data,
+                Err(_) => {
+                    // zone 폴더에 없으면 시도
+                    match world.mob_cache.load_mob(zone, mob_name) {
+                        Ok(data) => data,
+                        Err(_) => return format!("몹 데이터를 찾을 수 없습니다: {}", mob_name),
+                    }
+                }
             }
-            Err(_) => {
-                format!("몹 데이터를 찾을 수 없습니다: {}", mob_name)
-            }
+        } else {
+            return format!("월드 상태 접근 실패");
+        };
+
+        // 몹 생성
+        if let Ok(mut world) = get_world_state().write() {
+            let mob_instance = MobInstance {
+                mob_key: format!("{}/{}", zone, mob_name),
+                zone: zone.to_string(),
+                room: room.to_string(),
+                name: mob_data.name.clone(),
+                hp: mob_data.max_hp,
+                max_hp: mob_data.max_hp,
+                spawn_time: std::time::SystemTime::now()
+                    .duration_since(std::time::UNIX_EPOCH)
+                    .unwrap_or_default()
+                    .as_secs() as i64,
+                death_time: 0,
+                alive: true,
+                targets: Vec::new(),
+                act: 0, // ACT_STAND
+                skills: mob_data.skills.iter().map(|(name, _, _)| name.clone()).collect(),
+                mob_type: mob_data.mob_type,
+            };
+
+            world.mob_cache.add_mob_instance(mob_instance);
+            String::new() // 성공 시 빈 문자열 반환
+        } else {
+            format!("월드 상태 접근 실패")
         }
     });
 
     // mob_say(mob_name, message) - 몹이 말하기
     let body_ptr_say = body_ptr;
-    engine.register_fn("mob_say", move |_mob_name: &str, _message: &str| -> bool {
-        let _body = unsafe { &*body_ptr_say };
-        // TODO: 실제 mob_say 로직 구현 필요
-        // 현재는 로그만 출력하고 true 반환
-        println!("[SCRIPT] mob_say: {} says '{}'", _mob_name, _message);
-        true
+    engine.register_fn("mob_say", move |ob: &mut rhai::Map, mob_name: &str, message: &str| -> bool {
+        let body = unsafe { &*body_ptr_say };
+
+        // 플레이어 위치 가져오기
+        let location = body.get_string("위치");
+        let parts: Vec<&str> = location.splitn(2, '/').collect();
+        if parts.len() != 2 {
+            return false;
+        }
+        let zone = parts[0].to_string();
+        let room = parts[1].to_string();
+
+        // WorldState에서 몹 찾기 (display_name을 소유하여 반환)
+        let found_display_name = if let Ok(world) = get_world_state().read() {
+            let mobs = world.get_mobs_in_room(&zone, &room);
+            let mob_name_lower = mob_name.to_lowercase();
+
+            let mut found_name = None;
+            for mob in mobs {
+                if !mob.alive {
+                    continue;
+                }
+
+                if let Some(mob_data) = world.get_mob_data(&mob.mob_key) {
+                    let display_name_lower = mob_data.desc1.to_lowercase();
+
+                    if display_name_lower == mob_name_lower || display_name_lower.contains(&mob_name_lower) {
+                        found_name = Some(mob_data.desc1.clone());
+                        break;
+                    }
+
+                    for reaction in &mob_data.reaction_names {
+                        if reaction.to_lowercase() == mob_name_lower {
+                            found_name = Some(mob_data.desc1.clone());
+                            break;
+                        }
+                    }
+                }
+            }
+            found_name
+        } else {
+            None
+        };
+
+        if let Some(display_name) = found_display_name {
+            // 메시지 전송 - 브로드캐스터에 메시지 보내기
+            // 현재는 로그로 출력 (실제로는 broadcaster를 통해 방에 있는 모든 플레이어에게 전송)
+            println!("[MOB_SAY] {}: {}", display_name, message);
+            true
+        } else {
+            false
+        }
     });
 
     // mob_follow(mob_name, target_name) - 몹이 대상 따라가기
     let body_ptr_follow = body_ptr;
-    engine.register_fn("mob_follow", move |_mob_name: &str, _target_name: &str| -> bool {
-        let _body = unsafe { &*body_ptr_follow };
-        // TODO: 실제 mob_follow 로직 구현 필요
-        // 현재는 로그만 출력하고 true 반환
-        println!("[SCRIPT] mob_follow: {} following {}", _mob_name, _target_name);
-        true
+    engine.register_fn("mob_follow", move |ob: &mut rhai::Map, mob_name: &str, target_name: &str| -> bool {
+        let body = unsafe { &*body_ptr_follow };
+
+        // 플레이어 위치 가져오기
+        let location = body.get_string("위치");
+        let parts: Vec<&str> = location.splitn(2, '/').collect();
+        if parts.len() != 2 {
+            return false;
+        }
+        let zone = parts[0].to_string();
+        let room = parts[1].to_string();
+
+        // 먼저 읽기 lock으로 몹 찾기
+        let mob_key_to_follow = if let Ok(world) = get_world_state().read() {
+            let mobs = world.get_mobs_in_room(&zone, &room);
+            let mob_name_lower = mob_name.to_lowercase();
+            let mut found_key = None;
+            let mut found_name = None;
+
+            for mob in mobs {
+                if !mob.alive {
+                    continue;
+                }
+
+                if let Some(mob_data) = world.get_mob_data(&mob.mob_key) {
+                    let display_name = &mob_data.desc1;
+                    let display_name_lower = display_name.to_lowercase();
+
+                    if display_name_lower == mob_name_lower || display_name_lower.contains(&mob_name_lower) {
+                        found_key = Some(mob.mob_key.clone());
+                        found_name = Some(display_name.clone());
+                        break;
+                    }
+
+                    for reaction in &mob_data.reaction_names {
+                        if reaction.to_lowercase() == mob_name_lower {
+                            found_key = Some(mob.mob_key.clone());
+                            found_name = Some(display_name.clone());
+                            break;
+                        }
+                    }
+                }
+            }
+            (found_key, found_name)
+        } else {
+            (None, None)
+        };
+
+        // 찾은 몹의 타겟 설정
+        if let (Some(mob_key), Some(display_name)) = mob_key_to_follow {
+            if let Ok(mut world) = get_world_state().write() {
+                if let Some(mob_instance) = world.mob_cache.get_mob_instance_mut(&zone, &room, &mob_key) {
+                    if !mob_instance.targets.contains(&target_name.to_string()) {
+                        mob_instance.targets.push(target_name.to_string());
+                    }
+                }
+                println!("[MOB_FOLLOW] {} now following {}", display_name, target_name);
+                return true;
+            }
+        }
+
+        false
     });
 
     // get_mob_hp(ob, mob_name) - 몹의 현재 HP 조회
     let body_ptr_get_hp = body_ptr;
-    engine.register_fn("get_mob_hp", move |_ob: &mut rhai::Map, mob_name: &str| -> i64 {
-        let _body = unsafe { &*body_ptr_get_hp };
-        // TODO: 실제 몹 HP 조회 로직 구현 필요
-        // 현재는 몹 데이터 파일에서 HP 읽기
-        let full_path = format!("data/mob/{}.json", mob_name);
-        match std::fs::read_to_string(&full_path) {
-            Ok(content) => {
-                match serde_json::from_str::<serde_json::Value>(&content) {
-                    Ok(value) => {
-                        if let Some(mob_info) = value.get("몹정보") {
-                            if let Some(hp) = mob_info.get("hp") {
-                                if let Some(n) = hp.as_i64() {
-                                    return n;
-                                }
-                            }
-                        }
-                        100 // 기본값
+    engine.register_fn("get_mob_hp", move |ob: &mut rhai::Map, mob_name: &str| -> i64 {
+        let body = unsafe { &*body_ptr_get_hp };
+
+        // 플레이어 위치 가져오기
+        let location = body.get_string("위치");
+        let parts: Vec<&str> = location.splitn(2, '/').collect();
+        if parts.len() != 2 {
+            return 0;
+        }
+        let zone = parts[0];
+        let room = parts[1];
+
+        // WorldState에서 몹 찾기
+        if let Ok(world) = get_world_state().read() {
+            let mobs = world.get_mobs_in_room(zone, room);
+            let mob_name_lower = mob_name.to_lowercase();
+
+            for mob in mobs {
+                if !mob.alive {
+                    continue;
+                }
+
+                if let Some(mob_data) = world.get_mob_data(&mob.mob_key) {
+                    let display_name = &mob_data.desc1;
+                    let display_name_lower = display_name.to_lowercase();
+
+                    if display_name_lower == mob_name_lower || display_name_lower.contains(&mob_name_lower) {
+                        return mob.hp;
                     }
-                    Err(_) => 100,
+
+                    for reaction in &mob_data.reaction_names {
+                        if reaction.to_lowercase() == mob_name_lower {
+                            return mob.hp;
+                        }
+                    }
                 }
             }
-            Err(_) => 100,
         }
+
+        0
     });
 
     // set_mob_hp(ob, mob_name, hp) - 몹의 HP 설정
     let body_ptr_set_hp = body_ptr;
-    engine.register_fn("set_mob_hp", move |_ob: &mut rhai::Map, mob_name: &str, hp: i64| -> bool {
-        let _body = unsafe { &*body_ptr_set_hp };
-        // TODO: 실제 몹 HP 설정 로직 구현 필요
-        // 현재는 로그만 출력하고 true 반환
-        println!("[SCRIPT] set_mob_hp: {} HP set to {}", mob_name, hp);
-        true
+    engine.register_fn("set_mob_hp", move |ob: &mut rhai::Map, mob_name: &str, hp: i64| -> bool {
+        let body = unsafe { &*body_ptr_set_hp };
+
+        // 플레이어 위치 가져오기
+        let location = body.get_string("위치");
+        let parts: Vec<&str> = location.splitn(2, '/').collect();
+        if parts.len() != 2 {
+            return false;
+        }
+        let zone = parts[0].to_string();
+        let room = parts[1].to_string();
+
+        // 먼저 읽기 lock으로 몹 찾기
+        let mob_key_to_set = if let Ok(world) = get_world_state().read() {
+            let mobs = world.get_mobs_in_room(&zone, &room);
+            let mob_name_lower = mob_name.to_lowercase();
+            let mut found_key = None;
+
+            for mob in mobs {
+                if !mob.alive {
+                    continue;
+                }
+
+                if let Some(mob_data) = world.get_mob_data(&mob.mob_key) {
+                    let display_name_lower = mob_data.desc1.to_lowercase();
+
+                    if display_name_lower == mob_name_lower || display_name_lower.contains(&mob_name_lower) {
+                        found_key = Some(mob.mob_key.clone());
+                        break;
+                    }
+
+                    for reaction in &mob_data.reaction_names {
+                        if reaction.to_lowercase() == mob_name_lower {
+                            found_key = Some(mob.mob_key.clone());
+                            break;
+                        }
+                    }
+                }
+            }
+            found_key
+        } else {
+            None
+        };
+
+        // 찾은 몹의 HP 설정
+        if let Some(mob_key) = mob_key_to_set {
+            if let Ok(mut world) = get_world_state().write() {
+                if let Some(mob_instance) = world.mob_cache.get_mob_instance_mut(&zone, &room, &mob_key) {
+                    mob_instance.hp = hp.max(0).min(mob_instance.max_hp);
+                    if mob_instance.hp <= 0 {
+                        world.kill_mob(&zone, &room, &mob_key);
+                    }
+                    return true;
+                }
+            }
+        }
+
+        false
     });
 
     // ============================================================
@@ -4889,6 +5312,12 @@ pub fn create_engine_with_body_and_output(
             return format!("배우지 않은 무공입니다: {}", skill_name);
         }
 
+        // Check cooldown
+        let cooldown_remaining = body.get_skill_cooldown_remaining(skill_name);
+        if cooldown_remaining > 0 {
+            return format!("쿨다운 중입니다. {}초 남음.", cooldown_remaining);
+        }
+
         // Load skill data
         let skill_path = "data/config/skill.json";
         let skill_data = match std::fs::read_to_string(skill_path) {
@@ -4916,7 +5345,9 @@ pub fn create_engine_with_body_and_output(
             body.set("내공", new_mp);
         }
 
-        // TODO: Implement cooldown check
+        // Set skill cast time (mark as used)
+        body.set_skill_cast_time(skill_name);
+
         // TODO: Implement actual skill effect and damage calculation
         // TODO: Send skill messages to output
 

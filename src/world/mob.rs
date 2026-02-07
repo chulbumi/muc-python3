@@ -913,6 +913,36 @@ impl MobCache {
         }
         false
     }
+
+    /// Add a mob instance to the cache (for script spawning)
+    pub fn add_mob_instance(&mut self, mob: MobInstance) {
+        let room_key = format!("{}:{}", mob.zone, mob.room);
+        self.instances.entry(room_key).or_insert_with(Vec::new).push(mob);
+    }
+
+    /// Get a mutable reference to a mob instance
+    pub fn get_mob_instance_mut(&mut self, zone: &str, room: &str, mob_key: &str) -> Option<&mut MobInstance> {
+        let room_key = format!("{}:{}", zone, room);
+        if let Some(instances) = self.instances.get_mut(&room_key) {
+            instances.iter_mut().find(|m| m.mob_key == mob_key)
+        } else {
+            None
+        }
+    }
+
+    /// Get all mob instances across all rooms (for admin search functions)
+    /// Returns Vec of (room_key, instances) tuples
+    pub fn get_all_instances(&self) -> Vec<(String, Vec<&MobInstance>)> {
+        self.instances.iter()
+            .map(|(key, instances)| {
+                let alive_instances: Vec<&MobInstance> = instances.iter()
+                    .filter(|m| m.alive)
+                    .collect();
+                (key.clone(), alive_instances)
+            })
+            .filter(|(_, instances)| !instances.is_empty())
+            .collect()
+    }
 }
 
 impl Default for MobCache {

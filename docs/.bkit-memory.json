@@ -7,9 +7,9 @@
     "current": "[Check] 초기도우미 step-based conversion",
     "status": "completed"
   },
-  "sessionCount": 11,
+  "sessionCount": 20,
   "lastSession": {
-    "startedAt": "2026-02-07T12:15:03.404Z",
+    "startedAt": "2026-02-07T19:20:20.417Z",
     "platform": "claude",
     "level": "Dynamic"
   }

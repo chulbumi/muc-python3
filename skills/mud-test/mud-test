@@ -1,0 +1,138 @@
+#!/bin/bash
+# MUD Test Skill - Bash Wrapper
+# This script provides a convenient interface to the MUD test functionality
+
+SCRIPT_DIR="/home/ubuntu/muc-python3/skills/mud-test"
+PROJECT_DIR="/home/ubuntu/muc-python3"
+
+# Default values
+PY_PORT=9900
+RUST_PORT=9999
+HOST="localhost"
+VERBOSE=""
+REPORT_FILE="$PROJECT_DIR/test_results.md"
+
+# Use socket-based test for Python server
+SOCKET_PYTHON="$SCRIPT_DIR/mud-test-socket.py"
+
+# Display help
+show_help() {
+    cat << "EOF"
+╔══════════════════════════════════════════════════════════════════╗
+║              MUD Test Skill - Python/Rust Comparison            ║
+╠══════════════════════════════════════════════════════════════════╣
+║                                                                  ║
+║  Usage: /mud-test [command] [options]                           ║
+║                                                                  ║
+║  Commands:                                                       ║
+║    all           Run all test scenarios (default)               ║
+║    basic         Test basic commands                            ║
+║    movement      Test movement commands                         ║
+║    combat        Test combat system                             ║
+║    items         Test item interactions                         ║
+║    npc           Test NPC dialogue                              ║
+║    quick         Quick comparison test                          ║
+║    status        Show server connection status                  ║
+║    report        Show last test report                          ║
+║    help          Show this help message                         ║
+║                                                                  ║
+║  Options:                                                        ║
+║    -p, --py-port=N    Python server port (default: 9900)        ║
+║    -r, --rust-port=N  Rust server port (default: 9999)         ║
+║    -h, --host=HOST    Server host (default: localhost)         ║
+║    -v, --verbose      Enable verbose output                    ║
+║    -o, --report=FILE  Custom report file path                  ║
+║                                                                  ║
+║  Examples:                                                       ║
+║    /mud-test all                    # Run all tests             ║
+║    /mud-test basic -v               # Test basics with detail   ║
+║    /mud-test combat -p 9901         # Test combat on custom port║
+║    /mud-test quick                  # Quick comparison          ║
+║    /mud-test status                 # Check server status       ║
+║                                                                  ║
+╚══════════════════════════════════════════════════════════════════╝
+EOF
+}
+
+# Parse arguments
+COMMAND="all"
+while [[ $# -gt 0 ]]; do
+    case $1 in
+        help|--help|-help)
+            show_help
+            exit 0
+            ;;
+        all|basic|movement|combat|items|npc|quick|status|report)
+            COMMAND="$1"
+            shift
+            ;;
+        -p|--py-port)
+            PY_PORT="$2"
+            shift 2
+            ;;
+        -r|--rust-port)
+            RUST_PORT="$2"
+            shift 2
+            ;;
+        --host)
+            HOST="$2"
+            shift 2
+            ;;
+        -v|--verbose)
+            VERBOSE="--verbose"
+            shift
+            ;;
+        -o|--report)
+            REPORT_FILE="$2"
+            shift 2
+            ;;
+        *)
+            # Unknown option, skip it
+            shift
+            ;;
+    esac
+done
+
+# Show help if requested
+if [[ "$COMMAND" == "help" ]]; then
+    show_help
+    exit 0
+fi
+
+# Check command type
+if [[ "$COMMAND" == "quick" || "$COMMAND" == "basic" || "$COMMAND" == "all" ]]; then
+    echo "======================================================================"
+    echo "MUD Server Test: $COMMAND"
+    echo "Python Port: $PY_PORT | Rust Port: $RUST_PORT"
+    echo "Host: $HOST"
+    echo "======================================================================"
+    echo ""
+
+    # Test Python server with socket-based test
+    echo "Testing Python server..."
+    python3 "$SOCKET_PYTHON" --host "$HOST" --port "$PY_PORT" --name 테스터 ${VERBOSE}
+    PY_STATUS=$?
+
+    echo ""
+    echo "Testing Rust server..."
+    # Rust server uses original test script
+    PYTHON_SCRIPT="$SCRIPT_DIR/mud-test.py"
+    python3 $PYTHON_SCRIPT $COMMAND --py-port=$PY_PORT --rust-port=$RUST_PORT --host=$HOST --report=$REPORT_FILE $VERBOSE
+    RUST_STATUS=$?
+
+    # Combine results
+    echo ""
+    echo "======================================================================"
+    echo "Test completed!"
+    echo "Python server status: $([[ $PY_STATUS -eq 0 ]] && echo 'OK' || echo 'FAILED')"
+    echo "Rust server status: $([[ $RUST_STATUS -eq 0 ]] && echo 'OK' || echo 'FAILED')"
+    echo "======================================================================"
+
+    exit $((PY_STATUS || RUST_STATUS))
+else
+    # Other commands use original script
+    PYTHON_SCRIPT="$SCRIPT_DIR/mud-test.py"
+    cd "$PROJECT_DIR" || exit 1
+    python3 $PYTHON_SCRIPT $COMMAND --py-port=$PY_PORT --rust-port=$RUST_PORT --host=$HOST --report=$REPORT_FILE $VERBOSE
+    exit $?
+fi

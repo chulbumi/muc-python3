@@ -14,8 +14,36 @@ fn cmd(ob, line) {
         return;
     }
 
-    send_line(ob, "☞ 몹 찾기 기능은 현재 구현 중입니다.");
-    // TODO: 몹 위치 검색 기능 구현 필요
+    let search_term = trim(line);
+    let results = find_mobs(search_term);
+
+    if len(results) == 0 {
+        send_line(ob, "☞ '" + search_term + "'(이/가) 몹 데이터에서 발견되지 않았습니다.");
+        return;
+    }
+
+    send_line(ob, "☞ '" + search_term + "' 검색 결과 (" + to_string(len(results)) + "개 발견):");
+    send_line(ob, "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━");
+
+    let i = 0;
+    for r in results {
+        let zone = r[0];
+        let room = r[1];
+        let mob_name = r[2];
+        let display_name = r[3];
+        let hp = r[4];
+        let max_hp = r[5];
+
+        let loc_str = zone + ":" + room;
+        let hp_str = "(" + to_string(hp) + "/" + to_string(max_hp) + ")";
+
+        let line = "  [" + to_string(i + 1) + "] " + display_name + " (" + mob_name + ") " + hp_str;
+        send_line(ob, line);
+        send_line(ob, "       위치: " + loc_str);
+        send_line(ob, "──────────────────────────────────────────────────────────");
+
+        i = i + 1;
+    }
 }
 
 fn main(ob, line) {

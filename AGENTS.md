@@ -205,3 +205,157 @@ cargo run
 - `FINAL_TEST_REPORT.md` - 전체 명령어 테스트 결과
 - `CRITICAL_DIFFERENCES.md` - 발견된 차이점
 - `ACTUAL_DIFFERENCES_FOUND.md` - 실제 버그 목록
+
+---
+
+## MUD 테스트 스킬 사용법
+
+### 스킬 개요
+`skills/mud-test/` 디렉토리에 Python/Rust MUD 서버 비교 테스트 스킬이 구성되어 있습니다.
+
+### 실행 방법
+
+#### 1. 별칭 명령어 (권장)
+
+시스템 전체 별칭이 설치된 경우 어디서든 실행 가능:
+
+```bash
+# 별칭 설치 확인
+which mud-test
+# 출력: /home/ubuntu/.local/bin/mud-test
+
+# 빠른 테스트 실행 (권장)
+mud-test quick
+
+# 전체 테스트
+mud-test all
+
+# 특정 카테고리 테스트
+mud-test basic
+mud-test combat
+mud-test movement
+
+# 상세 출력 모드
+mud-test quick -v
+
+# 커스텀 포트 지정
+mud-test quick -p 9901 -r 9998
+```
+
+**별칭 설치 방법:**
+```bash
+ln -s /home/ubuntu/muc-python3/skills/mud-test/mud-test ~/.local/bin/mud-test
+```
+
+#### 2. Bash 래퍼로 직접 실행
+```bash
+# 도움말
+./skills/mud-test/mud-test -h
+
+# 전체 테스트
+./skills/mud-test/mud-test all
+
+# 옵션과 함께 실행
+./skills/mud-test/mud-test basic -v              # verbose 모드
+./skills/mud-test/mud-test combat -p 9901 -r 9998  # 커스텀 포트
+./skills/mud-test/mud-test quick --host=192.168.1.100  # 원격 호스트
+```
+
+#### 3. Python 스크립트로 직접 실행 (Rust 서버 전용)
+
+Rust 서버는 telnetlib를 사용하여 테스트합니다:
+```bash
+# 도움말 보기
+python3 skills/mud-test/mud-test.py help
+
+# 전체 테스트 실행
+python3 skills/mud-test/mud-test.py all
+
+# 특정 테스트만 실행
+python3 skills/mud-test/mud-test.py basic
+python3 skills/mud-test/mud-test.py combat
+python3 skills/mud-test/mud-test.py movement
+python3 skills/mud-test/mud-test.py items
+python3 skills/mud-test/mud-test.py npc
+
+# 빠른 비교 테스트 (핵심 명령어만)
+python3 skills/mud-test/mud-test.py quick
+
+# 서버 상태 확인
+python3 skills/mud-test/mud-test.py status
+
+# 마지막 리포트 보기
+python3 skills/mud-test/mud-test.py report
+```
+
+### 사용 가능한 명령어
+
+| 명령어 | 설명 |
+|--------|------|
+| `all` | 모든 테스트 시나리오 실행 (기본값) |
+| `basic` | 기본 명령어 테스트 (능력치, 소지품, 점수 등) |
+| `movement` | 이동 명령어 테스트 (동서남북위아래) |
+| `combat` | 전투 시스템 테스트 (공격, 스킬, 도망) |
+| `items` | 아이템 상호작용 테스트 (구입, 판매, 버리기) |
+| `npc` | NPC 대화 테스트 |
+| `quick` | 빠른 비교 테스트 (핵심 명령어 4개만) |
+| `status` | 서버 연결 상태 확인 |
+| `report` | 마지막 테스트 리포트 표시 |
+| `help` | 도움말 표시 |
+
+### 옵션
+
+| 옵션 | 설명 | 기본값 |
+|------|------|--------|
+| `--py-port=N` / `-p N` | Python 서버 포트 | 9900 |
+| `--rust-port=N` / `-r N` | Rust 서버 포트 | 9999 |
+| `--host=HOST` / `-h HOST` | 서버 호스트주소 | localhost |
+| `--verbose` / `-v` | 상세 출력 비활성화 | false |
+| `--report=FILE` / `-o FILE` | 리포트 파일 경로 | test_results.md |
+
+### 테스트 결과
+테스트 결과는 `test_results.md` 파일에 자동 저장됩니다.
+
+### Python 서버 테스트 (Socket 방식)
+
+Python 서버는 telnetlib의 IAC 네고시에이션 문제를 피하기 위해 **raw socket**을 사용합니다.
+
+**Socket 테스트 스크립트 (`mud-test-socket.py`):**
+- Raw socket 연결로 telnetlib IAC 문제 회피
+- UTF-8 인코딩 사용
+- DOUMI 캐릭터 생성 자동화 (`나만바라바` → `빠른도우미` → Enter 반복)
+- CRLF (`\r\n`) 라인 엔딩 사용
+
+**DOUMI 캐릭터 생성 흐름:**
+1. `나만바라바` 명령어로 DOUMI 모드 진입
+2. 캐릭터 이름 입력 (한글만 가능, 예: `테스터`)
+3. `빠른도우미` (옵션 1) 선택
+4. Enter 키 연속 입력으로 기본값 수락
+5. `낙양성` 입장 메시지 확인 시 완료
+
+**직접 Socket 테스트 실행:**
+```bash
+python3 skills/mud-test/mud-test-socket.py --host localhost --port 9900 --name 테스터
+```
+
+### 예상 실행 결과 예시
+```
+╔══════════════════════════════════════════════════════════════════╗
+║                    MUD Test Skill - Help                        ║
+╠══════════════════════════════════════════════════════════════════╣
+║                                                                  ║
+║  Usage: /mud-test [command] [options]                           ║
+║                                                                  ║
+║  Commands:                                                       ║
+║    all           Run all test scenarios (default)               ║
+║    basic         Test basic commands                            ║
+║    movement      Test movement commands                         ║
+║    combat        Test combat system                             ║
+║    items         Test item interactions                         ║
+║    npc           Test NPC dialogue                              ║
+║    quick         Quick comparison test                          ║
+║    status        Show server connection status                  ║
+║    report        Show last test report                          ║
+║    help          Show this help message                         ║
+...
+```

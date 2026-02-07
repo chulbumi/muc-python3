@@ -209,6 +209,8 @@ pub struct Body {
     pub skill_list: Vec<String>,
     /// Item skill training map
     pub item_skill_map: HashMap<String, u32>,
+    /// Skill cooldown tracking (skill_name -> last_cast_timestamp)
+    pub skill_cooldowns: HashMap<String, i64>,
     /// 범용 스크립트: 아이템확인에서 설정, 옵션출력/옵션확인 등에서 사용. Complete 시 클리어.
     pub script_temp_item: Option<Arc<Mutex<Object>>>,
     /// 도착 쪽지. 키 "메모:발신자이름", 값 MemoRecord. load/save 시 JSON 루트의 "메모:xxx"와 연동.
@@ -271,6 +273,7 @@ impl Body {
             skill_map: HashMap::new(),
             skill_list: Vec::new(),
             item_skill_map: HashMap::new(),
+            skill_cooldowns: HashMap::new(),
             script_temp_item: None,
             memos: HashMap::new(),
             talk_history: Vec::new(),
@@ -573,6 +576,29 @@ impl Body {
     /// Sets skill training data
     pub fn set_skill_training(&mut self, skill_name: &str, level: u8, exp: u32) {
         self.skill_map.insert(skill_name.to_string(), SkillTraining::new(level, exp));
+    }
+
+    /// Checks if a skill is on cooldown
+    /// Returns the remaining cooldown seconds, or 0 if not on cooldown
+    pub fn get_skill_cooldown_remaining(&self, skill_name: &str) -> i64 {
+        if let Some(&last_cast) = self.skill_cooldowns.get(skill_name) {
+            let now = std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap_or_default()
+                .as_secs() as i64;
+            (last_cast + 3 - now).max(0) // Default 3 second cooldown
+        } else {
+            0
+        }
+    }
+
+    /// Sets the last cast time for a skill (marking it as cast now)
+    pub fn set_skill_cast_time(&mut self, skill_name: &str) {
+        let now = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap_or_default()
+            .as_secs() as i64;
+        self.skill_cooldowns.insert(skill_name.to_string(), now);
     }
 
     /// Checks if a body can move
@@ -1315,8 +1341,10 @@ mod tests {
     fn test_act_state_from_i32() {
         assert_eq!(ActState::from_i32(0), ActState::Stand);
         assert_eq!(ActState::from_i32(1), ActState::Fight);
-        assert_eq!(ActState::from_i32(2), ActState::Rest);
-        assert_eq!(ActState::from_i32(3), ActState::Move);
+        assert_eq!(ActState::from_i32(2), ActState::Death);
+        assert_eq!(ActState::from_i32(3), ActState::Regeneration);
+        assert_eq!(ActState::from_i32(4), ActState::Rest);
+        assert_eq!(ActState::from_i32(5), ActState::Move);
         assert_eq!(ActState::from_i32(999), ActState::Stand);
     }
 
@@ -1324,8 +1352,10 @@ mod tests {
     fn test_act_state_to_i32() {
         assert_eq!(ActState::Stand.to_i32(), 0);
         assert_eq!(ActState::Fight.to_i32(), 1);
-        assert_eq!(ActState::Rest.to_i32(), 2);
-        assert_eq!(ActState::Move.to_i32(), 3);
+        assert_eq!(ActState::Death.to_i32(), 2);
+        assert_eq!(ActState::Regeneration.to_i32(), 3);
+        assert_eq!(ActState::Rest.to_i32(), 4);
+        assert_eq!(ActState::Move.to_i32(), 5);
     }
 
     #[test]

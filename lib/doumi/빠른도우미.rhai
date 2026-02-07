@@ -1,5 +1,6 @@
 // 도우미 스크립트: 빠른도우미 (단계 기반)
 // 각 step 함수는 ob를 인자로 받고, wait_enter/wait_input으로 다음 단계 지정
+// 주의: 데이터 저장 시 _saved_name/_saved_password/_saved_sex 사용
 
 fn step1_welcome(ob) {
     send_line(ob, "");
@@ -23,6 +24,7 @@ fn step3_password(ob) {
 }
 
 fn step4_gender(ob) {
+    let pwd = _doumi_resume_input;
     send_line(ob, "");
     send_line(ob, "노인이 말합니다. \"그런데 그아이는 남자인가? 여자인가?\"");
     send_line(ob, "성별(남/여)ː");
@@ -30,6 +32,7 @@ fn step4_gender(ob) {
 }
 
 fn step5_finish(ob) {
+    let gender = _doumi_resume_input;
     send_line(ob, "");
     send_line(ob, "노인이 말합니다 \"자고로 상처입은 짐승이 찾아와도 보살펴");
     send_line(ob, "                 주는법 집사는 그 아이를 거두어 가르치시오\"");
@@ -39,5 +42,7 @@ fn step5_finish(ob) {
 }
 
 fn finish(ob) {
-    finish_script(ob);
+    // _saved_* 변수를 새 Map에 담아 finish_script 호출
+    let data = #{"이름": _saved_name, "암호": _saved_password, "성별": _saved_sex};
+    finish_script(data);
 }

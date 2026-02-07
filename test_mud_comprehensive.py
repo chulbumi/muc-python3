@@ -31,6 +31,7 @@ Usage:
 """
 
 import telnetlib
+import socket
 import time
 import re
 import json
@@ -60,7 +61,7 @@ class TestConfig:
     rust_port: int = 9999
     num_characters: int = 2
     base_password: str = "test1234"
-    encoding: str = "euc-kr"
+    encoding: str = "utf-8"
     connection_timeout: int = 15
     command_timeout: int = 5
     report_path: str = "/home/ubuntu/muc-python3/test_results.md"
@@ -163,9 +164,22 @@ class MUDConnection:
         self.server_type = server_type
         self.host = config.host
         self.port = port
-        self.character_name = character_name or f"테스터{server_type.value}"
+        # 한글만 사용하는 이름으로 변경 (서버가 한글+영어 혼합을 거부함)
+        # Python/Rust 각각 다른 이름 사용 (파일 공용 방지)
+        # Python은 socket 사용 (DOUMI 캐릭터 생성), Rust는 telnetlib 사용
+        if server_type == ServerType.PYTHON:
+            default_name = "테스터"
+        else:
+            default_name = "러스트테스터"
+        # 두 서버 모두 UTF-8 사용
+        self.encoding = "utf-8"
+        self.character_name = character_name or default_name
         self.password = config.base_password
+
+        # Python 서버는 socket 직접 사용 (DOUMI 캐릭터 생성)
+        self.use_socket = (server_type == ServerType.PYTHON)
         self.tn: Optional[telnetlib.Telnet] = None
+        self.sock: Optional[socket.socket] = None
         self.connected = False
         self.logged_in = False
         self.buffer = ""
@@ -181,11 +195,19 @@ class MUDConnection:
             if self.config.verbose:
                 print(f"[{self.server_type.value}] Connecting to {self.host}:{self.port}...")
 
-            self.tn = telnetlib.Telnet(self.host, self.port, timeout=self.config.connection_timeout)
+            if self.use_socket:
+                # Python 서버: socket 직접 사용
+                self.sock = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+                self.sock.connect((self.host, self.port))
+                self.sock.settimeout(self.config.command_timeout)
+            else:
+                # Rust 서버: telnetlib 사용
+                self.tn = telnetlib.Telnet(self.host, self.port, timeout=self.config.connection_timeout)
+
             self.connected = True
 
             # Wait for initial banner
-            time.sleep(1)
+            time.sleep(0.5)
             self.buffer = self._read_output()
 
             if self.config.verbose:
@@ -206,6 +228,11 @@ class MUDConnection:
                 self.tn.close()
             except Exception:
                 pass
+        if self.sock:
+            try:
+                self.sock.close()
+            except Exception:
+                pass
         self.connected = False
         self.logged_in = False
 
@@ -222,7 +249,7 @@ class MUDConnection:
 
     def _read_output(self, timeout: Optional[float] = None) -> str:
         """
-        Read output from the server.
+        Read output from the server with timeout-based accumulation.
 
         Args:
             timeout: Optional timeout in seconds
@@ -230,17 +257,64 @@ class MUDConnection:
         Returns:
             Decoded output string
         """
-        if not self.tn:
-            return ""
+        if self.use_socket:
+            # Socket 기반 읽기 (여러 번 시도)
+            if not self.sock:
+                return ""
+            try:
+                timeout = timeout or self.config.command_timeout
+                self.sock.settimeout(timeout)
+                all_data = ""
+                # 여러 번 recv 시도
+                for _ in range(5):
+                    try:
+                        data = self.sock.recv(4096)
+                        if not data:
+                            break
+                        all_data += data.decode(self.encoding, errors='ignore')
+                    except socket.timeout:
+                        break
+                return all_data
+            except Exception as e:
+                if self.config.verbose:
+                    print(f"[{self.server_type.value}] Read error: {e}")
+                return ""
+        else:
+            # telnetlib 기반 읽기
+            if not self.tn:
+                return ""
 
-        try:
-            timeout = timeout or self.config.command_timeout
-            output = self.tn.read_very_eager().decode(self.config.encoding, errors='ignore')
-            return output
-        except Exception as e:
-            if self.config.verbose:
-                print(f"[{self.server_type.value}] Read error: {e}")
-            return ""
+            try:
+                timeout = timeout or self.config.command_timeout
+                output = ""
+
+                # First, read any immediately available data
+                try:
+                    output += self.tn.read_very_eager().decode(self.encoding, errors='ignore')
+                except Exception:
+                    pass
+
+                # If no data available, wait for data with timeout
+                if not output:
+                    try:
+                        data = self.tn.read_until(b'\n', timeout=timeout)
+                        if data:
+                            output += data.decode(self.encoding, errors='ignore')
+                    except Exception:
+                        pass
+
+                # Also read any additional buffered data
+                try:
+                    more = self.tn.read_very_eager().decode(self.encoding, errors='ignore')
+                    output += more
+                except Exception:
+                    pass
+
+                return output
+            except Exception as e:
+                if self.config.verbose:
+                    print(f"[{self.server_type.value}] Read error: {e}")
+                return ""
 
     def _wait_for_prompt(self, prompt_patterns: List[str], timeout: int = 5) -> bool:
         """
@@ -259,7 +333,7 @@ class MUDConnection:
             try:
                 data = self.tn.read_some()
                 if data:
-                    self.buffer += data.decode(self.config.encoding, errors='ignore')
+                    self.buffer += data.decode(self.encoding, errors='ignore')
                     for pattern in prompt_patterns:
                         if pattern in self.buffer:
                             return True
@@ -279,17 +353,31 @@ class MUDConnection:
         Returns:
             True if send successful, False otherwise
         """
-        if not self.tn:
-            return False
+        if self.use_socket:
+            # Socket 기반 전송
+            if not self.sock:
+                return False
+            try:
+                cmd_bytes = command.encode(self.encoding) + b'\r\n'
+                self.sock.send(cmd_bytes)
+                return True
+            except Exception as e:
+                if self.config.verbose:
+                    print(f"[{self.server_type.value}] Send error: {e}")
+                return False
+        else:
+            # telnetlib 기반 전송
+            if not self.tn:
+                return False
 
-        try:
-            cmd_bytes = command.encode(self.config.encoding) + b'\n'
-            self.tn.write(cmd_bytes)
-            return True
-        except Exception as e:
-            if self.config.verbose:
-                print(f"[{self.server_type.value}] Send error: {e}")
-            return False
+            try:
+                cmd_bytes = command.encode(self.encoding) + b'\r\n'
+                self.tn.write(cmd_bytes)
+                return True
+            except Exception as e:
+                if self.config.verbose:
+                    print(f"[{self.server_type.value}] Send error: {e}")
+                return False
 
 
 # ============================================================================
@@ -331,6 +419,19 @@ class MUDConnection:
                 self.logged_in = True
                 return True
 
+            # Check if "엔터키를 누르세요" prompt (Python server)
+            if '엔터키' in self.buffer or 'Enter' in self.buffer:
+                # Python server: just send Enter and immediately send a command
+                # Don't wait for response after Enter
+                self._send("")  # Send empty line (just Enter)
+                time.sleep(0.2)
+
+                # Immediately send a real command to trigger screen refresh
+                # This works around the showNotice issue
+                self._send("능력치")
+                time.sleep(0.5)
+                self.buffer = self._read_output()
+
             # Try to clear any remaining prompts
             for _ in range(3):
                 self._send("")
@@ -356,13 +457,48 @@ class MUDConnection:
             if self.config.verbose:
                 print(f"[{self.server_type.value}] Creating character: {self.character_name}")
 
+            # Python/Rust 서버는 한글만 입력
+            # Check for creation menu or DOUMI system
+            self.buffer = self._read_output()
+
+            # DOUMI 빠른 캐릭터 생성 (나만바라바)
+            if '나만바라바' in self.buffer or '빠른도우미' in self.buffer:
+                if self.config.verbose:
+                    print(f"[{self.server_type.value}] DOUMI creation detected")
+
+                # Select option 1: 빠른도우미
+                self._send("1")
+                time.sleep(0.5)
+                self.buffer = self._read_output()
+
+                # Continue through DOUMI flow (press Enter for defaults)
+                max_prompts = 20
+                prompts_answered = 0
+
+                while prompts_answered < max_prompts:
+                    self._send("")
+                    time.sleep(0.3)
+                    self.buffer = self._read_output()
+
+                    # Check if we're at the main game prompt
+                    if any(p in self.buffer for p in ['명령', 'Commands', '무공', '능력치', '낙양성', '접속', '입장하셨습니다']):
+                        self.logged_in = True
+                        if self.config.verbose:
+                            print(f"[{self.server_type.value}] DOUMI character created successfully")
+                        return True
+
+                    prompts_answered += 1
+
+                self.logged_in = True
+                return True
+
+            # Regular creation flow
             # Send confirmation to create
             self._send("y")
             time.sleep(1)
             self.buffer = self._read_output()
 
             # Answer creation prompts with default values
-            # Different servers may have different creation flows
             max_prompts = 15
             prompts_answered = 0
 
@@ -372,7 +508,7 @@ class MUDConnection:
                 self.buffer = self._read_output()
 
                 # Check if we're at the main game prompt
-                if any(p in self.buffer for p in ['명령', 'Commands', '무공', '능력치', '낙양성', '접속']):
+                if any(p in self.buffer for p in ['명령', 'Commands', '무공', '능력치', '낙양성', '접속', '입장하셨습니다']):
                     self.logged_in = True
                     if self.config.verbose:
                         print(f"[{self.server_type.value}] Character created successfully")
@@ -416,16 +552,35 @@ class MUDConnection:
         if not self._send(command):
             return ""
 
-        # Wait for response
-        time.sleep(wait_time)
+        # Wait for response with polling
+        output = ""
+        start_read = time.time()
 
-        # Read output
-        output = self._read_output()
+        while time.time() - start_read < wait_time:
+            try:
+                # Try to read data with a short timeout
+                data = self.tn.read_until(b'\n', timeout=0.5)
+                if data:
+                    output += data.decode(self.encoding, errors='ignore')
+                else:
+                    # No more data with timeout, break
+                    break
+            except Exception:
+                # No data available yet, continue waiting
+                time.sleep(0.1)
+                continue
+
+        # Read any remaining buffered data
+        try:
+            more = self.tn.read_very_eager().decode(self.encoding, errors='ignore')
+            output += more
+        except Exception:
+            pass
 
         execution_time = time.time() - start_time
 
         if self.config.verbose:
-            print(f"[{self.server_type.value}] Command '{command}' executed in {execution_time:.2f}s")
+            print(f"[{self.server_type.value}] Command '{command}' executed in {execution_time:.2f}s, output: {len(output)} bytes")
 
         return output
 
@@ -1160,7 +1315,7 @@ def connect_to_server(host: str, port: int, encoding: str = "euc-kr",
     Args:
         host: Server hostname or IP
         port: Server port
-        encoding: Character encoding (default: euc-kr)
+        encoding: Character encoding (default: utf-8)
         timeout: Connection timeout in seconds
 
     Returns:
@@ -1187,7 +1342,7 @@ def send_command(sock: telnetlib.Telnet, cmd: str, encoding: str = "euc-kr") -> 
     Args:
         sock: Telnet socket
         cmd: Command string to send
-        encoding: Character encoding (default: euc-kr)
+        encoding: Character encoding (default: utf-8)
 
     Returns:
         True if send successful, False otherwise
@@ -1206,7 +1361,7 @@ def send_command(sock: telnetlib.Telnet, cmd: str, encoding: str = "euc-kr") -> 
 
 
 def create_character(host: str, port: int, name: str, password: str,
-                     encoding: str = "euc-kr") -> bool:
+                     encoding: str = "utf-8") -> bool:
     """
     Create a new character on the MUD server.
 
@@ -1215,7 +1370,7 @@ def create_character(host: str, port: int, name: str, password: str,
         port: Server port
         name: Character name (Korean supported)
         password: Character password
-        encoding: Character encoding (default: euc-kr)
+        encoding: Character encoding (default: utf-8)
 
     Returns:
         True if creation successful, False otherwise

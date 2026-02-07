@@ -2526,7 +2526,7 @@ async fn handle_game_command(
                                 combat::find_mob_in_room(&player_name, target_name, &world) {
 
                                 // Process the attack round
-                                let round = combat::process_player_attack(
+                                let mut round = combat::process_player_attack(
                                     &mut player.body,
                                     &mob_instance,
                                     &mob_data
@@ -2546,7 +2546,52 @@ async fn handle_game_command(
                                 if round.player_died {
                                     // Player died - handle death
                                     player.body.act = ActState::Death;
-                                    // TODO: Handle death properly (respawn, etc.)
+
+                                    // Send death message to room
+                                    let death_msg = format!(
+                                        "\r\n\x1b[1;31m{}♥\x1b[0;37m 쓰러져 땅에 쓰러집니다...\x1b[0;37m\r\n",
+                                        player_name
+                                    );
+                                    let _ = broadcaster.send_to(addr, &death_msg);
+
+                                    // Move player to respawn location and restore some HP
+                                    let respawn_zone = "시작";
+                                    let respawn_room = "시작";
+                                    let max_hp = player.body.get_max_hp();
+                                    let max_mp = player.body.get_max_mp();
+                                    let respawn_hp = (max_hp as f64 * 0.3) as i64; // 30% of max HP
+                                    let respawn_mp = (max_mp as f64 * 0.5) as i64; // 50% of max MP
+
+                                    player.body.set("위치", format!("{}/{}", respawn_zone, respawn_room));
+                                    player.body.set("체력", respawn_hp.max(1));
+                                    player.body.set("내공", respawn_mp.max(1));
+                                    player.body.act = ActState::Stand; // Reset to standing
+
+                                    // Update world state position
+                                    if let Ok(mut w) = get_world_state().write() {
+                                        use crate::world::PlayerPosition;
+                                        let new_pos = PlayerPosition::new(respawn_zone.to_string(), respawn_room.to_string());
+                                        w.player_positions.insert(player_name.clone(), new_pos);
+                                    }
+
+                                    // Send respawn message
+                                    let respawn_msg = format!(
+                                        "\r\n\x1b[1;33m정신이 깨어나니 주위를 둘러보니...\x1b[0;37m\r\n\
+                                        \x1b[1;33m당신은 {} {}로 이동했습니다.\x1b[0;37m\r\n\
+                                        \x1b[1;32m체력이 {}% 회복되었습니다.\x1b[0;37m\r\n",
+                                        respawn_zone,
+                                        respawn_room,
+                                        ((respawn_hp.max(1) as f64 / max_hp as f64) * 100.0) as i32
+                                    );
+                                    let _ = broadcaster.send_to(addr, &respawn_msg);
+
+                                    // Show room description after respawn (using build_room_lines)
+                                    let others = vec![]; // No other players shown in respawn area
+                                    if let Ok(room_str) = build_room_lines(&player_name, &others) {
+                                        let _ = broadcaster.send_to(addr, &format!("\r\n{}\r\n", room_str));
+                                    }
+
+                                    round.player_died = false; // Reset death flag
                                 } else if round.target_died {
                                     // Mob died - already handled by damage_mob, but ensure it's killed
                                     if let Ok(mut w) = get_world_state().write() {

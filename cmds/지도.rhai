@@ -8,7 +8,8 @@ fn cmd(ob, line) {
         return;
     }
     let exits = get_exits_string(pos["zone"], pos["room"]);
-    if length(exits) == 0 || (len(exits) >= 10 && substring(exits, 0, 10) == "  ○  어느 쪽으로도") {
+    // 간단한 체크로 변경 (substring 대신)
+    if length(exits) == 0 || len(exits) < 5 {
         send_line(ob, "☞ 아무것도 보이지 않습니다.");
         return;
     }

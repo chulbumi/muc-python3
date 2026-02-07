@@ -124,9 +124,7 @@ impl CommandRegistry {
         aliases.insert("help".to_string(), "도움말".to_string());
         aliases.insert("?".to_string(), "도움말".to_string());
         aliases.insert("/h".to_string(), "도움말".to_string());
-        // 능력치 관련 alias는 Rhai 스크립트에서 처리 (cmds/능력치.rhai)
-        // Python에 "능력치" 별칭이 없음 - 제거
-        // aliases.insert("능력치".to_string(), "점수".to_string());
+        aliases.insert("능력치".to_string(), "점수".to_string());
         aliases.insert("점".to_string(), "점수".to_string());
         aliases.insert("상태".to_string(), "점수".to_string());
         aliases.insert("상".to_string(), "점수".to_string());

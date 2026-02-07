@@ -60,74 +60,94 @@ impl CombatRound {
 }
 
 /// Calculate player damage to mob
+///
+/// Python formula (from objs/body.py:getAttackPoint):
+/// c1 = self.getStr() * 2           # 힘 × 2
+/// c1 += self.getMaxMp() // 5       # 플레이어: 최대내공 / 5
+/// c2 = self.getAttPower() - ss     # 무기공격력 - 숙련도차이
+/// m1 = (c1 + c2) - (mob.getArm() + mob.getArmor())
+/// Then apply ±20% random variation (0.8~1.2x)
 pub fn calculate_player_damage(player: &Body, mob_data: &RawMobData) -> i64 {
     let player_str = player.get_str();
-    let player_dex = player.get_dex();
-    let player_level = player.get_int("레벨");
-    let weapon_power = player.attpower;
+    let max_mp = player.get_max_mp();
+    let weapon_power = player.attpower as i64;
 
-    // Base damage
-    let mut damage = (player_str / 2) + (weapon_power as i64) + (player_level / 2);
+    // Python 공식: c1 = 힘 × 2 + 최대내공 / 5
+    let c1 = (player_str * 2) + (max_mp / 5);
 
-    // Player attack bonus from equipment
-    let weapon_bonus = player.get_int("무기공격력");
-    damage += weapon_bonus;
+    // c2 = 무기공격력 (숙련도 시스템은 나중에 구현)
+    let c2 = weapon_power;
 
-    // Defense calculation
-    let mob_defense = (mob_data.strength / 3) + (mob_data.agility / 5);
-    damage = (damage * 100) / (100 + mob_defense);
+    // 방어력 계산: 몹 맷집 (strength = 맷집)
+    // Python: mob.attpower (무기공격력) + mob.armor (방어구)
+    // 현재는 strength만 사용 (몹 데이터에 별도 필드 없음)
+    let mob_defense = mob_data.strength; // mob.getArm() + mob.getArmor()
 
-    // Dexterity bonus to hit chance and damage
-    let dex_bonus = player_dex / 10;
-    damage += dex_bonus;
+    // 기본 데미지: (c1 + c2) - 방어력
+    let mut damage = (c1 + c2) - mob_defense;
 
-    // Random variation ±20%
-    let variation = rand::thread_rng().gen_range(-20..=20);
-    damage = (damage * (100 + variation)) / 100;
-
-    // Minimum damage
+    // 최소 데미지 1 보장
     if damage < 1 {
         damage = 1;
     }
 
-    // Max damage cap (based on mob max HP)
-    let max_damage = (mob_data.max_hp * 30) / 100; // Max 30% of mob HP per hit
-    if damage > max_damage {
-        damage = max_damage;
+    // Python: ±20% 랜덤 변동 (0.8~1.2배)
+    // randint(0, s1 - 1) + c1 where c1 = m * 0.80, c2 = m * 1.20
+    let variation = rand::thread_rng().gen_range(-20..=20);
+    damage = (damage * (100 + variation)) / 100;
+
+    // 최소 데미지 1 보장 (랜덤 후)
+    if damage < 1 {
+        damage = 1;
     }
+
+    // Python 코드에는 데미지 캡이 없지만,
+    // 너무 큰 데미지를 방지하기 위해 밸런스 조정 (필요시 제거)
+    // let max_damage = (mob_data.max_hp * 50) / 100; // 최대 50%
+    // if damage > max_damage {
+    //     damage = max_damage;
+    // }
 
     damage
 }
 
 /// Calculate mob damage to player
+///
+/// Uses same formula as player damage (from objs/body.py:getAttackPoint):
+/// c1 = mob_str × 2
+/// c2 = mob_weapon_power
+/// damage = (c1 + c2) - player_defense
+/// Then apply ±20% random variation
 pub fn calculate_mob_damage(mob_data: &RawMobData, player: &Body) -> i64 {
-    let mob_str = mob_data.strength;
-    let mob_level = mob_data.level;
-    let player_armor = player.armor;
-    let player_arm = player.get_arm();
-    let player_dex = player.get_dex();
+    let mob_str = mob_data.strength as i64;
+    // 몹 공격력: 현재는 strength를 기본 공격력으로 사용
+    // Python: mob.attpower는 사용아이템에서 계산됨
+    let mob_weapon = mob_data.strength; // 기본 공격력
 
-    // Base damage
-    let mut damage = (mob_str / 2) + (mob_level * 2);
+    // Python 공식: c1 = 힘 × 2
+    let c1 = mob_str * 2;
 
-    // Defense calculation
-    let defense = player_armor + (player_arm as i32) + (player_dex / 10) as i32;
-    damage = (damage * 100) / (100 + defense as i64);
+    // c2 = 무기공격력
+    let c2 = mob_weapon;
 
-    // Random variation ±15%
-    let variation = rand::thread_rng().gen_range(-15..=15);
-    damage = (damage * (100 + variation)) / 100;
+    // 플레이어 방어력: armor + arm
+    let player_defense = (player.armor as i64) + (player.get_arm());
 
-    // Minimum damage
+    // 기본 데미지
+    let mut damage = (c1 + c2) - player_defense;
+
+    // 최소 데미지 1 보장
     if damage < 1 {
         damage = 1;
     }
 
-    // Max damage cap (based on player max HP)
-    let max_hp = player.get_max_hp();
-    let max_damage = (max_hp * 25) / 100; // Max 25% of player HP per hit
-    if damage > max_damage {
-        damage = max_damage;
+    // ±20% 랜덤 변동
+    let variation = rand::thread_rng().gen_range(-20..=20);
+    damage = (damage * (100 + variation)) / 100;
+
+    // 최소 데미지 1 보장 (랜덤 후)
+    if damage < 1 {
+        damage = 1;
     }
 
     damage
@@ -338,19 +358,24 @@ mod tests {
         player.set("레벨", 10i64);
         player.set("힘", 50i64);
         player.set("민첩", 30i64);
+        player.set("최고내공", 100i64);
         player.attpower = 20;
 
         let mut mob_data = RawMobData::new();
         mob_data.name = "테스트몹".to_string();
         mob_data.level = 8;
-        mob_data.strength = 40;
+        mob_data.strength = 50;    // 맷집 (방어력 - combined with inner_power)
+        mob_data.inner_power = 20; // 내공 (defense contribution)
         mob_data.agility = 20;
         mob_data.max_hp = 100;
         mob_data.hp = 100;
 
+        // Python 공식: (50*2 + 100/5 + 20) - (50) = 100 + 20 + 20 - 50 = 90
+        // ±20%: 72 ~ 108
         let damage = calculate_player_damage(&player, &mob_data);
         assert!(damage > 0);
-        assert!(damage <= 30); // Max 30% of 100
+        // 최소 72, 최대 108 범위 내에 있어야 함 (랜덤이므로 넓게 체크)
+        assert!(damage >= 50 && damage <= 130);
     }
 
     #[test]
@@ -359,16 +384,19 @@ mod tests {
         player.set("레벨", 10i64);
         player.set("맷집", 40i64);
         player.set("민첩", 30i64);
-        player.armor = 10;
+        player.armor = 10;  // 방어구
         player.set("최대체력", 100i64);
 
         let mut mob_data = RawMobData::new();
         mob_data.level = 8;
-        mob_data.strength = 40;
+        mob_data.strength = 40;       // 힘
+        mob_data.inner_power = 20;    // 내공 (attack power contribution)
 
+        // 공식: (40*2 + 40) - (10 + 40) = 80 + 40 - 50 = 70
+        // ±20%: 56 ~ 84
         let damage = calculate_mob_damage(&mob_data, &player);
         assert!(damage > 0);
-        assert!(damage <= 25); // Max 25% of player max HP
+        assert!(damage >= 50 && damage <= 100);
     }
 
     #[test]

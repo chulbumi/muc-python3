@@ -279,6 +279,58 @@ impl WorldState {
         let mobs = self.mob_cache.get_mobs_in_room(zone, room);
         mobs.iter().find(|m| m.mob_key == mob_key && m.alive).copied()
     }
+
+    /// Search for mobs by name pattern across all rooms
+    /// Returns Vec of (zone, room, mob_name, mob_display_name, hp, max_hp)
+    pub fn search_mobs_by_name(&self, name_pattern: &str) -> Vec<(String, String, String, String, i64, i64)> {
+        let mut results = Vec::new();
+        let pattern_lower = name_pattern.to_lowercase();
+
+        // Search through all mob instances using public method
+        for (room_key, instances) in self.mob_cache.get_all_instances() {
+            // Parse room_key into zone and room
+            let parts: Vec<&str> = room_key.splitn(2, ':').collect();
+            let zone = parts.get(0).unwrap_or(&"");
+            let room = parts.get(1).unwrap_or(&"");
+
+            for mob in instances {
+                // Check mob data for display name
+                if let Some(mob_data) = self.mob_cache.get_mob(&mob.mob_key) {
+                    let display_name = &mob_data.desc1;
+                    let display_name_lower = display_name.to_lowercase();
+
+                    // Match by display name or reaction names
+                    if display_name_lower.contains(&pattern_lower) || mob_data.name.to_lowercase().contains(&pattern_lower) {
+                        results.push((
+                            mob.zone.clone(),
+                            mob.room.clone(),
+                            mob_data.name.clone(),
+                            display_name.clone(),
+                            mob.hp,
+                            mob.max_hp,
+                        ));
+                    } else {
+                        // Check reaction names
+                        for reaction in &mob_data.reaction_names {
+                            if reaction.to_lowercase().contains(&pattern_lower) {
+                                results.push((
+                                    mob.zone.clone(),
+                                    mob.room.clone(),
+                                    mob_data.name.clone(),
+                                    display_name.clone(),
+                                    mob.hp,
+                                    mob.max_hp,
+                                ));
+                                break;
+                            }
+                        }
+                    }
+                }
+            }
+        }
+
+        results
+    }
 }
 
 impl Default for WorldState {
