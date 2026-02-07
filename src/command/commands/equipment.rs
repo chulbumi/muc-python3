@@ -527,15 +527,8 @@ fn item_info_command(player: &mut Body, args: &[&str]) -> CommandResult {
 
 /// Registers all equipment commands
 pub fn register_equipment_commands(registry: &mut CommandRegistry) {
-    // 소지품 (Inventory)
-    registry.register(crate::command::registry::CommandInfo {
-        name: "소지품".to_string(),
-        aliases: vec!["소".to_string(), "인벤토리".to_string(), "inventory".to_string(), "i".to_string()],
-        handler: Arc::new(inventory_command),
-        level: 0,
-        description: "소지품을 보여줍니다.".to_string(),
-        usage: "소지품".to_string(),
-    });
+    // 소지품 (Inventory) - Rhai 스크립트로 처리 (cmds/소지품.rhai)
+    // 네이티브 명령을 제거하여 Rhai 스크립트가 우선 적용되도록 함
 
     // 장비 (Equipment)
     registry.register(crate::command::registry::CommandInfo {

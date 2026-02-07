@@ -115,8 +115,7 @@ impl CommandRegistry {
         aliases.insert("ㅁ".to_string(), "아래".to_string());
 
         // Command aliases (from objs/alias.py)
-        aliases.insert("소".to_string(), "소지품".to_string());
-        aliases.insert("소지".to_string(), "소지품".to_string());
+        // 소지품 관련 alias는 Rhai 스크립트에서 처리 (cmds/소지품.rhai)
         aliases.insert("보".to_string(), "봐".to_string());
         aliases.insert("look".to_string(), "봐".to_string());
         aliases.insert("바라보기".to_string(), "봐".to_string());
@@ -125,16 +124,16 @@ impl CommandRegistry {
         aliases.insert("help".to_string(), "도움말".to_string());
         aliases.insert("?".to_string(), "도움말".to_string());
         aliases.insert("/h".to_string(), "도움말".to_string());
-        aliases.insert("인벤토리".to_string(), "소지품".to_string());
-        aliases.insert("inventory".to_string(), "소지품".to_string());
-        aliases.insert("점수".to_string(), "능력치".to_string());
-        aliases.insert("점".to_string(), "능력치".to_string());
-        aliases.insert("상태".to_string(), "능력치".to_string());
-        aliases.insert("상".to_string(), "능력치".to_string());
-        aliases.insert("정".to_string(), "능력치".to_string());
-        aliases.insert("정보".to_string(), "능력치".to_string());
-        aliases.insert("score".to_string(), "능력치".to_string());
-        aliases.insert("stat".to_string(), "능력치".to_string());
+        // 능력치 관련 alias는 Rhai 스크립트에서 처리 (cmds/능력치.rhai)
+        // Python에 "능력치" 별칭이 없음 - 제거
+        // aliases.insert("능력치".to_string(), "점수".to_string());
+        aliases.insert("점".to_string(), "점수".to_string());
+        aliases.insert("상태".to_string(), "점수".to_string());
+        aliases.insert("상".to_string(), "점수".to_string());
+        aliases.insert("정".to_string(), "점수".to_string());
+        aliases.insert("정보".to_string(), "점수".to_string());
+        aliases.insert("score".to_string(), "점수".to_string());
+        aliases.insert("stat".to_string(), "점수".to_string());
         aliases.insert("외".to_string(), "외쳐".to_string());
         aliases.insert("외침".to_string(), "외쳐".to_string());
         aliases.insert("잡".to_string(), "외쳐".to_string());
@@ -151,9 +150,84 @@ impl CommandRegistry {
         aliases.insert("판".to_string(), "판매".to_string());
         aliases.insert("팔".to_string(), "판매".to_string());
         aliases.insert("팔다".to_string(), "판매".to_string());
-        // 파이썬 cmd.json: 장비확인 장/장비, 대화 대/대화(=말), 장->장비(스크립트)
+
+        // Equipment aliases
         aliases.insert("장".to_string(), "장비".to_string());
+
+        // Communication aliases
         aliases.insert("대".to_string(), "말".to_string());
+
+        // Additional aliases from objs/alias.py
+        aliases.insert("해".to_string(), "벗어".to_string());
+        aliases.insert("벗".to_string(), "벗어".to_string());
+        aliases.insert("어".to_string(), "어디".to_string());
+        aliases.insert("해제".to_string(), "벗어".to_string());
+        aliases.insert("입".to_string(), "입어".to_string());
+        aliases.insert("착".to_string(), "입어".to_string());
+        aliases.insert("착용".to_string(), "입어".to_string());
+        aliases.insert("무장".to_string(), "입어".to_string());
+        aliases.insert("소".to_string(), "소지품".to_string());
+        aliases.insert("소지".to_string(), "소지품".to_string());
+        aliases.insert("주워".to_string(), "가져".to_string());
+        aliases.insert("업".to_string(), "업데이트".to_string());
+        aliases.insert("귀".to_string(), "귀환".to_string());
+        aliases.insert("일".to_string(), "일어나".to_string());
+        aliases.insert("일어".to_string(), "일어나".to_string());
+        aliases.insert("일어서".to_string(), "일어나".to_string());
+        aliases.insert("일어난다".to_string(), "일어나".to_string());
+        aliases.insert("쉬".to_string(), "쉬어".to_string());
+        aliases.insert("쉰다".to_string(), "쉬어".to_string());
+        aliases.insert("자무".to_string(), "자동무공".to_string());
+        aliases.insert("자무삭제".to_string(), "자동무공삭제".to_string());
+        aliases.insert("시".to_string(), "시전".to_string());
+        aliases.insert("공지".to_string(), "공지사항".to_string());
+        aliases.insert("표".to_string(), "표현".to_string());
+        aliases.insert("'".to_string(), "표현".to_string());
+        aliases.insert("설".to_string(), "설정".to_string());
+        aliases.insert("줄".to_string(), "줄임말".to_string());
+        aliases.insert("줄임".to_string(), "줄임말".to_string());
+        aliases.insert("구".to_string(), "구입".to_string());
+        aliases.insert("구매".to_string(), "구입".to_string());
+        aliases.insert("사".to_string(), "구입".to_string());
+        aliases.insert("산다".to_string(), "구입".to_string());
+        aliases.insert("먹".to_string(), "먹어".to_string());
+        aliases.insert("먹는다".to_string(), "먹어".to_string());
+        aliases.insert("숙".to_string(), "숙련도".to_string());
+        aliases.insert("숙련".to_string(), "숙련도".to_string());
+        aliases.insert("기술".to_string(), "무공".to_string());
+        aliases.insert("무상".to_string(), "무공상태".to_string());
+        aliases.insert("값".to_string(), "값설정".to_string());
+        aliases.insert("비".to_string(), "비교".to_string());
+        aliases.insert("상보".to_string(), "상태보기".to_string());
+        aliases.insert("꺼".to_string(), "꺼내".to_string());
+        aliases.insert("넣".to_string(), "넣어".to_string());
+        aliases.insert("기상".to_string(), "무공상태".to_string());
+        aliases.insert("몹".to_string(), "몹찾기".to_string());
+        aliases.insert("아이템".to_string(), "아이템찾기".to_string());
+        aliases.insert(":".to_string(), "반전음".to_string());
+        aliases.insert("반전".to_string(), "반전음".to_string());
+        aliases.insert("반".to_string(), "반전음".to_string());
+        aliases.insert("공".to_string(), "쳐".to_string());
+        aliases.insert("때".to_string(), "쳐".to_string());
+        aliases.insert("공격".to_string(), "쳐".to_string());
+        aliases.insert("때려".to_string(), "쳐".to_string());
+        aliases.insert("버".to_string(), "버려".to_string());
+        aliases.insert("부수".to_string(), "부셔".to_string());
+        aliases.insert("부수다".to_string(), "부셔".to_string());
+        aliases.insert("부숴".to_string(), "부셔".to_string());
+        aliases.insert("집".to_string(), "가져".to_string());
+        aliases.insert("집어".to_string(), "가져".to_string());
+        aliases.insert("귀가".to_string(), "귀환".to_string());
+        aliases.insert("뒤".to_string(), "뒤져".to_string());
+        aliases.insert("따".to_string(), "따라".to_string());
+        aliases.insert("전".to_string(), "전음".to_string());
+        aliases.insert("방".to_string(), "방파말".to_string());
+        aliases.insert("방리".to_string(), "방파리스트".to_string());
+        aliases.insert("방상".to_string(), "방파상태".to_string());
+        aliases.insert("입".to_string(), "입어".to_string());
+        aliases.insert("벗".to_string(), "벗어".to_string());
+        aliases.insert("착".to_string(), "입어".to_string());
+        aliases.insert("착용".to_string(), "입어".to_string());
 
         aliases
     }

@@ -64,9 +64,17 @@ pub fn create_script_command(
         match storage.execute(&script_name, player, &line, get_other_players_desc.clone(), get_other_players_map.clone(), call_out_scheduler.clone()) {
             Ok((outputs, special)) => {
                 println!("[SCRIPT_CMD] Script {} executed, outputs.len()={}, special={:?}", script_name, outputs.len(), special);
+
+                // Handle special actions first
                 if let Some(cr) = special {
+                    // Send outputs before handling special action
+                    if !outputs.is_empty() {
+                        player.send_line(&outputs.join("\r\n"));
+                    }
                     return cr;
                 }
+
+                // No special action, return outputs or Ok
                 if outputs.is_empty() {
                     println!("[SCRIPT_CMD] No outputs, returning Ok");
                     CommandResult::Ok

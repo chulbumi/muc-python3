@@ -1,0 +1,16 @@
+{
+  "activeFeature": "초기도우미-step-based-conversion",
+  "phase": "check",
+  "lastUpdated": "2026-02-01T00:00:00Z",
+  "matchRate": 97,
+  "tasks": {
+    "current": "[Check] 초기도우미 step-based conversion",
+    "status": "completed"
+  },
+  "sessionCount": 11,
+  "lastSession": {
+    "startedAt": "2026-02-07T12:15:03.404Z",
+    "platform": "claude",
+    "level": "Dynamic"
+  }
+}
