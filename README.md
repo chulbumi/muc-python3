@@ -1,18 +1,47 @@
-## SLACK 연동
-슬렉 채널 중 #코드 채널에서 아래 명령어를 입력하시면 Github계정과 슬렉 채널이 연동되어, 활동내역이 채널로 공유됩니다.
-```
-/github signin
+# MUD Server (Rust)
+
+Python 기반 MUD 서버를 Rust로 마이그레이션하는 프로젝트입니다.
+
+## 현재 상태
+
+- **구현 완료**: 205개 Rhai 스크립트 명령어
+- **단위 테스트**: 333개 통과
+- **통합 테스트**: 36/72 통과 (50%)
+
+## 빌드 및 실행
+
+```bash
+# 개발 빌드
+cargo build
+
+# 실행
+cargo run
+
+# 테스트
+cargo test
+
+# 릴리즈 빌드
+cargo build --release
 ```
 
-## 빈 폴더 작성 시
-개발을 하다보면 '빈 폴더'가 필요한 경우가 있습니다. 그런데 GIT은 빈 폴더는 커밋대상으로 취급하지 않습니다.
-그래서 꼼수를 이용합니다.
+## 프로젝트 구조
 
-빈폴더 안에 별도의 .gitignore를 등록하고 해당 파일 안에 이렇게 입력합니다
+- `src/` - Rust 소스 코드
+  - `script/mod.rs` - Rhai 스크립트 엔진 및 EFUN 등록
+  - `world/` - 월드 관리 (방, 몹, 아이템, 스킬)
+  - `player/` - 플레이어 데이터 및 상태 관리
+  - `command/` - 명령어 레지스트리 및 핸들러
+  - `network/` - 네트워크 서버 및 클라이언트
+- `cmds/` - Rhai 스크립트 명령어 (205개)
+- `data/` - 게임 데이터 (JSON)
 
-```
-* //이 폴더 안의 모든 것을 무시
-!.gitignore // 대신 이 파일 빼고
-```
+## 개발 문서
 
-이렇게하면 빈 폴더가 Commit되고, 폴더 하위에 혹시라도 발생하는 Dummy Data는 커밋대상으로 취급하지 않습니다.
+상세한 개발 문서는 [AGENTS.md](AGENTS.md)를 참고하세요.
+
+## CI/CD
+
+GitHub Actions를 통해 자동으로 테스트가 실행됩니다:
+- 코드 포맷팅 검사 (`cargo fmt --check`)
+- Clippy 정적 분석 (`cargo clippy`)
+- 단위 테스트 실행 (`cargo test`)
