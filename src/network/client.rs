@@ -2362,8 +2362,8 @@ async fn handle_game_command(
     let mut send_to_users: Option<Vec<(String, String)>> = None; // 스크립트 send_to_user 수집분
     let mut broadcast_to_players: Option<(Vec<String>, String)> = None; // (names, msg) 방파말 등
     let mut tell_pending: Option<(String, String, String)> = None; // (target, message, sender_name)
-    let mut kick_pending: Option<(String, String)> = None; // (target_name, reason)
-    let mut ban_pending: Option<(String, i64, String)> = None; // (target_name, duration, reason)
+    let mut _kick_pending: Option<(String, String)> = None; // (target_name, reason)
+    let mut _ban_pending: Option<(String, i64, String)> = None; // (target_name, duration, reason)
     let mut set_pending: Option<PendingInput> = None;
     let mut skip_normal_prompt = false;
     let mut room_append: Option<(String, String, String)> = None;
@@ -2765,11 +2765,11 @@ async fn handle_game_command(
                         )
                     }
                     Some(CommandResult::Kick { target_name, reason }) => {
-                        kick_pending = Some((target_name, reason));
+                        _kick_pending = Some((target_name, reason));
                         String::new()
                     }
                     Some(CommandResult::Ban { target_name, duration, reason }) => {
-                        ban_pending = Some((target_name, duration, reason));
+                        _ban_pending = Some((target_name, duration, reason));
                         String::new()
                     }
                     None => {

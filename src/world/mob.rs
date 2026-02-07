@@ -232,8 +232,8 @@ impl MobInstance {
 
         // Count attackers in same room and find max level
         let mut attacker_count = 0;
-        let mut max_level = 0i64;
-        let mut max_level_attacker = String::new();
+        let mut _max_level = 0i64;
+        let mut _max_level_attacker = String::new();
 
         for attacker in damage_map.get_attackers() {
             // In full implementation, would check if attacker is in same room
@@ -241,9 +241,9 @@ impl MobInstance {
             attacker_count += 1;
             // In full implementation, would get actual level from attacker
             // For now, use mob level as default
-            if mob_data.level > max_level {
-                max_level = mob_data.level;
-                max_level_attacker = attacker.clone();
+            if mob_data.level > _max_level {
+                _max_level = mob_data.level;
+                _max_level_attacker = attacker.clone();
             }
         }
 
