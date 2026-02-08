@@ -1,8 +1,8 @@
 # MUD Server Test Report
 
-**Generated:** 2026-02-08T10:12:25.399537
+**Generated:** 2026-02-08T11:26:52.942105
 
-**Test Duration:** 2026-02-08T10:11:05.907617 to 2026-02-08T10:12:25.399537
+**Test Duration:** 2026-02-08T11:25:33.478122 to 2026-02-08T11:26:52.942105
 
 ## Test Configuration
 
@@ -1180,7 +1180,7 @@
 
 - **Output Length:** 0 bytes
 - **Execution Time:** 0.00s
-- **Timestamp:** 2026-02-08T10:11:49.277059
+- **Timestamp:** 2026-02-08T11:26:16.826986
 
 ---
 
@@ -1188,7 +1188,7 @@
 
 - **Output Length:** 0 bytes
 - **Execution Time:** 0.00s
-- **Timestamp:** 2026-02-08T10:11:49.277262
+- **Timestamp:** 2026-02-08T11:26:16.827176
 
 ---
 
@@ -1196,7 +1196,7 @@
 
 - **Output Length:** 0 bytes
 - **Execution Time:** 0.00s
-- **Timestamp:** 2026-02-08T10:11:49.277271
+- **Timestamp:** 2026-02-08T11:26:16.827185
 
 ---
 
@@ -1204,7 +1204,7 @@
 
 - **Output Length:** 0 bytes
 - **Execution Time:** 0.00s
-- **Timestamp:** 2026-02-08T10:11:49.277279
+- **Timestamp:** 2026-02-08T11:26:16.827192
 
 ---
 
@@ -1212,7 +1212,7 @@
 
 - **Output Length:** 0 bytes
 - **Execution Time:** 0.00s
-- **Timestamp:** 2026-02-08T10:11:49.277285
+- **Timestamp:** 2026-02-08T11:26:16.827199
 
 ---
 
@@ -1220,7 +1220,7 @@
 
 - **Output Length:** 0 bytes
 - **Execution Time:** 0.00s
-- **Timestamp:** 2026-02-08T10:11:49.277293
+- **Timestamp:** 2026-02-08T11:26:16.827207
 
 ---
 
@@ -1228,7 +1228,7 @@
 
 - **Output Length:** 0 bytes
 - **Execution Time:** 0.00s
-- **Timestamp:** 2026-02-08T10:11:49.277300
+- **Timestamp:** 2026-02-08T11:26:16.827215
 
 ---
 
@@ -1236,7 +1236,7 @@
 
 - **Output Length:** 0 bytes
 - **Execution Time:** 0.00s
-- **Timestamp:** 2026-02-08T10:11:49.277308
+- **Timestamp:** 2026-02-08T11:26:16.827222
 
 ---
 
@@ -1244,7 +1244,7 @@
 
 - **Output Length:** 0 bytes
 - **Execution Time:** 0.00s
-- **Timestamp:** 2026-02-08T10:11:49.277315
+- **Timestamp:** 2026-02-08T11:26:16.827230
 
 ---
 
@@ -1252,7 +1252,7 @@
 
 - **Output Length:** 0 bytes
 - **Execution Time:** 0.00s
-- **Timestamp:** 2026-02-08T10:11:49.277322
+- **Timestamp:** 2026-02-08T11:26:16.827237
 
 ---
 
@@ -1260,7 +1260,7 @@
 
 - **Output Length:** 0 bytes
 - **Execution Time:** 0.00s
-- **Timestamp:** 2026-02-08T10:11:59.322435
+- **Timestamp:** 2026-02-08T11:26:26.869514
 
 ---
 
@@ -1268,7 +1268,7 @@
 
 - **Output Length:** 0 bytes
 - **Execution Time:** 0.00s
-- **Timestamp:** 2026-02-08T10:11:59.322451
+- **Timestamp:** 2026-02-08T11:26:26.869533
 
 ---
 
@@ -1276,7 +1276,7 @@
 
 - **Output Length:** 0 bytes
 - **Execution Time:** 0.00s
-- **Timestamp:** 2026-02-08T10:11:59.322459
+- **Timestamp:** 2026-02-08T11:26:26.869541
 
 ---
 
@@ -1284,7 +1284,7 @@
 
 - **Output Length:** 0 bytes
 - **Execution Time:** 0.00s
-- **Timestamp:** 2026-02-08T10:11:59.322466
+- **Timestamp:** 2026-02-08T11:26:26.869549
 
 ---
 
@@ -1292,7 +1292,7 @@
 
 - **Output Length:** 0 bytes
 - **Execution Time:** 0.00s
-- **Timestamp:** 2026-02-08T10:11:59.322473
+- **Timestamp:** 2026-02-08T11:26:26.869557
 
 ---
 
@@ -1300,7 +1300,7 @@
 
 - **Output Length:** 0 bytes
 - **Execution Time:** 0.00s
-- **Timestamp:** 2026-02-08T10:11:59.322481
+- **Timestamp:** 2026-02-08T11:26:26.869564
 
 ---
 
@@ -1308,7 +1308,7 @@
 
 - **Output Length:** 0 bytes
 - **Execution Time:** 0.00s
-- **Timestamp:** 2026-02-08T10:11:59.322488
+- **Timestamp:** 2026-02-08T11:26:26.869571
 
 ---
 
@@ -1316,7 +1316,7 @@
 
 - **Output Length:** 0 bytes
 - **Execution Time:** 0.00s
-- **Timestamp:** 2026-02-08T10:12:06.338627
+- **Timestamp:** 2026-02-08T11:26:33.886419
 
 ---
 
@@ -1324,7 +1324,7 @@
 
 - **Output Length:** 0 bytes
 - **Execution Time:** 0.00s
-- **Timestamp:** 2026-02-08T10:12:06.338639
+- **Timestamp:** 2026-02-08T11:26:33.886433
 
 ---
 
@@ -1332,7 +1332,7 @@
 
 - **Output Length:** 0 bytes
 - **Execution Time:** 0.00s
-- **Timestamp:** 2026-02-08T10:12:06.338647
+- **Timestamp:** 2026-02-08T11:26:33.886442
 
 ---
 
@@ -1340,7 +1340,7 @@
 
 - **Output Length:** 0 bytes
 - **Execution Time:** 0.00s
-- **Timestamp:** 2026-02-08T10:12:06.338654
+- **Timestamp:** 2026-02-08T11:26:33.886449
 
 ---
 
@@ -1348,7 +1348,7 @@
 
 - **Output Length:** 0 bytes
 - **Execution Time:** 0.00s
-- **Timestamp:** 2026-02-08T10:12:06.338661
+- **Timestamp:** 2026-02-08T11:26:33.886457
 
 ---
 
@@ -1356,7 +1356,7 @@
 
 - **Output Length:** 0 bytes
 - **Execution Time:** 0.00s
-- **Timestamp:** 2026-02-08T10:12:11.351039
+- **Timestamp:** 2026-02-08T11:26:38.898928
 
 ---
 
@@ -1364,7 +1364,7 @@
 
 - **Output Length:** 0 bytes
 - **Execution Time:** 0.00s
-- **Timestamp:** 2026-02-08T10:12:11.351050
+- **Timestamp:** 2026-02-08T11:26:38.898939
 
 ---
 
@@ -1372,7 +1372,7 @@
 
 - **Output Length:** 0 bytes
 - **Execution Time:** 0.00s
-- **Timestamp:** 2026-02-08T10:12:11.351058
+- **Timestamp:** 2026-02-08T11:26:38.898947
 
 ---
 
@@ -1380,7 +1380,7 @@
 
 - **Output Length:** 0 bytes
 - **Execution Time:** 0.00s
-- **Timestamp:** 2026-02-08T10:12:11.351065
+- **Timestamp:** 2026-02-08T11:26:38.898955
 
 ---
 
@@ -1388,7 +1388,7 @@
 
 - **Output Length:** 0 bytes
 - **Execution Time:** 0.00s
-- **Timestamp:** 2026-02-08T10:12:11.351072
+- **Timestamp:** 2026-02-08T11:26:38.898962
 
 ---
 
@@ -1396,7 +1396,7 @@
 
 - **Output Length:** 0 bytes
 - **Execution Time:** 0.00s
-- **Timestamp:** 2026-02-08T10:12:11.351079
+- **Timestamp:** 2026-02-08T11:26:38.898969
 
 ---
 
@@ -1404,7 +1404,7 @@
 
 - **Output Length:** 0 bytes
 - **Execution Time:** 0.00s
-- **Timestamp:** 2026-02-08T10:12:11.351086
+- **Timestamp:** 2026-02-08T11:26:38.898976
 
 ---
 
@@ -1412,7 +1412,7 @@
 
 - **Output Length:** 0 bytes
 - **Execution Time:** 0.00s
-- **Timestamp:** 2026-02-08T10:12:11.351093
+- **Timestamp:** 2026-02-08T11:26:38.898983
 
 ---
 
@@ -1420,7 +1420,7 @@
 
 - **Output Length:** 0 bytes
 - **Execution Time:** 0.00s
-- **Timestamp:** 2026-02-08T10:12:11.351101
+- **Timestamp:** 2026-02-08T11:26:38.898990
 
 ---
 
@@ -1428,7 +1428,7 @@
 
 - **Output Length:** 0 bytes
 - **Execution Time:** 0.00s
-- **Timestamp:** 2026-02-08T10:12:20.381030
+- **Timestamp:** 2026-02-08T11:26:47.929067
 
 ---
 
@@ -1436,7 +1436,7 @@
 
 - **Output Length:** 0 bytes
 - **Execution Time:** 0.00s
-- **Timestamp:** 2026-02-08T10:12:20.381041
+- **Timestamp:** 2026-02-08T11:26:47.929078
 
 ---
 
@@ -1444,7 +1444,7 @@
 
 - **Output Length:** 0 bytes
 - **Execution Time:** 0.00s
-- **Timestamp:** 2026-02-08T10:12:20.381049
+- **Timestamp:** 2026-02-08T11:26:47.929086
 
 ---
 
@@ -1452,7 +1452,7 @@
 
 - **Output Length:** 0 bytes
 - **Execution Time:** 0.00s
-- **Timestamp:** 2026-02-08T10:12:20.381057
+- **Timestamp:** 2026-02-08T11:26:47.929093
 
 ---
 
@@ -1460,7 +1460,7 @@
 
 - **Output Length:** 0 bytes
 - **Execution Time:** 0.00s
-- **Timestamp:** 2026-02-08T10:12:20.381064
+- **Timestamp:** 2026-02-08T11:26:47.929100
 
 ---
 
@@ -1469,8 +1469,8 @@
 ### `능력치` - PASS
 
 - **Output Length:** 910 bytes
-- **Execution Time:** 1.00s
-- **Timestamp:** 2026-02-08T10:11:50.282039
+- **Execution Time:** 1.01s
+- **Timestamp:** 2026-02-08T11:26:17.834064
 
 **Output Preview:**
 ```
@@ -1492,8 +1492,8 @@
 ### `점수` - PASS
 
 - **Output Length:** 910 bytes
-- **Execution Time:** 1.01s
-- **Timestamp:** 2026-02-08T10:11:51.296173
+- **Execution Time:** 1.00s
+- **Timestamp:** 2026-02-08T11:26:18.838979
 
 **Output Preview:**
 ```
@@ -1516,7 +1516,7 @@
 
 - **Output Length:** 366 bytes
 - **Execution Time:** 1.00s
-- **Timestamp:** 2026-02-08T10:11:52.298059
+- **Timestamp:** 2026-02-08T11:26:19.841192
 
 **Output Preview:**
 ```
@@ -1539,7 +1539,7 @@
 
 - **Output Length:** 255 bytes
 - **Execution Time:** 1.00s
-- **Timestamp:** 2026-02-08T10:11:53.301353
+- **Timestamp:** 2026-02-08T11:26:20.845027
 
 **Output Preview:**
 ```
@@ -1558,8 +1558,8 @@
 ### `누구` - PASS
 
 - **Output Length:** 287 bytes
-- **Execution Time:** 1.00s
-- **Timestamp:** 2026-02-08T10:11:54.305391
+- **Execution Time:** 1.01s
+- **Timestamp:** 2026-02-08T11:26:21.850498
 
 **Output Preview:**
 ```
@@ -1578,7 +1578,7 @@
 
 - **Output Length:** 361 bytes
 - **Execution Time:** 1.00s
-- **Timestamp:** 2026-02-08T10:11:55.309153
+- **Timestamp:** 2026-02-08T11:26:22.854715
 
 **Output Preview:**
 ```
@@ -1605,7 +1605,7 @@
 
 - **Output Length:** 113 bytes
 - **Execution Time:** 1.00s
-- **Timestamp:** 2026-02-08T10:11:56.312084
+- **Timestamp:** 2026-02-08T11:26:23.858031
 
 **Output Preview:**
 ```
@@ -1624,7 +1624,7 @@
 
 - **Output Length:** 54 bytes
 - **Execution Time:** 1.00s
-- **Timestamp:** 2026-02-08T10:11:57.315107
+- **Timestamp:** 2026-02-08T11:26:24.862037
 
 **Output Preview:**
 ```
@@ -1638,7 +1638,7 @@
 
 - **Output Length:** 149 bytes
 - **Execution Time:** 1.00s
-- **Timestamp:** 2026-02-08T10:11:58.316880
+- **Timestamp:** 2026-02-08T11:26:25.863818
 
 **Output Preview:**
 ```
@@ -1655,7 +1655,7 @@
 
 - **Output Length:** 38 bytes
 - **Execution Time:** 1.00s
-- **Timestamp:** 2026-02-08T10:11:59.320965
+- **Timestamp:** 2026-02-08T11:26:26.867576
 
 **Output Preview:**
 ```
@@ -1669,7 +1669,7 @@
 
 - **Output Length:** 57 bytes
 - **Execution Time:** 1.00s
-- **Timestamp:** 2026-02-08T10:12:00.324075
+- **Timestamp:** 2026-02-08T11:26:27.871518
 
 **Output Preview:**
 ```
@@ -1683,7 +1683,7 @@
 
 - **Output Length:** 374 bytes
 - **Execution Time:** 1.00s
-- **Timestamp:** 2026-02-08T10:12:01.326056
+- **Timestamp:** 2026-02-08T11:26:28.873627
 
 **Output Preview:**
 ```
@@ -1709,7 +1709,7 @@
 
 - **Output Length:** 424 bytes
 - **Execution Time:** 1.00s
-- **Timestamp:** 2026-02-08T10:12:02.328275
+- **Timestamp:** 2026-02-08T11:26:29.875808
 
 **Output Preview:**
 ```
@@ -1737,7 +1737,7 @@
 
 - **Output Length:** 374 bytes
 - **Execution Time:** 1.00s
-- **Timestamp:** 2026-02-08T10:12:03.330376
+- **Timestamp:** 2026-02-08T11:26:30.878406
 
 **Output Preview:**
 ```
@@ -1763,7 +1763,7 @@
 
 - **Output Length:** 57 bytes
 - **Execution Time:** 1.00s
-- **Timestamp:** 2026-02-08T10:12:04.332325
+- **Timestamp:** 2026-02-08T11:26:31.879861
 
 **Output Preview:**
 ```
@@ -1777,7 +1777,7 @@
 
 - **Output Length:** 58 bytes
 - **Execution Time:** 1.00s
-- **Timestamp:** 2026-02-08T10:12:05.334002
+- **Timestamp:** 2026-02-08T11:26:32.881498
 
 **Output Preview:**
 ```
@@ -1791,7 +1791,7 @@
 
 - **Output Length:** 376 bytes
 - **Execution Time:** 1.00s
-- **Timestamp:** 2026-02-08T10:12:06.338047
+- **Timestamp:** 2026-02-08T11:26:33.885812
 
 **Output Preview:**
 ```
@@ -1817,8 +1817,8 @@
 ### `상태` - PASS
 
 - **Output Length:** 910 bytes
-- **Execution Time:** 1.01s
-- **Timestamp:** 2026-02-08T10:12:07.343870
+- **Execution Time:** 1.00s
+- **Timestamp:** 2026-02-08T11:26:34.891365
 
 **Output Preview:**
 ```
@@ -1841,7 +1841,7 @@
 
 - **Output Length:** 54 bytes
 - **Execution Time:** 1.00s
-- **Timestamp:** 2026-02-08T10:12:08.345943
+- **Timestamp:** 2026-02-08T11:26:35.893205
 
 **Output Preview:**
 ```
@@ -1855,7 +1855,7 @@
 
 - **Output Length:** 62 bytes
 - **Execution Time:** 1.00s
-- **Timestamp:** 2026-02-08T10:12:09.347697
+- **Timestamp:** 2026-02-08T11:26:36.895190
 
 **Output Preview:**
 ```
@@ -1869,7 +1869,7 @@
 
 - **Output Length:** 63 bytes
 - **Execution Time:** 1.00s
-- **Timestamp:** 2026-02-08T10:12:10.349294
+- **Timestamp:** 2026-02-08T11:26:37.896815
 
 **Output Preview:**
 ```
@@ -1883,7 +1883,7 @@
 
 - **Output Length:** 64 bytes
 - **Execution Time:** 1.00s
-- **Timestamp:** 2026-02-08T10:12:11.350645
+- **Timestamp:** 2026-02-08T11:26:38.898510
 
 **Output Preview:**
 ```
@@ -1897,7 +1897,7 @@
 
 - **Output Length:** 99 bytes
 - **Execution Time:** 1.00s
-- **Timestamp:** 2026-02-08T10:12:12.352911
+- **Timestamp:** 2026-02-08T11:26:39.901282
 
 **Output Preview:**
 ```
@@ -1915,7 +1915,7 @@
 
 - **Output Length:** 48 bytes
 - **Execution Time:** 1.00s
-- **Timestamp:** 2026-02-08T10:12:13.356538
+- **Timestamp:** 2026-02-08T11:26:40.905742
 
 **Output Preview:**
 ```
@@ -1928,8 +1928,8 @@
 ### `버려 검` - PASS
 
 - **Output Length:** 46 bytes
-- **Execution Time:** 1.00s
-- **Timestamp:** 2026-02-08T10:12:14.361155
+- **Execution Time:** 1.01s
+- **Timestamp:** 2026-02-08T11:26:41.910967
 
 **Output Preview:**
 ```
@@ -1943,7 +1943,7 @@
 
 - **Output Length:** 51 bytes
 - **Execution Time:** 1.00s
-- **Timestamp:** 2026-02-08T10:12:15.364184
+- **Timestamp:** 2026-02-08T11:26:42.914005
 
 **Output Preview:**
 ```
@@ -1957,7 +1957,7 @@
 
 - **Output Length:** 48 bytes
 - **Execution Time:** 1.00s
-- **Timestamp:** 2026-02-08T10:12:16.368738
+- **Timestamp:** 2026-02-08T11:26:43.916922
 
 **Output Preview:**
 ```
@@ -1971,7 +1971,7 @@
 
 - **Output Length:** 50 bytes
 - **Execution Time:** 1.00s
-- **Timestamp:** 2026-02-08T10:12:17.371709
+- **Timestamp:** 2026-02-08T11:26:44.919977
 
 **Output Preview:**
 ```
@@ -1985,7 +1985,7 @@
 
 - **Output Length:** 45 bytes
 - **Execution Time:** 1.00s
-- **Timestamp:** 2026-02-08T10:12:18.374665
+- **Timestamp:** 2026-02-08T11:26:45.922900
 
 **Output Preview:**
 ```
@@ -1999,7 +1999,7 @@
 
 - **Output Length:** 45 bytes
 - **Execution Time:** 1.00s
-- **Timestamp:** 2026-02-08T10:12:19.377664
+- **Timestamp:** 2026-02-08T11:26:46.925732
 
 **Output Preview:**
 ```
@@ -2013,7 +2013,7 @@
 
 - **Output Length:** 61 bytes
 - **Execution Time:** 1.00s
-- **Timestamp:** 2026-02-08T10:12:20.380668
+- **Timestamp:** 2026-02-08T11:26:47.928685
 
 **Output Preview:**
 ```
@@ -2027,7 +2027,7 @@
 
 - **Output Length:** 52 bytes
 - **Execution Time:** 1.00s
-- **Timestamp:** 2026-02-08T10:12:21.383066
+- **Timestamp:** 2026-02-08T11:26:48.930966
 
 **Output Preview:**
 ```
@@ -2041,7 +2041,7 @@
 
 - **Output Length:** 62 bytes
 - **Execution Time:** 1.00s
-- **Timestamp:** 2026-02-08T10:12:22.384889
+- **Timestamp:** 2026-02-08T11:26:49.932578
 
 **Output Preview:**
 ```
@@ -2055,7 +2055,7 @@
 
 - **Output Length:** 65 bytes
 - **Execution Time:** 1.00s
-- **Timestamp:** 2026-02-08T10:12:23.386704
+- **Timestamp:** 2026-02-08T11:26:50.934655
 
 **Output Preview:**
 ```
@@ -2069,7 +2069,7 @@
 
 - **Output Length:** 910 bytes
 - **Execution Time:** 1.01s
-- **Timestamp:** 2026-02-08T10:12:24.394822
+- **Timestamp:** 2026-02-08T11:26:51.940018
 
 **Output Preview:**
 ```
@@ -2092,7 +2092,7 @@
 
 - **Output Length:** 62 bytes
 - **Execution Time:** 1.00s
-- **Timestamp:** 2026-02-08T10:12:25.399179
+- **Timestamp:** 2026-02-08T11:26:52.941707
 
 **Output Preview:**
 ```

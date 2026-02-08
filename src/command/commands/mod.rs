@@ -52,6 +52,7 @@ pub fn register_basic_commands(registry: &mut CommandRegistry) {
 }
 
 /// Helper to create a command function wrapper
+#[allow(dead_code)]
 fn make_command<F>(f: F) -> CommandFn
 where
     F: Fn(&mut Body, &[&str]) -> CommandResult + Send + Sync + 'static,
