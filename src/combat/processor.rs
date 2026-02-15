@@ -244,8 +244,9 @@ pub fn process_player_attack(
         let exp = calculate_exp_reward(mob_data, player.get_int("레벨"));
         let gold = calculate_gold_reward(mob_data);
 
-        // Death message
-        let death_msg = format!("{}{} 쓰러뜨렸습니다!", mob.name, particle);
+        // Death message (Python: mob_name + han_iga + ' 쓰러집니다. \'쿠웅~~ 철퍼덕~~\'')
+        let mob_particle = hangul::han_iga(&mob.name);
+        let death_msg = format!("\x1b[1;37m{}{} 쓰러집니다. '쿠웅~~ 철퍼덕~~'\x1b[0;37m", mob.name, mob_particle);
         round.player_messages.push(death_msg.clone());
         round.room_messages.push(death_msg);
 
