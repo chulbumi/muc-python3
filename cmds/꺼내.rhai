@@ -32,7 +32,7 @@ fn cmd(ob, line) {
 
     // 은전 꺼내기
     if item_type == "은전" {
-        let mut amount = 1;
+        let amount = 1;
         if len(words) >= 3 {
             amount = to_int(words[2]);
             if amount < 1 { amount = 1; }

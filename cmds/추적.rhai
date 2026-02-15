@@ -28,8 +28,8 @@ fn cmd(ob, line) {
     // 테스트용: 몇 가지 일반적인 방 번호로 확인
     // 실제 구현에서는 존의 모든 방 목록을 가져오는 efun이 필요
     let test_rooms = ["1", "100", "200", "300"];
-    let mut found = false;
-    let mut i = 0;
+    let found = false;
+    let i = 0;
 
     while i < len(test_rooms) {
         let room_spec = zone_name + ":" + test_rooms[i];

@@ -71,6 +71,25 @@ impl PlayerPosition {
     }
 }
 
+/// Full player data for room display
+#[derive(Debug, Clone)]
+pub struct PlayerRoomData {
+    /// Player name
+    pub name: String,
+    /// Player level
+    pub level: i64,
+    /// Current HP
+    pub hp: i64,
+    /// Maximum HP
+    pub max_hp: i64,
+    /// Guild name (if any)
+    pub guild: Option<String>,
+    /// Rank/position in guild (if any)
+    pub rank: Option<String>,
+    /// Current action state (Stand, Fight, etc.)
+    pub act_state: String,
+}
+
 /// World state containing all active entities
 #[derive(Debug)]
 pub struct WorldState {
@@ -88,6 +107,8 @@ pub struct WorldState {
     pub room_inv_stack: HashMap<String, HashMap<String, i64>>,
     /// 방별 임의 속성 (값설정 "방" 키 값). key = "zone:room", value = attr map.
     pub room_attrs: HashMap<String, HashMap<String, String>>,
+    /// Party membership: player_name -> party_name
+    pub party_memberships: HashMap<String, String>,
 }
 
 impl WorldState {
@@ -101,6 +122,7 @@ impl WorldState {
             room_objs: HashMap::new(),
             room_inv_stack: HashMap::new(),
             room_attrs: HashMap::new(),
+            party_memberships: HashMap::new(),
         }
     }
 
@@ -259,6 +281,58 @@ impl WorldState {
             .collect()
     }
 
+    // ============================================================
+    // Party Management Methods
+    // ============================================================
+
+    /// Join a player to a party
+    pub fn join_party(&mut self, player_name: &str, party_name: &str) {
+        self.party_memberships
+            .insert(player_name.to_string(), party_name.to_string());
+    }
+
+    /// Remove a player from their party
+    pub fn leave_party(&mut self, player_name: &str) {
+        self.party_memberships.remove(player_name);
+    }
+
+    /// Get a player's party name
+    pub fn get_player_party(&self, player_name: &str) -> Option<&String> {
+        self.party_memberships.get(player_name)
+    }
+
+    /// Get all members of a party
+    pub fn get_party_members(&self, party_name: &str) -> Vec<String> {
+        self.party_memberships
+            .iter()
+            .filter(|(_, p)| *p == party_name)
+            .map(|(name, _)| name.clone())
+            .collect()
+    }
+
+    /// Check if two players are in the same party
+    pub fn is_same_party(&self, player1: &str, player2: &str) -> bool {
+        match (self.party_memberships.get(player1), self.party_memberships.get(player2)) {
+            (Some(p1), Some(p2)) => p1 == p2,
+            _ => false,
+        }
+    }
+
+    /// Get party leader (first player who joined the party)
+    /// Returns None if party doesn't exist or has no members
+    pub fn get_party_leader(&self, party_name: &str) -> Option<String> {
+        // The party name typically contains the leader's name (e.g., "밍밍_파티명")
+        if party_name.contains('_') {
+            party_name.split('_').next().map(|s| s.to_string())
+        } else {
+            // Fall back to first member found
+            self.party_memberships
+                .iter()
+                .find(|(_, p)| *p == party_name)
+                .map(|(name, _)| name.clone())
+        }
+    }
+
     /// Spawn mobs for a room from 맵정보.몹 (called when player enters, on-demand load). room은 "1" 또는 사용자맵 "이름".
     pub fn spawn_mobs_for_room(&mut self, zone: &str, room: &str) {
         let mob_ids = self
@@ -293,6 +367,43 @@ impl WorldState {
             .copied()
     }
 
+    /// Spawn a specific mob at a location (for admin commands)
+    /// mob_key should be "zone:filename" format (e.g., "낙양성:밍밍")
+    /// Returns Ok(()) on success, Err(message) on failure
+    pub fn spawn_mob_at(
+        &mut self,
+        mob_key: &str,
+        dest_zone: &str,
+        dest_room: &str,
+    ) -> Result<(), String> {
+        // Parse mob_key to get zone and filename
+        let parts: Vec<&str> = mob_key.splitn(2, ':').collect();
+        if parts.len() != 2 {
+            return Err(format!("잘못된 몹 키 형식: {} (존:파일명 형식이어야 함)", mob_key));
+        }
+        let mob_zone = parts[0];
+        let mob_filename = parts[1];
+
+        // Load mob data
+        let mob_data = self
+            .mob_cache
+            .load_mob(mob_zone, mob_filename)
+            .map_err(|e| format!("몹 로드 실패: {:?}", e))?;
+
+        // Create mob instance at destination
+        let instance = MobInstance::new(
+            mob_key.to_string(),
+            dest_zone.to_string(),
+            dest_room.to_string(),
+            &mob_data,
+        );
+
+        // Add to cache
+        self.mob_cache.add_mob_instance(instance);
+
+        Ok(())
+    }
+
     /// Search for mobs by name pattern across all rooms
     /// Returns Vec of (zone, room, mob_name, mob_display_name, hp, max_hp)
     pub fn search_mobs_by_name(
@@ -306,8 +417,8 @@ impl WorldState {
         for (room_key, instances) in self.mob_cache.get_all_instances() {
             // Parse room_key into zone and room
             let parts: Vec<&str> = room_key.splitn(2, ':').collect();
-            let _zone = parts.get(0).unwrap_or(&"");
-            let _room = parts.get(1).unwrap_or(&"");
+            let _zone = parts.first().copied().unwrap_or("");
+            let _room = parts.get(1).copied().unwrap_or("");
 
             for mob in instances {
                 // Check mob data for display name

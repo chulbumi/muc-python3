@@ -298,7 +298,17 @@ fn substring(s, start, end) {
 // ============================================================================
 
 /// Main function called when master is loaded
-fn main() {
+fn _init() {
     print("[MASTER] Master object loaded");
     print("[MASTER] Driver/Mudlib coordination initialized");
+}
+
+/// Command entry point - master.rhai는 명령어가 아니라 시스템 파일입니다
+fn cmd(ob, line) {
+    send_line(ob, "☞ master.rhai는 관리자용 시스템 파일입니다.");
+    send_line(ob, "   직접 실행할 수 없습니다.");
+}
+
+fn main(ob, line) {
+    cmd(ob, line);
 }

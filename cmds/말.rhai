@@ -3,7 +3,7 @@
 
 // ANSI 색상 코드 변환 함수
 fn ANSI(msg, conv) {
-    let mut buf = msg;
+    let buf = msg;
 
     if conv {
         buf = buf.replace("{밝}", "\x1b[1m");

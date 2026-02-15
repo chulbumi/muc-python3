@@ -8,7 +8,8 @@ fn cmd(ob, line) {
         return;
     }
     if is_empty(line) {
-        send_line(ob, "사용법: [몹 이름] 생성");
+        send_line(ob, "사용법: [존:몹이름] 생성");
+        send_line(ob, "예: 낙양성:밍밍 생성");
         return;
     }
 
@@ -26,8 +27,7 @@ fn cmd(ob, line) {
         return;
     }
 
-    // TODO: 실제 몹 생성 로직 (create_user_mob 또는 create_mob)
-    // 현재 efun은 스텁으로만 구현됨
+    // 몹 생성 (현재 위치에 생성)
     let result = create_user_mob(ob, line);
     if result == "" {
         send_line(ob, "\x1b[1;32m* [" + mob_name + "] 생성 되었습니다.\x1b[0;37m");

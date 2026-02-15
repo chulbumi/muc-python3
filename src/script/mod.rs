@@ -3,6 +3,9 @@
 //! Provides hot-reloadable scripting support using Rhai.
 //! Scripts are stored in cmds/ directory and automatically reloaded on change.
 
+#![allow(clippy::type_complexity)]
+#![allow(static_mut_refs)]
+
 use rhai::{Dynamic, Engine, Scope};
 use std::cell::RefCell;
 use std::collections::HashMap;
@@ -58,7 +61,7 @@ impl Default for ScriptConfig {
 
 // 스크립트용: handle_game_command에서 미리 채워 둔 전 접속자 목록. get_all_online_players()가 참조.
 thread_local! {
-    static PRE_COMPUTED_ALL_ONLINE: RefCell<Option<rhai::Array>> = RefCell::new(None);
+    static PRE_COMPUTED_ALL_ONLINE: RefCell<Option<rhai::Array>> = const { RefCell::new(None) };
 }
 
 /// handle_game_command에서 호출. 전 접속자(이름, 무림별호, 성격, 레벨초기화, 소속) 배열 세팅.
@@ -303,7 +306,7 @@ struct StoredScript {
     /// Last modification time
     modified: std::time::SystemTime,
     /// Script name
-    name: String,
+    _name: String,
 }
 
 /// [36m, [37m 등 ESC 없는 축약 ANSI를 \x1b[36m 형태로 확장.
@@ -480,7 +483,7 @@ fn serde_json_to_value(v: &serde_json::Value) -> Value {
 /// Body를 data/user/{이름}.json 에 저장. 소지품(objs, inv_stack) 포함.
 /// 저장 직전에 마지막저장시간을 갱신한다.
 pub fn save_body_to_json(body: &mut Body, path: &str) -> bool {
-    if let Err(_) = std::fs::create_dir_all(Path::new(path).parent().unwrap_or(Path::new("."))) {
+    if std::fs::create_dir_all(Path::new(path).parent().unwrap_or(Path::new("."))).is_err() {
         return false;
     }
     let now = std::time::SystemTime::now()
@@ -587,10 +590,7 @@ pub fn save_body_to_json(body: &mut Body, path: &str) -> bool {
     }
 
     let j = serde_json::Value::Object(root);
-    match std::fs::write(path, serde_json::to_string_pretty(&j).unwrap_or_default()) {
-        Ok(_) => true,
-        Err(_) => false,
-    }
+    std::fs::write(path, serde_json::to_string_pretty(&j).unwrap_or_default()).is_ok()
 }
 
 /// data/user/{이름}.json 에서 Body 복원. attr, objs, inv_stack.
@@ -903,7 +903,7 @@ fn find_item_key_by_name(name: &str) -> Option<String> {
     };
     for e in read_dir.flatten() {
         let p = e.path();
-        if p.extension().map_or(true, |e| e != "json") {
+        if p.extension().is_none_or(|e| e != "json") {
             continue;
         }
         let key = p
@@ -1248,7 +1248,17 @@ pub fn create_engine() -> Engine {
     });
 
     engine.register_fn("get_mob_data", |name: &str| -> Dynamic {
-        let full_path = format!("data/mob/{}.json", name);
+        // Support both "zone:filename" and plain "filename" formats
+        let full_path = if name.contains(':') {
+            let parts: Vec<&str> = name.splitn(2, ':').collect();
+            if parts.len() == 2 {
+                format!("data/mob/{}/{}.json", parts[0], parts[1])
+            } else {
+                format!("data/mob/{}.json", name)
+            }
+        } else {
+            format!("data/mob/{}.json", name)
+        };
         match std::fs::read_to_string(&full_path) {
             Ok(content) => match serde_json::from_str::<serde_json::Value>(&content) {
                 Ok(value) => {
@@ -1504,7 +1514,7 @@ pub fn build_room_lines(
             Err(_) => return Err(("room_error".to_string(), String::new(), "0".to_string())),
         };
         let room_name_formatted = format_room_header(&room_ref.display_name);
-        let exits_str = format_exits_long(&*room_ref);
+        let exits_str = format_exits_long(&room_ref);
         let mobs = world.mob_cache.get_mobs_in_room(&pos.zone, &pos.room);
         let mob_str = if mobs.is_empty() {
             String::new()
@@ -1559,6 +1569,7 @@ pub fn build_room_lines(
                         mob_msgs.push(format!("{}{}", prefix, suffix));
                     } else if mob.act == 2 {
                         // ACT_DEATH
+                        #[allow(clippy::if_same_then_else)]
                         let suffix = if crate::hangul::ends_with_consonant(&mob_data.name) {
                             format!("{}의 싸늘한 시체가 있습니다.", mob_data.name)
                         } else {
@@ -1715,8 +1726,8 @@ fn mob_view(mob: &MobInstance, data: &RawMobData) -> Vec<String> {
     let mut lines = vec!["━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━".to_string()];
     if !mob.alive {
         lines.push(format!(
-            "\x1b[0m\x1b[44m\x1b[1m\x1b[37m◆ 이름 ▷ {}\x1b[0m\x1b[37m\x1b[40m",
-            format!("{}의 시체", data.name)
+            "\x1b[0m\x1b[44m\x1b[1m\x1b[37m◆ 이름 ▷ {}의 시체\x1b[0m\x1b[37m\x1b[40m",
+            data.name
         ));
         lines.push("──────────────────────────────".to_string());
         lines.push("━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━".to_string());
@@ -2179,19 +2190,13 @@ pub fn create_engine_with_output(output_collector: Arc<Mutex<Vec<String>>>) -> E
         } else {
             (1i64, s.to_string())
         };
-        let mut arr = rhai::Array::new();
-        arr.push(rhai::Dynamic::from(order));
-        arr.push(rhai::Dynamic::from(name));
-        arr
+        vec![rhai::Dynamic::from(order), rhai::Dynamic::from(name)]
     });
 
     // parse_name_order(s): "2.검" -> [name, order]. 주다 등. CommandParser::parse_name_order.
     engine.register_fn("parse_name_order", |s: &str| -> rhai::Array {
         let (name, order) = CommandParser::parse_name_order(s);
-        let mut arr = rhai::Array::new();
-        arr.push(rhai::Dynamic::from(name));
-        arr.push(rhai::Dynamic::from(order as i64));
-        arr
+        vec![rhai::Dynamic::from(name), rhai::Dynamic::from(order as i64)]
     });
 
     // ============================================================
@@ -2199,6 +2204,20 @@ pub fn create_engine_with_output(output_collector: Arc<Mutex<Vec<String>>>) -> E
     // ============================================================
 
     engine.register_fn("is_empty", |s: &str| -> bool { s.trim().is_empty() });
+
+    // is_unit(value) - Check if a Dynamic value is unit (empty/not found)
+    engine.register_fn("is_unit", |value: rhai::Dynamic| -> bool { value.is_unit() });
+
+    // int_to_str(value) - Convert integer to string (handles both int and string inputs)
+    engine.register_fn("int_to_str", |value: rhai::Dynamic| -> String {
+        if value.is_int() {
+            value.as_int().unwrap_or(0).to_string()
+        } else if value.is_string() {
+            value.into_string().unwrap_or_default()
+        } else {
+            "".to_string()
+        }
+    });
 
     engine.register_fn("ob_name", |ob: &mut rhai::Map| -> String {
         ob.get("이름")
@@ -2227,7 +2246,7 @@ pub fn create_engine_with_output(output_collector: Arc<Mutex<Vec<String>>>) -> E
     });
 
     engine.register_fn("line_args", |line: &str| -> rhai::Array {
-        line.trim()
+        line
             .split_whitespace()
             .map(|x| rhai::Dynamic::from(x.to_string()))
             .collect()
@@ -2304,7 +2323,17 @@ pub fn create_engine_with_output(output_collector: Arc<Mutex<Vec<String>>>) -> E
     });
 
     engine.register_fn("get_mob_data", |name: &str| -> Dynamic {
-        let full_path = format!("data/mob/{}.json", name);
+        // Support both "zone:filename" and plain "filename" formats
+        let full_path = if name.contains(':') {
+            let parts: Vec<&str> = name.splitn(2, ':').collect();
+            if parts.len() == 2 {
+                format!("data/mob/{}/{}.json", parts[0], parts[1])
+            } else {
+                format!("data/mob/{}.json", name)
+            }
+        } else {
+            format!("data/mob/{}.json", name)
+        };
         match std::fs::read_to_string(&full_path) {
             Ok(content) => match serde_json::from_str::<serde_json::Value>(&content) {
                 Ok(value) => {
@@ -2451,6 +2480,7 @@ pub fn create_engine_with_output(output_collector: Arc<Mutex<Vec<String>>>) -> E
 /// Used by script commands that need to modify body inventory and room floor.
 /// get_other_players_desc: (exclude_name) -> 같은 방 다른 유저 getDesc 목록. 봐 시 사용, None이면 빈 목록.
 /// get_other_players_map: () -> (이름→getDesc). 봐 find_target에서 사용, None이면 빈 맵.
+#[allow(clippy::too_many_arguments)]
 pub fn create_engine_with_body_and_output(
     body: &mut Body,
     output_collector: Arc<Mutex<Vec<String>>>,
@@ -2460,6 +2490,7 @@ pub fn create_engine_with_body_and_output(
     user_sends: Arc<Mutex<Vec<(String, String)>>>,
     call_out_scheduler: Option<Arc<CallOutScheduler>>,
     script_name: Option<&str>,
+    global_data: Option<SharedGlobalData>,
 ) -> Engine {
     let oc = output_collector.clone();
     let mut engine = create_engine_with_output(output_collector);
@@ -2499,7 +2530,7 @@ pub fn create_engine_with_body_and_output(
             }
             let body = unsafe { &mut *body_ptr };
             let order = order.max(1) as usize;
-            let count = count.max(1).min(100) as usize;
+            let count = count.clamp(1, 100) as usize;
             let mut w = get_world_state().write().unwrap();
             let (zone, room) = match w.get_player_position(body.get_name().as_str()) {
                 Some(p) => (p.zone.clone(), p.room.clone()),
@@ -2575,7 +2606,7 @@ pub fn create_engine_with_body_and_output(
         "item_get",
         move |_ob: &mut rhai::Map, name: &str, count: i64| -> i64 {
             let body = unsafe { &mut *body_ptr };
-            let count = count.max(1).min(100) as usize;
+            let count = count.clamp(1, 100) as usize;
             let mut w = get_world_state().write().unwrap();
             let (zone, room) = match w.get_player_position(body.get_name().as_str()) {
                 Some(p) => (p.zone.clone(), p.room.clone()),
@@ -2634,13 +2665,13 @@ pub fn create_engine_with_body_and_output(
         move |_ob: &mut rhai::Map, name: &str, order: i64, count: i64| -> i64 {
             let body = unsafe { &mut *body_ptr };
             let order = order.max(1) as usize;
-            let count = count.max(1).min(100) as usize;
+            let count = count.clamp(1, 100) as usize;
             // 스택: inv_stack에서 제거
             if order == 1 {
                 if let Some(ref key) = find_item_key_by_name(name) {
                     if is_stackable(key) {
                         let have = *body.object.inv_stack.get(key).unwrap_or(&0);
-                        let destroy_cnt = (count as i64).min(have).max(0) as i64;
+                        let destroy_cnt = (count as i64).clamp(0, have);
                         if destroy_cnt > 0 {
                             let should_remove = {
                                 let r = body.object.inv_stack.get_mut(key).unwrap();
@@ -2697,7 +2728,7 @@ pub fn create_engine_with_body_and_output(
         move |_ob: &mut rhai::Map, name: &str, order: i64, count: i64| -> i64 {
             let body = unsafe { &mut *body_ptr };
             let order = order.max(1) as usize;
-            let count = count.max(1).min(100) as usize;
+            let count = count.clamp(1, 100) as usize;
             let mut n = 0usize;
             let mut to_remove: Vec<Arc<Mutex<Object>>> = Vec::new();
             let mut hit_unbreakable = false;
@@ -2766,9 +2797,7 @@ pub fn create_engine_with_body_and_output(
         }
         let mut arr = rhai::Array::new();
         for (k, v) in map {
-            let mut pair = rhai::Array::new();
-            pair.push(rhai::Dynamic::from(k));
-            pair.push(rhai::Dynamic::from(v));
+            let pair = vec![rhai::Dynamic::from(k), rhai::Dynamic::from(v)];
             arr.push(rhai::Dynamic::from(pair));
         }
         arr
@@ -2946,7 +2975,7 @@ pub fn create_engine_with_body_and_output(
                 m.insert("total_cost".into(), Dynamic::from(0i64));
                 return Dynamic::from(m);
             }
-            let cnt = count.max(1).min(50) as i64;
+            let cnt = count.clamp(1, 50);
             const MAX_ITEMS: usize = 50;
             for _ in 0..cnt {
                 if body.get_item_count() >= MAX_ITEMS {
@@ -3007,14 +3036,14 @@ pub fn create_engine_with_body_and_output(
             use rhai::Dynamic;
             let body = unsafe { &mut *body_ptr_sell };
             let order = order.max(1) as usize;
-            let count = count.max(1).min(100) as usize;
+            let count = count.clamp(1, 100) as usize;
             let percent = percent.max(0);
             // 스택: order==1일 때 inv_stack에서 판매
             if order == 1 {
                 if let Some(ref key) = find_item_key_by_name(name) {
                     if is_stackable(key) {
                         let have = *body.object.inv_stack.get(key).unwrap_or(&0);
-                        let sell_cnt = (count as i64).min(have).max(0) as i64;
+                        let sell_cnt = (count as i64).clamp(0, have);
                         if sell_cnt > 0 {
                             if let Some((iname, _, base_price, _)) = get_item_info(key) {
                                 let unit = (base_price * percent) / 100;
@@ -3030,12 +3059,12 @@ pub fn create_engine_with_body_and_output(
                                 body.set("은전", body.get_int("은전") + total);
                                 let path = format!("data/user/{}.json", body.get_name());
                                 let _ = save_body_to_json(body, &path);
-                                let mut arr = rhai::Array::new();
-                                arr.push(Dynamic::from(sell_cnt));
-                                arr.push(Dynamic::from(total));
-                                arr.push(Dynamic::from(iname));
-                                arr.push(Dynamic::from(""));
-                                return arr;
+                                return vec![
+                                    Dynamic::from(sell_cnt),
+                                    Dynamic::from(total),
+                                    Dynamic::from(iname),
+                                    Dynamic::from(""),
+                                ];
                             }
                         }
                     }
@@ -3059,12 +3088,12 @@ pub fn create_engine_with_body_and_output(
                         continue;
                     }
                     if o.checkAttr("아이템속성", "팔지못함") {
-                        let mut arr = rhai::Array::new();
-                        arr.push(Dynamic::from(0i64));
-                        arr.push(Dynamic::from(0i64));
-                        arr.push(Dynamic::from(String::new()));
-                        arr.push(Dynamic::from("cant_sell".to_string()));
-                        return arr;
+                        return vec![
+                            Dynamic::from(0i64),
+                            Dynamic::from(0i64),
+                            Dynamic::from(String::new()),
+                            Dynamic::from("cant_sell".to_string()),
+                        ];
                     }
                     let price = (o.getInt("판매가격") * percent) / 100;
                     total += price;
@@ -3090,12 +3119,12 @@ pub fn create_engine_with_body_and_output(
                 let _ = save_body_to_json(body, &path);
                 String::new()
             };
-            let mut arr = rhai::Array::new();
-            arr.push(Dynamic::from(to_remove.len() as i64));
-            arr.push(Dynamic::from(total));
-            arr.push(Dynamic::from(display_name));
-            arr.push(Dynamic::from(err));
-            arr
+            vec![
+                Dynamic::from(to_remove.len() as i64),
+                Dynamic::from(total),
+                Dynamic::from(display_name),
+                Dynamic::from(err),
+            ]
         },
     );
 
@@ -3254,6 +3283,43 @@ pub fn create_engine_with_body_and_output(
         let _ = save_body_to_json(body, &path);
     });
 
+    // check_mob_event(mob_key, event_key) - Check if mob has event (Python: target.checkEvent)
+    engine.register_fn("check_mob_event", |mob_key: &str, event_key: &str| -> bool {
+        let cache = crate::world::mob::get_mob_cache();
+        if let Ok(cache_guard) = cache.read() {
+            cache_guard.check_mob_event(mob_key, event_key)
+        } else {
+            false
+        }
+    });
+
+    // set_mob_event(mob_key, event_key) - Set event on mob (Python: target.setEvent)
+    engine.register_fn("set_mob_event", |mob_key: &str, event_key: &str| -> bool {
+        let cache = crate::world::mob::get_mob_cache();
+        if let Ok(mut cache_guard) = cache.write() {
+            cache_guard.set_mob_event(mob_key, event_key)
+        } else {
+            false
+        }
+    });
+
+    // del_mob_event(mob_key, event_key) - Delete event from mob (Python: target.delEvent)
+    engine.register_fn("del_mob_event", |mob_key: &str, event_key: &str| -> bool {
+        let cache = crate::world::mob::get_mob_cache();
+        if let Ok(mut cache_guard) = cache.write() {
+            cache_guard.del_mob_event(mob_key, event_key)
+        } else {
+            false
+        }
+    });
+
+    // get_admin_level(ob) - Get player's admin level (관리자등급)
+    let body_ptr_admin = body_ptr;
+    engine.register_fn("get_admin_level", move |_ob: &mut rhai::Map| -> i64 {
+        let body = unsafe { &*body_ptr_admin };
+        crate::command::handler::helpers::get_admin_level(body)
+    });
+
     // get_my_position(ob) -> {zone, room}. 어디 등.
     let body_ptr_pos = body_ptr;
     engine.register_fn("get_my_position", move |_ob: &mut rhai::Map| -> Dynamic {
@@ -3406,6 +3472,23 @@ pub fn create_engine_with_body_and_output(
         },
     );
 
+    // has_room_property(zone, room, prop): &str 버전 (room이 문자열인 경우)
+    engine.register_fn(
+        "has_room_property",
+        |zone: &str, room: &str, prop: &str| -> bool {
+            let w = match get_world_state().read() {
+                Ok(g) => g,
+                Err(_) => return false,
+            };
+            if let Some(arc) = w.room_cache.get_room_cached(zone, room) {
+                if let Ok(r) = arc.read() {
+                    return r.properties.iter().any(|p| p == prop);
+                }
+            }
+            false
+        },
+    );
+
     // get_exits_string(zone, room): 출구 나침반 문자열. 지도/맵 등.
     // i64 버전
     engine.register_fn("get_exits_string", |zone: &str, room: i64| -> String {
@@ -3415,7 +3498,7 @@ pub fn create_engine_with_body_and_output(
         };
         if let Some(arc) = w.room_cache.get_room_cached(zone, &room.to_string()) {
             if let Ok(r) = arc.read() {
-                return format_exits_long(&*r);
+                return format_exits_long(&r);
             }
         }
         String::new()
@@ -3430,7 +3513,7 @@ pub fn create_engine_with_body_and_output(
         };
         if let Some(arc) = w.room_cache.get_room_cached(zone, room) {
             if let Ok(r) = arc.read() {
-                return format_exits_long(&*r);
+                return format_exits_long(&r);
             }
         }
         String::new()
@@ -3826,10 +3909,10 @@ pub fn create_engine_with_body_and_output(
     // parse_two_args(s): 첫 공백 기준 [앞, 뒤]. "a b c" -> ["a","b c"]. "a" -> ["a",""].
     engine.register_fn("parse_two_args", |s: &str| -> rhai::Array {
         let parts: Vec<&str> = s.splitn(2, ' ').collect();
-        let mut a = rhai::Array::new();
-        a.push(rhai::Dynamic::from(parts.get(0).unwrap_or(&"").to_string()));
-        a.push(rhai::Dynamic::from(parts.get(1).unwrap_or(&"").to_string()));
-        a
+        vec![
+            rhai::Dynamic::from(parts.first().copied().unwrap_or("").to_string()),
+            rhai::Dynamic::from(parts.get(1).copied().unwrap_or("").to_string()),
+        ]
     });
 
     // get_body_int(ob, key): Body에서 정수 읽기. Map에 없는 런타임 키(예: cooltime)용.
@@ -4054,7 +4137,7 @@ pub fn create_engine_with_body_and_output(
             let cnt = if order > 1 {
                 1i64
             } else {
-                count.max(1).min(50)
+                count.clamp(1, 50)
             };
             // 스택: inv_stack에서
             if let Some(ref key) = find_item_key_by_name(item_name) {
@@ -4349,7 +4432,7 @@ pub fn create_engine_with_body_and_output(
     engine.register_fn("is_box", move |obj: &mut rhai::Map| -> bool {
         let obj_type = obj.get("종류");
         if let Some(t) = obj_type {
-            if let Some(type_str) = t.clone().into_string().ok() {
+            if let Ok(type_str) = t.clone().into_string() {
                 return type_str == "보관함" || type_str == "상자" || type_str == "가방";
             }
         }
@@ -4736,7 +4819,7 @@ pub fn create_engine_with_body_and_output(
                     }
                 }
             } else {
-                return format!("월드 상태 접근 실패");
+                return "월드 상태 접근 실패".to_string();
             };
 
             // 몹 생성
@@ -4767,7 +4850,7 @@ pub fn create_engine_with_body_and_output(
                 world.mob_cache.add_mob_instance(mob_instance);
                 String::new() // 성공 시 빈 문자열 반환
             } else {
-                format!("월드 상태 접근 실패")
+                "월드 상태 접근 실패".to_string()
             }
         },
     );
@@ -5286,7 +5369,7 @@ pub fn create_engine_with_body_and_output(
                 Ok(g) => g,
                 Err(_) => return rhai::Array::new(),
             };
-            let pos = match w.get_player_position(&name.as_str()) {
+            let pos = match w.get_player_position(name.as_str()) {
                 Some(p) => p,
                 None => return rhai::Array::new(),
             };
@@ -5372,7 +5455,7 @@ pub fn create_engine_with_body_and_output(
         if let Some(arc) = w.room_cache.get_room_cached(&pos.zone, &pos.room) {
             if let Ok(room_ref) = arc.read() {
                 let room_name_formatted = format_room_header(&room_ref.display_name);
-                let exits_str = format_exits_long(&*room_ref);
+                let exits_str = format_exits_long(&room_ref);
                 let mobs = w.mob_cache.get_mobs_in_room(&pos.zone, &pos.room);
                 let mob_str = if mobs.is_empty() {
                     String::new()
@@ -5773,7 +5856,6 @@ pub fn create_engine_with_body_and_output(
                         .split("내공소모")
                         .nth(1)
                         .unwrap_or("")
-                        .trim()
                         .split_whitespace()
                         .next()
                         .unwrap_or("0")
@@ -5785,6 +5867,89 @@ pub fn create_engine_with_body_and_output(
             }
         }
         0
+    }
+
+    // Helper function to parse skill bonuses from 속성
+    // Returns (hp_bonus, mp_bonus, str_bonus, dex_bonus, arm_bonus, skill_bonus)
+    fn parse_skill_bonuses(skill_data: &serde_json::Value) -> (i64, i64, i64, i64, i64, i64) {
+        let mut hp_bonus = 0i64;
+        let mut mp_bonus = 0i64;
+        let mut str_bonus = 0i64;
+        let mut dex_bonus = 0i64;
+        let mut arm_bonus = 0i64;
+        let mut skill_bonus = 0i64;
+
+        if let Some(attrs) = skill_data.get("속성") {
+            let attr_str: String = if attrs.is_string() {
+                attrs.as_str().unwrap_or("").to_string()
+            } else if attrs.is_array() {
+                attrs
+                    .as_array()
+                    .map(|arr| {
+                        arr.iter()
+                            .filter_map(|v| v.as_str())
+                            .collect::<Vec<_>>()
+                            .join(" ")
+                    })
+                    .unwrap_or_default()
+            } else {
+                String::new()
+            };
+
+            // Parse each bonus type
+            let parts: Vec<&str> = attr_str.split_whitespace().collect();
+            let mut i = 0;
+            while i < parts.len() {
+                match parts[i] {
+                    "체력증가" | "체력회복" => {
+                        if i + 1 < parts.len() {
+                            hp_bonus = parts[i + 1].parse().unwrap_or(0);
+                            i += 2;
+                            continue;
+                        }
+                    }
+                    "내공증가" | "내공회복" => {
+                        if i + 1 < parts.len() {
+                            mp_bonus = parts[i + 1].parse().unwrap_or(0);
+                            i += 2;
+                            continue;
+                        }
+                    }
+                    "힘증가" => {
+                        if i + 1 < parts.len() {
+                            str_bonus = parts[i + 1].parse().unwrap_or(0);
+                            i += 2;
+                            continue;
+                        }
+                    }
+                    "민첩증가" => {
+                        if i + 1 < parts.len() {
+                            dex_bonus = parts[i + 1].parse().unwrap_or(0);
+                            i += 2;
+                            continue;
+                        }
+                    }
+                    "맷집증가" => {
+                        if i + 1 < parts.len() {
+                            arm_bonus = parts[i + 1].parse().unwrap_or(0);
+                            i += 2;
+                            continue;
+                        }
+                    }
+                    "위력" | "보너스" => {
+                        if i + 1 < parts.len() {
+                            skill_bonus = parts[i + 1].parse().unwrap_or(0);
+                            i += 2;
+                            continue;
+                        }
+                    }
+                    _ => {}
+                }
+                i += 1;
+            }
+        }
+
+        (hp_bonus, mp_bonus, str_bonus, dex_bonus, arm_bonus, skill_bonus)
     }
 
     // Helper function to get skill description from 속성
@@ -5876,14 +6041,69 @@ pub fn create_engine_with_body_and_output(
             // Set skill cast time (mark as used)
             body.set_skill_cast_time(skill_name);
 
-            // TODO: Implement actual skill effect and damage calculation
-            // TODO: Send skill messages to output
+            // Get skill level
+            let skill_level = body
+                .skill_map
+                .get(skill_name)
+                .map(|t| t.level as i32)
+                .unwrap_or(1);
 
-            println!(
-                "[SCRIPT] use_skill: {} used by {}",
+            // Parse skill bonuses from 속성
+            let (hp_bonus, mp_bonus, str_bonus, dex_bonus, arm_bonus, skill_bonus) =
+                parse_skill_bonuses(skill_info);
+
+            // Apply skill effects to player (healing, stat boosts, etc.)
+            let effects = crate::combat::apply_skill_effects(
+                body,
                 skill_name,
-                body.get_name()
+                hp_bonus,
+                mp_bonus,
+                str_bonus,
+                dex_bonus,
+                arm_bonus,
             );
+
+            // Log effects
+            for effect in &effects {
+                if !effect.message.is_empty() {
+                    println!("[SKILL] {}", effect.message);
+                }
+            }
+
+            // Calculate skill damage if there's a target
+            if !_target.is_empty() {
+                let damage_result = crate::combat::calculate_skill_damage(
+                    body,
+                    skill_name,
+                    skill_level,
+                    skill_bonus,
+                    _target,
+                );
+
+                // Log damage
+                if damage_result.hit {
+                    println!(
+                        "[SCRIPT] use_skill: {} used by {} on {} for {} damage",
+                        skill_name,
+                        body.get_name(),
+                        _target,
+                        damage_result.final_damage
+                    );
+                } else {
+                    println!(
+                        "[SCRIPT] use_skill: {} used by {} on {} (missed)",
+                        skill_name,
+                        body.get_name(),
+                        _target
+                    );
+                }
+            } else {
+                println!(
+                    "[SCRIPT] use_skill: {} used by {} (self-buff)",
+                    skill_name,
+                    body.get_name()
+                );
+            }
 
             // Success - return empty string
             "".to_string()
@@ -5913,7 +6133,7 @@ pub fn create_engine_with_body_and_output(
                 Err(_) => return "스킬 데이터를 찾을 수 없습니다.".to_string(),
             };
 
-            if !skill_data.get(skill_name).is_some() {
+            if skill_data.get(skill_name).is_none() {
                 return format!("존재하지 않는 무공입니다: {}", skill_name);
             }
 
@@ -6258,10 +6478,15 @@ pub fn create_engine_with_body_and_output(
             // 파티 이름 생성 (플레이어명_파티명 형식으로 고유화)
             let full_party_name = format!("{}_{}", my_name, party_name);
 
-            // 파티 소속 설정
+            // 파티 소속 설정 (Body)
             body.set("소속파티", full_party_name.clone());
             body.set("파티장", 1i64);
             body.set("파티이름", party_name.to_string());
+
+            // WorldState에 파티 멤버십 등록
+            if let Ok(mut w) = get_world_state().try_write() {
+                w.join_party(&my_name, &full_party_name);
+            }
 
             "".to_string()
         },
@@ -6273,7 +6498,7 @@ pub fn create_engine_with_body_and_output(
         "join_party",
         move |_ob: &mut rhai::Map, party_name: &str| -> String {
             let body = unsafe { &mut *body_ptr_jp };
-            let _my_name = body.get_name();
+            let my_name = body.get_name();
 
             if party_name.trim().is_empty() {
                 return "파티 이름을 입력해주세요.".to_string();
@@ -6303,9 +6528,14 @@ pub fn create_engine_with_body_and_output(
                 return "파티장이 접속 중이 아닙니다.".to_string();
             }
 
-            // 파티 소속 설정
+            // 파티 소속 설정 (Body)
             body.set("소속파티", party_name.to_string());
             body.set("파티장", 0i64);
+
+            // WorldState에 파티 멤버십 등록
+            if let Ok(mut w) = get_world_state().try_write() {
+                w.join_party(&my_name, party_name);
+            }
 
             "".to_string()
         },
@@ -6315,16 +6545,23 @@ pub fn create_engine_with_body_and_output(
     let body_ptr_lp = body_ptr;
     engine.register_fn("leave_party", move |_ob: &mut rhai::Map| -> bool {
         let body = unsafe { &mut *body_ptr_lp };
+        let my_name = body.get_name();
 
         let current_party = body.get_string("소속파티");
         if current_party.is_empty() {
             return false;
         }
 
-        // 파티 정보 제거
+        // 파티 정보 제거 (Body)
         body.set("소속파티", "");
         body.set("파티장", 0i64);
         body.set("파티이름", "");
+
+        // WorldState에서 파티 멤버십 제거
+        if let Ok(mut w) = get_world_state().try_write() {
+            w.leave_party(&my_name);
+        }
+
         true
     });
 
@@ -6341,11 +6578,14 @@ pub fn create_engine_with_body_and_output(
                 return members;
             }
 
-            // 일단 자기 자신 추가
-            let my_name = body.get_name();
-            members.push(Dynamic::from(my_name));
+            // WorldState에서 파티 멤버 목록 조회
+            if let Ok(w) = get_world_state().try_read() {
+                let party_members = w.get_party_members(&my_party);
+                for member_name in party_members {
+                    members.push(Dynamic::from(member_name));
+                }
+            }
 
-            // TODO: 전역 파티 맵에서 다른 멤버 찾기
             members
         },
     );
@@ -6364,16 +6604,12 @@ pub fn create_engine_with_body_and_output(
                 return false;
             }
 
-            // 파티 멤버 목록 수집
-            let mut member_names: Vec<String> = Vec::new();
-            if let Ok(w) = get_world_state().try_read() {
-                for (player_name, _pos) in &w.player_positions {
-                    // TODO: 실제 파티 소속 여부 확인 필요
-                    // 현재는 같은 파티인지 확인할 방법이 없으므로
-                    // 접속 중인 모든 플레이어에게 전송 (임시)
-                    member_names.push(player_name.clone());
-                }
-            }
+            // WorldState에서 파티 멤버 목록 조회
+            let member_names: Vec<String> = if let Ok(w) = get_world_state().try_read() {
+                w.get_party_members(&my_party)
+            } else {
+                Vec::new()
+            };
 
             let formatted = format!("\x1b[0;36m[파티]\x1b[0;37m {} : {}", my_name, msg);
             if let Ok(mut s) = spec_pm.lock() {
@@ -6385,27 +6621,15 @@ pub fn create_engine_with_body_and_output(
     );
 
     // is_same_party(ob1_name, ob2_name) - 두 플레이어가 같은 파티인지 확인
-    let body_ptr_isp = body_ptr;
     engine.register_fn(
         "is_same_party",
         move |ob1_name: &str, ob2_name: &str| -> bool {
-            let body = unsafe { &*body_ptr_isp };
-            let my_name = body.get_name();
-
-            // 둘 다 내 이름이면 true
-            if ob1_name == my_name && ob2_name == my_name {
-                return true;
+            // WorldState에서 파티 멤버십 확인
+            if let Ok(w) = get_world_state().try_read() {
+                w.is_same_party(ob1_name, ob2_name)
+            } else {
+                false
             }
-
-            // 내 파티 확인
-            let my_party = body.get_string("소속파티");
-            if my_party.is_empty() {
-                return false;
-            }
-
-            // TODO: 다른 플레이어의 파티 확인 방법 필요
-            // 현재는 항상 false 반환
-            false
         },
     );
 
@@ -6450,7 +6674,7 @@ pub fn create_engine_with_body_and_output(
                 return "아이템 이름을 입력해주세요.".to_string();
             }
             let body = unsafe { &mut *body_ptr_di };
-            let count = count.max(1).min(100) as usize;
+            let count = count.clamp(1, 100) as usize;
             let mut w = match get_world_state().write() {
                 Ok(w) => w,
                 Err(_) => return "월드 상태를 가져올 수 없습니다.".to_string(),
@@ -6535,7 +6759,7 @@ pub fn create_engine_with_body_and_output(
                 return "아이템 이름을 입력해주세요.".to_string();
             }
             let body = unsafe { &mut *body_ptr_pui };
-            let count = count.max(1).min(100) as usize;
+            let count = count.clamp(1, 100) as usize;
             let mut w = match get_world_state().write() {
                 Ok(w) => w,
                 Err(_) => return "월드 상태를 가져올 수 없습니다.".to_string(),
@@ -6739,7 +6963,7 @@ pub fn create_engine_with_body_and_output(
                 return 0;
             }
             let body = unsafe { &mut *body_ptr_dest };
-            let count = count.max(1).min(100) as usize;
+            let count = count.clamp(1, 100) as usize;
 
             let mut destroyed = 0i64;
 
@@ -7126,7 +7350,7 @@ pub fn create_engine_with_body_and_output(
             }
 
             // 레벨 범위 체크
-            if level < 1 || level > 1000 {
+            if !(1..=1000).contains(&level) {
                 return false;
             }
 
@@ -7162,7 +7386,7 @@ pub fn create_engine_with_body_and_output(
             }
 
             // 금액 범위 체크
-            if amount < 0 || amount > 1_000_000_000 {
+            if !(0..=1_000_000_000).contains(&amount) {
                 return false;
             }
 
@@ -7198,7 +7422,7 @@ pub fn create_engine_with_body_and_output(
             }
 
             // HP 범위 체크
-            if hp < 0 || hp > 1_000_000 {
+            if !(0..=1_000_000).contains(&hp) {
                 return false;
             }
 
@@ -7209,7 +7433,8 @@ pub fn create_engine_with_body_and_output(
         },
     );
 
-    // create_user_mob(admin_ob, mob_name) - 사용자 정의 몹 생성
+    // create_user_mob(admin_ob, mob_name) - 몹 생성 (관리자)
+    // mob_name should be "zone:filename" format (e.g., "낙양성:밍밍")
     // Returns "" on success, error string on failure
     // Admin level 2000 required
     let body_ptr_create_mob = body_ptr;
@@ -7233,10 +7458,32 @@ pub fn create_engine_with_body_and_output(
                 return "몹 이름을 입력해주세요.".to_string();
             }
 
-            // TODO: 실제 사용자 정의 몹 생성 로직 구현
-            // 몹 데이터 파일 생성 및 등록
-            println!("[SCRIPT] create_user_mob: {} by {}", mob_name, admin_name);
-            String::new() // 성공 시 빈 문자열 반환
+            // 관리자 현재 위치 확인
+            let (zone, room) = {
+                let w = match get_world_state().read() {
+                    Ok(g) => g,
+                    Err(_) => return "월드 상태를 가져올 수 없습니다.".to_string(),
+                };
+                let pos = match w.get_player_position(&admin_name) {
+                    Some(p) => p.clone(),
+                    None => return "위치 정보를 찾을 수 없습니다.".to_string(),
+                };
+                (pos.zone, pos.room)
+            };
+
+            // 몹 생성 (mob_name은 "zone:filename" 형식)
+            let mut w = match get_world_state().write() {
+                Ok(g) => g,
+                Err(_) => return "월드 상태를 가져올 수 없습니다.".to_string(),
+            };
+
+            match w.spawn_mob_at(mob_name, &zone, &room) {
+                Ok(()) => {
+                    println!("[SCRIPT] create_user_mob: {} spawned at {}:{} by {}", mob_name, zone, room, admin_name);
+                    String::new() // 성공 시 빈 문자열 반환
+                }
+                Err(e) => e,
+            }
         },
     );
 
@@ -7323,6 +7570,56 @@ pub fn create_engine_with_body_and_output(
             w.spawn_mobs_for_room(zone, &room_s);
 
             String::new() // 성공 시 빈 문자열 반환
+        },
+    );
+
+    // admin_force_command(admin_ob, target_name, command) - 대상 플레이어에게 명령 강제 실행
+    // Returns "" on success, error string on failure
+    // Admin level 2000 required
+    // Note: This adds the command to user_sends which will be processed as if the player typed it
+    let user_sends_force = user_sends.clone();
+    engine.register_fn(
+        "admin_force_command",
+        move |admin_ob: &mut rhai::Map, target_name: &str, command: &str| -> String {
+            // 관리자 권한 확인
+            let admin_level = admin_ob
+                .get("관리자등급")
+                .and_then(|v| v.as_int().ok())
+                .unwrap_or(0);
+            if admin_level < 2000 {
+                return "관리자 권한이 없습니다.".to_string();
+            }
+
+            // 빈 대상 이름 체크
+            if target_name.trim().is_empty() {
+                return "대상 이름을 입력해주세요.".to_string();
+            }
+
+            // 빈 명령어 체크
+            if command.trim().is_empty() {
+                return "명령어를 입력해주세요.".to_string();
+            }
+
+            // 플레이어가 접속 중인지 확인
+            let online = if let Ok(w) = get_world_state().try_read() {
+                w.player_positions.contains_key(target_name)
+            } else {
+                return "월드 상태를 확인할 수 없습니다.".to_string();
+            };
+
+            if !online {
+                return "대상 플레이어가 접속 중이 아닙니다.".to_string();
+            }
+
+            // 명령어를 플레이어의 큐에 추가
+            // user_sends에 (target_name, command) 형태로 추가
+            // 이것은 나중에 플레이어가 입력한 것처럼 처리됨
+            if let Ok(mut sends) = user_sends_force.lock() {
+                sends.push((target_name.to_string(), command.to_string()));
+                String::new() // 성공 시 빈 문자열 반환
+            } else {
+                "명령어 큐에 추가할 수 없습니다.".to_string()
+            }
         },
     );
 
@@ -7468,7 +7765,7 @@ pub fn create_engine_with_body_and_output(
         "set_anger",
         move |_ob: &mut rhai::Map, value: i64| -> bool {
             let body = unsafe { &mut *body_ptr_set_anger };
-            let clamped = value.max(0).min(10000); // 분노 값 범위 제한
+            let clamped = value.clamp(0, 10000); // 분노 값 범위 제한
             body.set("분노", clamped);
             true
         },
@@ -7603,7 +7900,7 @@ pub fn create_engine_with_body_and_output(
             let mut item_key = String::new();
             let mut unit_price = 0i64;
             let mut weight = 0i64;
-            let mut display_name = String::new();
+            let mut _display_name = String::new();
 
             // 상인 찾기 및 아이템 확인
             for mob in mobs {
@@ -7625,7 +7922,7 @@ pub fn create_engine_with_body_and_output(
                         let p = (*percent).max(1);
                         unit_price = price * 100 / p;
                         weight = wg;
-                        display_name = iname;
+                        _display_name = iname;
                         item_key = key.clone();
                         break;
                     }
@@ -7637,7 +7934,7 @@ pub fn create_engine_with_body_and_output(
                 return "not_for_sale".to_string();
             }
 
-            let cnt = count.max(1).min(50) as i64;
+            let cnt = count.clamp(1, 50);
             const MAX_ITEMS: usize = 50;
 
             // 돈 확인
@@ -7712,7 +8009,7 @@ pub fn create_engine_with_body_and_output(
                 return "no_merchant".to_string();
             }
 
-            let count = count.max(1).min(100) as usize;
+            let count = count.clamp(1, 100) as usize;
             let _sold = 0usize;
             let mut total = 0i64;
 
@@ -7722,7 +8019,7 @@ pub fn create_engine_with_body_and_output(
                     if let Some((iname, _, base_price, _)) = get_item_info(key) {
                         if iname == item_name {
                             let have = *body.object.inv_stack.get(key).unwrap_or(&0);
-                            let sell_cnt = (count as i64).min(have).max(0) as i64;
+                            let sell_cnt = (count as i64).clamp(0, have);
                             if sell_cnt > 0 {
                                 let unit = (base_price * buy_percent) / 100;
                                 total = unit * sell_cnt;
@@ -7802,10 +8099,8 @@ pub fn create_engine_with_body_and_output(
             let mobs = w.mob_cache.get_mobs_in_room(&pos.zone, &pos.room);
             for mob in mobs {
                 if let Some(data) = w.mob_cache.get_mob(&mob.mob_key) {
-                    if data.name == mob_name || data.name.contains(mob_name) {
-                        if data.buy_percent > 0 {
-                            return data.buy_percent;
-                        }
+                    if (data.name == mob_name || data.name.contains(mob_name)) && data.buy_percent > 0 {
+                        return data.buy_percent;
                     }
                 }
             }
@@ -7832,11 +8127,11 @@ pub fn create_engine_with_body_and_output(
             let mobs = w.mob_cache.get_mobs_in_room(&pos.zone, &pos.room);
             for mob in mobs {
                 if let Some(data) = w.mob_cache.get_mob(&mob.mob_key) {
-                    if data.name == mob_name || data.name.contains(mob_name) {
-                        if !data.items_for_sale.is_empty() {
-                            // 첫 번째 아이템의 판매 비율 반환
-                            return data.items_for_sale[0].1.max(1);
-                        }
+                    if (data.name == mob_name || data.name.contains(mob_name))
+                        && !data.items_for_sale.is_empty()
+                    {
+                        // 첫 번째 아이템의 판매 비율 반환
+                        return data.items_for_sale[0].1.max(1);
                     }
                 }
             }
@@ -8469,6 +8764,75 @@ pub fn create_engine_with_body_and_output(
         true
     });
 
+    // ============================================================
+    // GLOBAL DATA ACCESS FUNCTIONS (if global_data provided)
+    // ============================================================
+    if let Some(gd) = global_data {
+        // get_global(file) - 전체 파일 데이터 가져오기
+        let gd_clone = gd.clone();
+        engine.register_fn("get_global", move |file: &str| -> Dynamic {
+            if let Ok(data) = gd_clone.try_read() {
+                if let Some(json) = data.get(file) {
+                    return crate::data::json_to_dynamic(json);
+                }
+            }
+            Dynamic::UNIT
+        });
+
+        // get_global_key(file, key) - 파일에서 특정 키의 데이터 가져오기
+        let gd_clone = gd.clone();
+        engine.register_fn("get_global_key", move |file: &str, key: &str| -> Dynamic {
+            if let Ok(data) = gd_clone.try_read() {
+                if let Some(json) = data.get_path(file, key) {
+                    return crate::data::json_to_dynamic(json);
+                }
+            }
+            Dynamic::UNIT
+        });
+
+        // get_global_keys(file) - 파일의 모든 키 목록
+        let gd_clone = gd.clone();
+        engine.register_fn("get_global_keys", move |file: &str| -> rhai::Array {
+            if let Ok(data) = gd_clone.try_read() {
+                let keys: rhai::Array = data.keys(file).into_iter().map(Dynamic::from).collect();
+                keys
+            } else {
+                rhai::Array::new()
+            }
+        });
+
+        // list_globals() - 모든 파일 이름 목록
+        let gd_clone = gd.clone();
+        engine.register_fn("list_globals", move || -> rhai::Array {
+            if let Ok(data) = gd_clone.try_read() {
+                let names: rhai::Array = data.file_names().into_iter().map(Dynamic::from).collect();
+                names
+            } else {
+                rhai::Array::new()
+            }
+        });
+
+        // has_global(file) - 파일 존재 확인
+        let gd_clone = gd.clone();
+        engine.register_fn("has_global", move |file: &str| -> bool {
+            if let Ok(data) = gd_clone.try_read() {
+                data.contains(file)
+            } else {
+                false
+            }
+        });
+
+        // has_global_key(file, key) - 파일의 키 존재 확인
+        let gd_clone = gd.clone();
+        engine.register_fn("has_global_key", move |file: &str, key: &str| -> bool {
+            if let Ok(data) = gd_clone.try_read() {
+                data.contains_key(file, key)
+            } else {
+                false
+            }
+        });
+    }
+
     engine
 }
 
@@ -8650,6 +9014,7 @@ impl ScriptStorage {
         storage
     }
 
+    #[allow(clippy::should_implement_trait)]
     pub fn default() -> Self {
         Self::new(ScriptConfig::default())
     }
@@ -8765,9 +9130,9 @@ impl ScriptStorage {
         for (name, source) in &self.libraries {
             combined.push_str("// Library: ");
             combined.push_str(name);
-            combined.push_str("\n");
+            combined.push('\n');
             combined.push_str(source);
-            combined.push_str("\n");
+            combined.push('\n');
         }
         combined
     }
@@ -8785,7 +9150,7 @@ impl ScriptStorage {
             StoredScript {
                 source,
                 modified,
-                name: name.to_string(),
+                _name: name.to_string(),
             },
         );
         debug!("Loaded script: {} from {:?}", name, path);
@@ -8813,7 +9178,7 @@ impl ScriptStorage {
             StoredScript {
                 source,
                 modified,
-                name: name.to_string(),
+                _name: name.to_string(),
             },
         );
 
@@ -8869,6 +9234,7 @@ impl ScriptStorage {
             user_sends.clone(),
             call_out_scheduler,
             Some(name),
+            self.global_data.clone(),
         );
         let mut scope = Scope::new();
 
@@ -9011,8 +9377,9 @@ pub fn create_call_out_script_runner(
         move |target: &str, script: Option<&str>, function: &str, _args: Vec<serde_json::Value>| {
             let script = script.ok_or_else(|| "call_out: script name required".to_string())?;
             // process_due는 tokio 워커에서 호출되므로 blocking_read 전에 block_in_place로 블로킹 허용
-            let source = tokio::task::block_in_place(|| {
-                script_storage.blocking_read().get_script_source(script)
+            let (source, global_data) = tokio::task::block_in_place(|| {
+                let storage = script_storage.blocking_read();
+                (storage.get_script_source(script), storage.global_data.clone())
             });
             let source = source.ok_or_else(|| format!("script not found: {}", script))?;
 
@@ -9032,13 +9399,14 @@ pub fn create_call_out_script_runner(
                         user_sends,
                         None,
                         None,
+                        global_data.clone(),
                     );
                     let ast = engine
                         .compile(&source)
                         .map_err(|e| format!("compile: {}", e))?;
                     let mut scope = Scope::new();
                     let ob = Dynamic::from(build_ob_from_body(body));
-                    engine
+                    let _ = engine
                         .call_fn::<Dynamic>(&mut scope, &ast, function, (ob,))
                         .map_err(|e| format!("call_fn {}: {}", function, e))?;
 
@@ -9074,6 +9442,7 @@ impl SharedScriptStorage {
         }
     }
 
+    #[allow(clippy::should_implement_trait)]
     pub fn default() -> Self {
         Self::new(ScriptConfig::default())
     }

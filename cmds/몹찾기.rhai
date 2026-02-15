@@ -27,12 +27,12 @@ fn cmd(ob, line) {
 
     let i = 0;
     for r in results {
-        let zone = r[0];
-        let room = r[1];
-        let mob_name = r[2];
-        let display_name = r[3];
-        let hp = r[4];
-        let max_hp = r[5];
+        let zone = r["zone"];
+        let room = r["room"];
+        let mob_name = r["mob_name"];
+        let display_name = r["display_name"];
+        let hp = r["hp"];
+        let max_hp = r["max_hp"];
 
         let loc_str = zone + ":" + room;
         let hp_str = "(" + to_string(hp) + "/" + to_string(max_hp) + ")";

@@ -16,10 +16,10 @@ fn cmd(ob, line) {
         return;
     }
 
-    let mut msg = "";
-    let mut c = 0;
+    let msg = "";
+    let c = 0;
     for k in keys {
-        msg = msg + format("%14s,", k);
+        msg = msg + pad_start(k, 14, " ") + ",";
         c += 1;
         if c % 5 == 0 {
             send_line(ob, msg);

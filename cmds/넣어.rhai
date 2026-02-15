@@ -32,7 +32,7 @@ fn cmd(ob, line) {
 
     // 은전 넣기
     if item_type == "은전" {
-        let mut amount = 1;
+        let amount = 1;
         if len(words) >= 3 {
             amount = to_int(words[2]);
             if amount < 1 { amount = 1; }
@@ -85,7 +85,7 @@ fn cmd(ob, line) {
     }
 
     // 개별 아이템 넣기
-    let mut count = 1;
+    let count = 1;
     if len(words) >= 3 {
         count = to_int(words[2]);
         if count < 1 { count = 1; }
