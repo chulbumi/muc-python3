@@ -249,8 +249,12 @@ pub fn process_player_attack(
         round.player_messages.push(death_msg.clone());
         round.room_messages.push(death_msg);
 
-        let reward_msg = format!("☞ 경험치 {} 획득! {} gold 획득!", exp, gold);
-        round.player_messages.push(reward_msg);
+        // Reward message (Python format)
+        let exp_msg = format!("\r\n당신이 {}의 경험치를 얻습니다.", exp);
+        round.player_messages.push(exp_msg);
+
+        let gold_msg = format!("당신이 {}에게 은전 {}개를 획득합니다.", mob.name, gold);
+        round.player_messages.push(gold_msg);
 
         // Apply rewards
         player.add_exp(exp);
