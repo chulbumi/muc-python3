@@ -323,8 +323,8 @@ impl Body {
     pub fn get_mp(&self) -> i64 {
         if self._mp != 0 {
             let base = self.object.getInt("내공");
-            let mp = base + (base * self._mp as i64 / 100);
-            mp
+            
+            base + (base * self._mp as i64 / 100)
         } else {
             self.object.getInt("내공")
         }
@@ -414,6 +414,95 @@ impl Body {
     /// Gets attack power
     pub fn get_attack_power(&self) -> i32 {
         self.attpower
+    }
+
+    // ==================== Weapon Mastery Methods ====================
+
+    /// Gets weapon type (1-5) from equipped weapon
+    /// Python: self.getWeapon()['무기종류']
+    /// Returns 1 (기본) if no weapon equipped
+    pub fn get_weapon_type(&self) -> i64 {
+        // 무기종류: 1=도, 2=창, 3=검, 4=봉, 5=기타
+        // 현재 장착한 무기에서 가져와야 함
+        // 간단히 구현: weaponItem에서 무기종류 가져오기
+        if let Some(weak) = &self.weapon_item {
+            if let Some(arc) = weak.upgrade() {
+                if let Ok(obj) = arc.lock() {
+                    return obj.getInt("무기종류").max(1);
+                }
+            }
+        }
+        1 // 기본값: 주먹 = 1
+    }
+
+    /// Gets mastery level for a weapon type
+    /// Python: getInt(self['%d 숙련도' % weapon_type])
+    pub fn get_mastery(&self, weapon_type: i64) -> i64 {
+        let key = format!("{} 숙련도", weapon_type);
+        let base = self.object.getInt(&key);
+        // 숙련도상승 버프 확인
+        if !self.object.getString("숙련도상승").is_empty() {
+            base + 2000
+        } else {
+            base
+        }
+    }
+
+    /// Gets weapon skill level (기량) from equipped weapon
+    /// Python: getInt(item['기량'])
+    /// Returns 0 for 주먹 (fist)
+    pub fn get_weapon_skill(&self) -> i64 {
+        if let Some(weak) = &self.weapon_item {
+            if let Some(arc) = weak.upgrade() {
+                if let Ok(obj) = arc.lock() {
+                    return obj.getInt("기량");
+                }
+            }
+        }
+        0 // 주먹은 기량 0
+    }
+
+    /// Calculates mastery difference for damage calculation
+    /// Python: ss = s1 - s2 where s1 = weapon skill, s2 = mastery
+    /// Returns max(0, weapon_skill - mastery)
+    pub fn get_mastery_diff(&self) -> i64 {
+        let weapon_type = self.get_weapon_type();
+        let s1 = self.get_weapon_skill(); // 무기 기량
+        let s2 = self.get_mastery(weapon_type); // 숙련도
+        let ss = s1 - s2;
+        ss.max(0)
+    }
+
+    /// Gets weapon display name for combat messages
+    /// Python: makeFightScript() uses mstr = '[36m주먹[37m' or weapon.getNameA()
+    pub fn get_weapon_name(&self) -> String {
+        if let Some(weak) = &self.weapon_item {
+            if let Some(arc) = weak.upgrade() {
+                if let Ok(obj) = arc.lock() {
+                    return obj.getNameA();
+                }
+            }
+        }
+        // Default: 주먹 with cyan color
+        "\x1b[36m주먹\x1b[37m".to_string()
+    }
+
+    /// Gets fight script type from weapon
+    /// Python: getWeaponFightType() returns getWeapon()['전투스크립']
+    /// Used to select the combat message script (주먹, 검, 도, 등)
+    pub fn get_fight_script_type(&self) -> String {
+        if let Some(weak) = &self.weapon_item {
+            if let Some(arc) = weak.upgrade() {
+                if let Ok(obj) = arc.lock() {
+                    let script_type = obj.getString("전투스크립");
+                    if !script_type.is_empty() {
+                        return script_type;
+                    }
+                }
+            }
+        }
+        // Default: 주먹
+        "주먹".to_string()
     }
 
     // ==================== Combat Methods ====================
@@ -1017,7 +1106,7 @@ impl Body {
             msg.push_str(&t);
             msg.push(' ');
         }
-        msg.push_str(&act_str);
+        msg.push_str(act_str);
         msg
     }
 
@@ -1090,7 +1179,7 @@ impl Body {
             (String::new(), 0)
         } else {
             let parts: Vec<&str> = training.split_whitespace().collect();
-            let skill_name = parts.get(0).unwrap_or(&"").to_string();
+            let skill_name = parts.first().copied().unwrap_or("").to_string();
             let progress = if parts.len() >= 2 {
                 parts[1].parse().unwrap_or(0)
             } else {
