@@ -96,8 +96,19 @@ fn warp_command(player: &mut Body, args: &[&str]) -> CommandResult {
     let zone = args[0];
     let room = args[1];
 
-    // Set position
-    player.set("위치", format!("{}{}", zone, room));
+    // Set position in player object
+    player.set("위치", format!("{}:{}", zone, room));
+
+    // Also update world state for PvP tracking
+    let player_name = player.get_name();
+    if !player_name.is_empty() {
+        if let Ok(mut world) = crate::world::get_world_state().write() {
+            world.set_player_position(
+                &player_name,
+                crate::world::PlayerPosition::new(zone.to_string(), room.to_string()),
+            );
+        }
+    }
 
     let msg = format!("{} {}으로 이동했습니다.", zone, room);
     CommandResult::Output(msg)
