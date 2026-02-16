@@ -13,12 +13,13 @@ fn cmd(ob, line) {
 
     // Check if target is valid
     let r = find_target(ob, target_name);
-    if !r["found"].as_bool() {
+    let found = r["found"];
+    if !found {
         send_line(ob, "☞ 물품을 건내줄 무림인을 찾을 수 없어요. ^^");
         return;
     }
     let to_target = r["to_target"];
-    let found_name = to_target["name"].clone().as_string().unwrap_or_default();
+    let found_name = to_target["name"].to_string();
     if found_name == "" {
         send_line(ob, "☞ 물품을 건내줄 무림인을 찾을 수 없어요. ^^");
         return;
@@ -72,9 +73,10 @@ fn cmd(ob, line) {
     }
 
     // 아이템 주기
+    // parse_order_name returns [order, name]
     let parsed = parse_order_name(item_name);
-    let name = parsed[0].to_string();
-    let order = to_int(parsed[1]);
+    let order = to_int(parsed[0]);
+    let name = parsed[1].to_string();
     let give_count = if order != 1 { 1 } else { count };
 
     let err = request_give_item(ob, found_name, name, order, give_count);

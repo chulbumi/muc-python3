@@ -1898,6 +1898,21 @@ fn handle_movement(
     _room_cache: &Arc<std::sync::Mutex<RoomCache>>,
 ) -> Result<(), Box<dyn std::error::Error>> {
     use crate::world::{get_world_state, Direction};
+    use crate::player::ActState;
+
+    // Check if player is in combat
+    {
+        let clients = broadcaster.clients.lock();
+        if let Some(client) = clients.get(&addr) {
+            if let Some(player) = &client.player {
+                if player.body.act == ActState::Fight {
+                    drop(clients);
+                    broadcaster.send_to(addr, "\x1b[1;31m☞ 전투 중에는 이동 할 수 없습니다.\x1b[0;37m\r\n")?;
+                    return Ok(());
+                }
+            }
+        }
+    }
 
     // Parse direction
     let dir = match direction {
@@ -3358,6 +3373,8 @@ async fn handle_game_command(
                             (Some(gp), Some(tp)) => {
                                 let giver_body = &mut gp.body;
                                 let target_body = &mut tp.body;
+                                // 관리자는 무게/수량 제한 없음
+                                let target_is_admin = target_body.get_int("관리자등급") >= 1000;
                                 let mut n = 0usize;
                                 let mut running_weight: i64 = 0;
                                 for obj in &giver_body.object.objs {
@@ -3392,30 +3409,33 @@ async fn handle_game_command(
                                         continue; // 이번 건만 스킵, 다음 후보 계속
                                     }
                                     let w = o.getInt("무게");
-                                    if target_body.get_item_weight() + running_weight + w
-                                        > target_body.get_str() * 10
-                                    {
-                                        if to_move.is_empty() {
-                                            let iga = crate::hangul::han_iga(&target_name);
-                                            let go = o.han_obj();
-                                            give_item_error = Some((
-                                                format!("\x1b[1m{}\x1b[0;37m{} 무거워서 받지 못합니다.", target_name, iga),
-                                                Some(format!("\r\n\x1b[1m{}\x1b[0;37m{} 줄려는 \x1b[36m{}\x1b[37m 무거워서 받지 못합니다.", giver_name, crate::hangul::han_iga(&giver_name), go)),
-                                            ));
+                                    // 관리자가 아니면 무게/수량 체크
+                                    if !target_is_admin {
+                                        if target_body.get_item_weight() + running_weight + w
+                                            > target_body.get_str() * 10
+                                        {
+                                            if to_move.is_empty() {
+                                                let iga = crate::hangul::han_iga(&target_name);
+                                                let go = o.han_obj();
+                                                give_item_error = Some((
+                                                    format!("\x1b[1m{}\x1b[0;37m{} 무거워서 받지 못합니다.", target_name, iga),
+                                                    Some(format!("\r\n\x1b[1m{}\x1b[0;37m{} 줄려는 \x1b[36m{}\x1b[37m 무거워서 받지 못합니다.", giver_name, crate::hangul::han_iga(&giver_name), go)),
+                                                ));
+                                            }
+                                            break;
                                         }
-                                        break;
-                                    }
-                                    if target_body.get_item_count() + to_move.len() + 1 > MAX_ITEMS
-                                    {
-                                        if to_move.is_empty() {
-                                            let iga = crate::hangul::han_iga(&target_name);
-                                            let go = o.han_obj();
-                                            give_item_error = Some((
-                                                format!("\x1b[1m{}\x1b[0;37m{} 수량 한계로 받지 못합니다.", target_name, iga),
-                                                Some(format!("\r\n\x1b[1m{}\x1b[0;37m{} 줄려는 \x1b[36m{}\x1b[37m 수량 한계로 받지 못합니다.", giver_name, crate::hangul::han_iga(&giver_name), go)),
-                                            ));
+                                        if target_body.get_item_count() + to_move.len() + 1 > MAX_ITEMS
+                                        {
+                                            if to_move.is_empty() {
+                                                let iga = crate::hangul::han_iga(&target_name);
+                                                let go = o.han_obj();
+                                                give_item_error = Some((
+                                                    format!("\x1b[1m{}\x1b[0;37m{} 수량 한계로 받지 못합니다.", target_name, iga),
+                                                    Some(format!("\r\n\x1b[1m{}\x1b[0;37m{} 줄려는 \x1b[36m{}\x1b[37m 수량 한계로 받지 못합니다.", giver_name, crate::hangul::han_iga(&giver_name), go)),
+                                                ));
+                                            }
+                                            break;
                                         }
-                                        break;
                                     }
                                     running_weight += w;
                                     to_move.push(obj.clone());
@@ -3463,12 +3483,15 @@ async fn handle_game_command(
                         (Some(gp), Some(tp)) => {
                             let giver_body = &mut gp.body;
                             let target_body = &mut tp.body;
+                            // 관리자는 무게/수량 제한 없음
+                            let target_is_admin = target_body.get_int("관리자등급") >= 1000;
                             let have = *giver_body.object.inv_stack.get(key).unwrap_or(&0);
                             if have < cnt {
                                 give_item_error =
                                     Some(("☞ 그런 아이템이 소지품에 없어요.".to_string(), None));
-                            } else if target_body.get_item_weight() + w * cnt
-                                > target_body.get_str() * 10
+                            } else if !target_is_admin
+                                && target_body.get_item_weight() + w * cnt
+                                    > target_body.get_str() * 10
                             {
                                 let iga = crate::hangul::han_iga(&target_name);
                                 let disp = get_item_display_name(key);
@@ -3481,7 +3504,7 @@ async fn handle_game_command(
                                     format!("\x1b[1m{}\x1b[0;37m{} 무거워서 받지 못합니다.", target_name, iga),
                                     Some(format!("\r\n\x1b[1m{}\x1b[0;37m{} 줄려는 \x1b[36m{}\x1b[37m 무거워서 받지 못합니다.", giver_name, iga, go)),
                                 ));
-                            } else if target_body.get_item_count() + cnt_u > MAX_ITEMS {
+                            } else if !target_is_admin && target_body.get_item_count() + cnt_u > MAX_ITEMS {
                                 let iga = crate::hangul::han_iga(&target_name);
                                 let disp = get_item_display_name(key);
                                 let go = format!(

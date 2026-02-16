@@ -309,6 +309,21 @@ struct StoredScript {
     _name: String,
 }
 
+/// Equipment stats for applying/removing bonuses
+struct EquipStats {
+    attack: i32,
+    defense: i32,
+    strength: i32,
+    dexterity: i32,
+    armor: i32,
+    max_hp: i32,
+    max_mp: i32,
+    hit: i32,
+    miss: i32,
+    critical: i32,
+    luck: i32,
+}
+
 /// [36m, [37m 등 ESC 없는 축약 ANSI를 \x1b[36m 형태로 확장.
 /// 이미 \x1b[...]m 인 경우는 플레이스홀더로 보호 후 복원하여 이중 치환 방지.
 fn expand_abbreviated_ansi(s: &str) -> String {
@@ -557,10 +572,12 @@ pub fn save_body_to_json(body: &mut Body, path: &str) -> bool {
     let mut root = serde_json::Map::new();
     root.insert("사용자오브젝트".to_string(), serde_json::Value::Object(uso));
     root.insert("아이템".to_string(), serde_json::Value::Array(items));
+    // 0인 항목은 저장하지 않음
     let stack_map: serde_json::Map<String, serde_json::Value> = body
         .object
         .inv_stack
         .iter()
+        .filter(|(_, v)| **v > 0)
         .map(|(k, v)| {
             (
                 k.clone(),
@@ -834,6 +851,36 @@ fn get_item_info(key: &str) -> Option<(String, String, i64, i64)> {
         .unwrap_or(0);
     let weight = info.get("무게").and_then(|v| v.as_i64()).unwrap_or(0);
     Some((name, rn, price, weight))
+}
+
+/// 소비성 아이템 정보 가져오기 (이름, 체력회복, 내공회복)
+/// 종류가 "먹는것"인 경우에만 값을 반환, 아니면 (0, 0, 0)
+fn get_consumable_info(key: &str) -> (String, i64, i64) {
+    let path = format!("data/item/{}.json", key);
+    let content = match std::fs::read_to_string(&path) {
+        Ok(c) => c,
+        Err(_) => return (String::new(), 0, 0),
+    };
+    let json: serde_json::Value = match serde_json::from_str(&content) {
+        Ok(j) => j,
+        Err(_) => return (String::new(), 0, 0),
+    };
+    let info = match json.get("아이템정보").and_then(|v| v.as_object()) {
+        Some(o) => o,
+        None => return (String::new(), 0, 0),
+    };
+    let kind = info.get("종류").and_then(|v| v.as_str()).unwrap_or("");
+    if kind != "먹는것" {
+        return (String::new(), 0, 0);
+    }
+    let name = info
+        .get("이름")
+        .and_then(|v| v.as_str())
+        .unwrap_or("")
+        .to_string();
+    let hp = info.get("체력").and_then(|v| v.as_i64()).unwrap_or(0);
+    let mp = info.get("내공").and_then(|v| v.as_i64()).unwrap_or(0);
+    (name, hp, mp)
 }
 
 /// 아이템 설명1. data/item/{key}.json. 방 바닥 스택 표시용.
@@ -2977,18 +3024,22 @@ pub fn create_engine_with_body_and_output(
             }
             let cnt = count.clamp(1, 50);
             const MAX_ITEMS: usize = 50;
+            let is_admin = body.get_int("관리자등급") >= 1000;
             for _ in 0..cnt {
-                if body.get_item_count() >= MAX_ITEMS {
-                    if bought == 0 {
-                        err = "inv_full".to_string();
+                // 관리자는 무게/수량 제한 없음
+                if !is_admin {
+                    if body.get_item_count() >= MAX_ITEMS {
+                        if bought == 0 {
+                            err = "inv_full".to_string();
+                        }
+                        break;
                     }
-                    break;
-                }
-                if body.get_item_weight() + weight > body.get_str() * 10 {
-                    if bought == 0 {
-                        err = "too_heavy".to_string();
+                    if body.get_item_weight() + weight > body.get_str() * 10 {
+                        if bought == 0 {
+                            err = "too_heavy".to_string();
+                        }
+                        break;
                     }
-                    break;
                 }
                 if body.get_int("은전") < unit_price {
                     if bought == 0 {
@@ -4178,6 +4229,7 @@ pub fn create_engine_with_body_and_output(
     );
 
     // item_equip(ob, name, order): 기능만. ""=성공, "usage"|"no_item"|"not_equippable"|"slot_used". 오류 메시지는 Rhai에서.
+    // 아이템 착용 시 모든 속성 보너스가 플레이어에게 적용됨
     let body_ptr_equip = body_ptr;
     engine.register_fn(
         "item_equip",
@@ -4191,14 +4243,28 @@ pub fn create_engine_with_body_and_output(
                 Some(a) => a,
                 None => return "no_item".to_string(),
             };
-            let (kind, slot, arm, att) = {
+            // 아이템의 모든 속성 수집
+            let (kind, slot, stats) = {
                 let o = arc.lock().unwrap();
                 let k = o.getString("종류");
                 let s = o.getString("계층");
                 if k != "방어구" && k != "무기" {
                     return "not_equippable".to_string();
                 }
-                (k, s, o.getInt("방어력") as i32, o.getInt("공격력") as i32)
+                let stats = EquipStats {
+                    attack: o.getInt("공격력") as i32,
+                    defense: o.getInt("방어력") as i32,
+                    strength: o.getInt("힘") as i32,
+                    dexterity: o.getInt("민첩") as i32,
+                    armor: o.getInt("맷집") as i32,
+                    max_hp: o.getInt("체력") as i32,
+                    max_mp: o.getInt("내공") as i32,
+                    hit: o.getInt("명중") as i32,
+                    miss: o.getInt("회피") as i32,
+                    critical: o.getInt("치명") as i32,
+                    luck: o.getInt("운") as i32,
+                };
+                (k, s, stats)
             };
             let slot_used = body.object.objs.iter().any(|obj| {
                 if std::sync::Arc::ptr_eq(obj, &arc) {
@@ -4215,8 +4281,18 @@ pub fn create_engine_with_body_and_output(
                 let mut o = arc.lock().unwrap();
                 o.set("inUse", 1i64);
             }
-            body.armor += arm;
-            body.attpower += att;
+            // 모든 속성 보너스 적용
+            body.attpower += stats.attack;
+            body.armor += stats.defense;
+            body._str += stats.strength;
+            body._dex += stats.dexterity;
+            body._arm += stats.armor;
+            body._maxhp += stats.max_hp;
+            body._maxmp += stats.max_mp;
+            body._hit += stats.hit;
+            body._miss += stats.miss;
+            body._critical += stats.critical;
+            body._critical_chance += stats.luck;
             if kind == "무기" {
                 body.weapon_item = Some(std::sync::Arc::downgrade(&arc));
             }
@@ -4225,6 +4301,7 @@ pub fn create_engine_with_body_and_output(
     );
 
     // item_unequip(ob, name, order): 기능만. ""=성공, "usage"|"no_item". 오류 메시지는 Rhai에서.
+    // 아이템 해제 시 모든 속성 보너스 제거
     let body_ptr_ue = body_ptr;
     engine.register_fn(
         "item_unequip",
@@ -4238,22 +4315,38 @@ pub fn create_engine_with_body_and_output(
                 Some(a) => a,
                 None => return "no_item".to_string(),
             };
-            let (arm, att, is_weapon) = {
+            // 아이템의 모든 속성 수집 및 해제 처리
+            let (is_weapon, stats) = {
                 let mut o = arc.lock().unwrap();
                 o.set("inUse", 0i64);
-                let arm = o.getInt("방어력") as i32;
-                let att = o.getInt("공격력") as i32;
                 let w = o.getString("종류") == "무기";
-                (arm, att, w)
+                let stats = EquipStats {
+                    attack: o.getInt("공격력") as i32,
+                    defense: o.getInt("방어력") as i32,
+                    strength: o.getInt("힘") as i32,
+                    dexterity: o.getInt("민첩") as i32,
+                    armor: o.getInt("맷집") as i32,
+                    max_hp: o.getInt("체력") as i32,
+                    max_mp: o.getInt("내공") as i32,
+                    hit: o.getInt("명중") as i32,
+                    miss: o.getInt("회피") as i32,
+                    critical: o.getInt("치명") as i32,
+                    luck: o.getInt("운") as i32,
+                };
+                (w, stats)
             };
-            body.armor -= arm;
-            body.attpower -= att;
-            if body.attpower < 0 {
-                body.attpower = 0;
-            }
-            if body.armor < 0 {
-                body.armor = 0;
-            }
+            // 모든 속성 보너스 제거 (음수 방지)
+            body.attpower = (body.attpower - stats.attack).max(0);
+            body.armor = (body.armor - stats.defense).max(0);
+            body._str = (body._str - stats.strength).max(0);
+            body._dex = (body._dex - stats.dexterity).max(0);
+            body._arm = (body._arm - stats.armor).max(0);
+            body._maxhp = (body._maxhp - stats.max_hp).max(0);
+            body._maxmp = (body._maxmp - stats.max_mp).max(0);
+            body._hit = (body._hit - stats.hit).max(0);
+            body._miss = (body._miss - stats.miss).max(0);
+            body._critical = (body._critical - stats.critical).max(0);
+            body._critical_chance = (body._critical_chance - stats.luck).max(0);
             if is_weapon {
                 body.weapon_item = None;
             }
@@ -4275,7 +4368,9 @@ pub fn create_engine_with_body_and_output(
         n as i64
     });
 
-    // item_use_consumable(ob, name, order): 기능만. {err: ""|"usage"|"bad_state"|"no_item"|"not_consumable", name}. 오류 메시지는 Rhai에서.
+    // item_use_consumable(ob, name, order): 소비성 아이템 사용.
+    // 먼저 inv_stack에서 찾고(개수 관리), 없으면 objs에서 찾음.
+    // {err: ""|"usage"|"bad_state"|"no_item"|"not_consumable", name}. 오류 메시지는 Rhai에서.
     let body_ptr_cons = body_ptr;
     engine.register_fn(
         "item_use_consumable",
@@ -4286,13 +4381,57 @@ pub fn create_engine_with_body_and_output(
                 m.insert("name".into(), Dynamic::from(String::new()));
                 return Dynamic::from(m);
             }
-            let order = order.max(1) as usize;
             let body = unsafe { &mut *body_ptr_cons };
             if body.act == crate::player::ActState::Rest {
                 m.insert("err".into(), Dynamic::from("bad_state".to_string()));
                 m.insert("name".into(), Dynamic::from(String::new()));
                 return Dynamic::from(m);
             }
+
+            // 1단계: inv_stack에서 아이템 찾기 (개수로 관리되는 소비성 아이템)
+            if let Some(key) = find_item_key_by_name(name) {
+                if is_stackable(&key) {
+                    let have = *body.object.inv_stack.get(&key).unwrap_or(&0);
+                    if have > 0 {
+                        // 아이템 정보 가져오기
+                        let (item_name, hp, mp) = get_consumable_info(&key);
+                        if hp == 0 && mp == 0 {
+                            // 소비성 아이템이 아님
+                            m.insert("err".into(), Dynamic::from("not_consumable".to_string()));
+                            m.insert("name".into(), Dynamic::from(String::new()));
+                            return Dynamic::from(m);
+                        }
+
+                        // HP/MP 회복 적용
+                        let max_hp = body.get_max_hp();
+                        let max_mp = body.get_max_mp();
+                        let cur_hp = body.get_hp();
+                        let cur_mp = body.get_mp();
+                        let new_hp = (cur_hp + hp).min(max_hp).max(0);
+                        let new_mp = (cur_mp + mp).min(max_mp).max(0);
+                        body.set("체력", new_hp);
+                        body.set("내공", new_mp);
+
+                        // 개수 차감
+                        if have <= 1 {
+                            body.object.inv_stack.remove(&key);
+                        } else {
+                            *body.object.inv_stack.get_mut(&key).unwrap() -= 1;
+                        }
+
+                        // 저장
+                        let path = format!("data/user/{}.json", body.get_name());
+                        let _ = save_body_to_json(body, &path);
+
+                        m.insert("err".into(), Dynamic::from(String::new()));
+                        m.insert("name".into(), Dynamic::from(item_name));
+                        return Dynamic::from(m);
+                    }
+                }
+            }
+
+            // 2단계: objs에서 아이템 찾기 (기존 방식 - 개별 인스턴스)
+            let order = order.max(1) as usize;
             let arc = match body.object.findObjInven(name, order) {
                 Some(a) => a,
                 None => {
@@ -4335,6 +4474,73 @@ pub fn create_engine_with_body_and_output(
         let path = format!("data/user/{}.json", body.get_name());
         save_body_to_json(body, &path)
     });
+
+    // add_stack_item(ob, item_key, count) - 스택 아이템을 inv_stack에 추가
+    // 성공 시 true 반환, 실패 시 false
+    let body_ptr_stack = body_ptr;
+    engine.register_fn(
+        "add_stack_item",
+        move |_ob: &mut rhai::Map, item_key: &str, count: i64| -> bool {
+            if item_key.is_empty() || count <= 0 {
+                return false;
+            }
+            let body = unsafe { &mut *body_ptr_stack };
+
+            // 스택 가능한 아이템인지 확인
+            if !is_stackable(item_key) {
+                return false;
+            }
+
+            // inv_stack에 추가
+            *body
+                .object
+                .inv_stack
+                .entry(item_key.to_string())
+                .or_insert(0) += count;
+
+            // 저장
+            let path = format!("data/user/{}.json", body.get_name());
+            save_body_to_json(body, &path)
+        },
+    );
+
+    // get_stack_count(ob, item_key) - inv_stack에서 아이템 개수 조회
+    let body_ptr_gs = body_ptr;
+    engine.register_fn(
+        "get_stack_count",
+        move |_ob: &mut rhai::Map, item_key: &str| -> i64 {
+            let body = unsafe { &*body_ptr_gs };
+            *body.object.inv_stack.get(item_key).unwrap_or(&0)
+        },
+    );
+
+    // remove_stack_item(ob, item_key, count) - inv_stack에서 아이템 제거
+    // 성공 시 true, 실패(부족) 시 false
+    let body_ptr_rs = body_ptr;
+    engine.register_fn(
+        "remove_stack_item",
+        move |_ob: &mut rhai::Map, item_key: &str, count: i64| -> bool {
+            if item_key.is_empty() || count <= 0 {
+                return false;
+            }
+            let body = unsafe { &mut *body_ptr_rs };
+
+            let have = *body.object.inv_stack.get(item_key).unwrap_or(&0);
+            if have < count {
+                return false;
+            }
+
+            if have == count {
+                body.object.inv_stack.remove(item_key);
+            } else {
+                *body.object.inv_stack.get_mut(item_key).unwrap() -= count;
+            }
+
+            // 저장
+            let path = format!("data/user/{}.json", body.get_name());
+            save_body_to_json(body, &path)
+        },
+    );
 
     // ONEITEM (단일아이템/기연) 시스템. Python ONEITEM과 동일.
     engine.register_fn("oneitem_get_name", crate::oneitem::oneitem_get_name);
@@ -6751,6 +6957,8 @@ pub fn create_engine_with_body_and_output(
 
     // pick_up_item(ob, item_name, count) - 바닥에서 아이템 줍기
     // 성공 시 빈 문자열 "", 실패 시 오류 메시지 반환
+    // 관리자(등급>=1000)는 무게/수량 제한 없음
+    const MAX_ITEMS_PICKUP: usize = 50;
     let body_ptr_pui = body_ptr;
     engine.register_fn(
         "pick_up_item",
@@ -6759,6 +6967,8 @@ pub fn create_engine_with_body_and_output(
                 return "아이템 이름을 입력해주세요.".to_string();
             }
             let body = unsafe { &mut *body_ptr_pui };
+            let admin_level = body.get_int("관리자등급");
+            let is_admin = admin_level >= 1000;
             let count = count.clamp(1, 100) as usize;
             let mut w = match get_world_state().write() {
                 Ok(w) => w,
@@ -6778,6 +6988,18 @@ pub fn create_engine_with_body_and_output(
                     let have = *room_stack.get(key).unwrap_or(&0);
                     let take_cnt = (count as i64).min(have).max(0) as usize;
                     if take_cnt > 0 {
+                        // 관리자가 아니면 무게/수량 체크
+                        if !is_admin {
+                            // get_item_info returns (name, rn, price, weight)
+                            let item_weight = get_item_info(key).map(|(_, _, _, w)| w).unwrap_or(0);
+                            let total_weight = item_weight * take_cnt as i64;
+                            if body.get_item_weight() + total_weight > body.get_str() * 10 {
+                                return "무거워서 더 이상 들 수 없습니다.".to_string();
+                            }
+                            if body.get_item_count() + take_cnt > MAX_ITEMS_PICKUP {
+                                return "소지품이 가득 찼습니다.".to_string();
+                            }
+                        }
                         let should_remove = {
                             let r = room_stack.get_mut(key).unwrap();
                             *r -= take_cnt as i64;
@@ -6796,13 +7018,29 @@ pub fn create_engine_with_body_and_output(
             let room_list = w.get_room_objs_mut(&zone, &room);
             let mut i = 0;
             while i < room_list.len() && taken < count {
-                let matches = {
+                let (matches, item_weight) = {
                     let o = room_list[i].lock().unwrap();
-                    o.getName() == item_name
+                    let m = o.getName() == item_name
                         || (!o.getString("반응이름").is_empty()
-                            && o.getString("반응이름").contains(item_name))
+                            && o.getString("반응이름").contains(item_name));
+                    (m, o.getInt("무게"))
                 };
                 if matches {
+                    // 관리자가 아니면 무게/수량 체크
+                    if !is_admin {
+                        if body.get_item_weight() + item_weight > body.get_str() * 10 {
+                            if taken == 0 {
+                                return "무거워서 더 이상 들 수 없습니다.".to_string();
+                            }
+                            break;
+                        }
+                        if body.get_item_count() + 1 > MAX_ITEMS_PICKUP {
+                            if taken == 0 {
+                                return "소지품이 가득 찼습니다.".to_string();
+                            }
+                            break;
+                        }
+                    }
                     let arc = room_list.remove(i);
                     body.object.append(arc);
                     taken += 1;
@@ -7936,6 +8174,7 @@ pub fn create_engine_with_body_and_output(
 
             let cnt = count.clamp(1, 50);
             const MAX_ITEMS: usize = 50;
+            let is_admin = body.get_int("관리자등급") >= 1000;
 
             // 돈 확인
             let total_cost = unit_price * cnt;
@@ -7943,12 +8182,14 @@ pub fn create_engine_with_body_and_output(
                 return "no_money".to_string();
             }
 
-            // 인벤토리 공간 및 무게 확인
-            if body.get_item_count() + cnt as usize > MAX_ITEMS {
-                return "inv_full".to_string();
-            }
-            if body.get_item_weight() + (weight * cnt) > body.get_str() * 10 {
-                return "too_heavy".to_string();
+            // 인벤토리 공간 및 무게 확인 (관리자 제외)
+            if !is_admin {
+                if body.get_item_count() + cnt as usize > MAX_ITEMS {
+                    return "inv_full".to_string();
+                }
+                if body.get_item_weight() + (weight * cnt) > body.get_str() * 10 {
+                    return "too_heavy".to_string();
+                }
             }
 
             // 아이템 추가 및 돈 차감

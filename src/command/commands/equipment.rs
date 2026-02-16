@@ -41,6 +41,7 @@ impl EquipmentSlot {
 }
 
 /// Shows player's inventory
+#[allow(dead_code)]
 fn inventory_command(player: &mut Body, _args: &[&str]) -> CommandResult {
     let mut output = String::from("\x1b[1;37m=== 소지품 ===\x1b[0;37m\r\n");
 
@@ -169,7 +170,7 @@ fn equipment_command(player: &mut Body, _args: &[&str]) -> CommandResult {
         output.push_str("(장비한 아이템이 없습니다)\r\n");
     }
 
-    // Show total bonuses
+    // Show total bonuses - 모든 보너스 표시
     output.push_str("\r\n\x1b[1;37m=== 보너스 ===\x1b[0;37m\r\n");
     if player.attpower > 0 {
         output.push_str(&format!("공격력: +{}\r\n", player.attpower));
@@ -191,6 +192,18 @@ fn equipment_command(player: &mut Body, _args: &[&str]) -> CommandResult {
     }
     if player._maxmp > 0 {
         output.push_str(&format!("최대내공: +{}\r\n", player._maxmp));
+    }
+    if player._hit > 0 {
+        output.push_str(&format!("명중: +{}\r\n", player._hit));
+    }
+    if player._miss > 0 {
+        output.push_str(&format!("회피: +{}\r\n", player._miss));
+    }
+    if player._critical > 0 {
+        output.push_str(&format!("치명: +{}\r\n", player._critical));
+    }
+    if player._critical_chance > 0 {
+        output.push_str(&format!("운: +{}\r\n", player._critical_chance));
     }
 
     CommandResult::Output(output)
@@ -215,6 +228,10 @@ fn equip_command(player: &mut Body, args: &[&str]) -> CommandResult {
     let mut stat_armor = 0i32;
     let mut stat_hp = 0i32;
     let mut stat_mp = 0i32;
+    let mut stat_hit = 0i32;
+    let mut stat_miss = 0i32;
+    let mut stat_critical = 0i32;
+    let mut stat_luck = 0i32;
 
     for obj in player.object.objs.iter() {
         if let Ok(item) = obj.lock() {
@@ -255,7 +272,7 @@ fn equip_command(player: &mut Body, args: &[&str]) -> CommandResult {
                     }
                 }
 
-                // Collect item data
+                // Collect item data - 모든 속성 수집
                 item_type = itype;
                 display_name = name;
                 stat_attack = item.getInt("공격력") as i32;
@@ -265,6 +282,10 @@ fn equip_command(player: &mut Body, args: &[&str]) -> CommandResult {
                 stat_armor = item.getInt("맷집") as i32;
                 stat_hp = item.getInt("체력") as i32;
                 stat_mp = item.getInt("내공") as i32;
+                stat_hit = item.getInt("명중") as i32;
+                stat_miss = item.getInt("회피") as i32;
+                stat_critical = item.getInt("치명") as i32;
+                stat_luck = item.getInt("운") as i32;
                 found_item = Some(obj.clone());
                 break;
             }
@@ -276,7 +297,7 @@ fn equip_command(player: &mut Body, args: &[&str]) -> CommandResult {
         None => return CommandResult::Error("☞ 그런 아이템을 가지고 있지 않습니다.".to_string()),
     };
 
-    // Apply stat bonuses
+    // Apply stat bonuses - 모든 속성 적용
     player.attpower += stat_attack;
     player.armor += stat_defense;
     player._str += stat_strength;
@@ -284,6 +305,10 @@ fn equip_command(player: &mut Body, args: &[&str]) -> CommandResult {
     player._arm += stat_armor;
     player._maxhp += stat_hp;
     player._maxmp += stat_mp;
+    player._hit += stat_hit;
+    player._miss += stat_miss;
+    player._critical += stat_critical;
+    player._critical_chance += stat_luck;
 
     // Mark as equipped and store weapon reference
     if let Ok(mut item) = item_arc.lock() {
@@ -321,11 +346,15 @@ fn unequip_command(player: &mut Body, args: &[&str]) -> CommandResult {
     let mut display_name = String::new();
     let mut stat_attack = 0i32;
     let mut stat_defense = 0i32;
-    let stat_strength = 0i32;
+    let mut stat_strength = 0i32;
     let mut stat_dexterity = 0i32;
     let mut stat_armor = 0i32;
     let mut stat_hp = 0i32;
-    let stat_mp = 0i32;
+    let mut stat_mp = 0i32;
+    let mut stat_hit = 0i32;
+    let mut stat_miss = 0i32;
+    let mut stat_critical = 0i32;
+    let mut stat_luck = 0i32;
 
     // Check weapon by name
     if let Some(weapon_ref) = &player.weapon_item {
@@ -335,6 +364,16 @@ fn unequip_command(player: &mut Body, args: &[&str]) -> CommandResult {
                 if name == target || name.contains(target) {
                     display_name = name;
                     stat_attack = w.getInt("공격력") as i32;
+                    stat_defense = w.getInt("방어력") as i32;
+                    stat_strength = w.getInt("힘") as i32;
+                    stat_dexterity = w.getInt("민첩") as i32;
+                    stat_armor = w.getInt("맷집") as i32;
+                    stat_hp = w.getInt("체력") as i32;
+                    stat_mp = w.getInt("내공") as i32;
+                    stat_hit = w.getInt("명중") as i32;
+                    stat_miss = w.getInt("회피") as i32;
+                    stat_critical = w.getInt("치명") as i32;
+                    stat_luck = w.getInt("운") as i32;
                     found_item = Some(weapon.clone());
                     item_type = "무기".to_string();
                 }
@@ -351,10 +390,17 @@ fn unequip_command(player: &mut Body, args: &[&str]) -> CommandResult {
                     if name == target || name.contains(target) {
                         display_name = name;
                         item_type = item.getString("타입");
+                        stat_attack = item.getInt("공격력") as i32;
                         stat_defense = item.getInt("방어력") as i32;
-                        stat_armor = item.getInt("맷집") as i32;
+                        stat_strength = item.getInt("힘") as i32;
                         stat_dexterity = item.getInt("민첩") as i32;
+                        stat_armor = item.getInt("맷집") as i32;
                         stat_hp = item.getInt("체력") as i32;
+                        stat_mp = item.getInt("내공") as i32;
+                        stat_hit = item.getInt("명중") as i32;
+                        stat_miss = item.getInt("회피") as i32;
+                        stat_critical = item.getInt("치명") as i32;
+                        stat_luck = item.getInt("운") as i32;
                         found_item = Some(obj.clone());
                         break;
                     }
@@ -368,14 +414,18 @@ fn unequip_command(player: &mut Body, args: &[&str]) -> CommandResult {
         None => return CommandResult::Error("☞ 그런 아이템을 장착하고 있지 않습니다.".to_string()),
     };
 
-    // Remove stat bonuses
-    player.attpower -= stat_attack;
-    player.armor -= stat_defense;
-    player._str -= stat_strength;
-    player._dex -= stat_dexterity;
-    player._arm -= stat_armor;
-    player._maxhp -= stat_hp;
-    player._maxmp -= stat_mp;
+    // Remove stat bonuses (음수 방지)
+    player.attpower = (player.attpower - stat_attack).max(0);
+    player.armor = (player.armor - stat_defense).max(0);
+    player._str = (player._str - stat_strength).max(0);
+    player._dex = (player._dex - stat_dexterity).max(0);
+    player._arm = (player._arm - stat_armor).max(0);
+    player._maxhp = (player._maxhp - stat_hp).max(0);
+    player._maxmp = (player._maxmp - stat_mp).max(0);
+    player._hit = (player._hit - stat_hit).max(0);
+    player._miss = (player._miss - stat_miss).max(0);
+    player._critical = (player._critical - stat_critical).max(0);
+    player._critical_chance = (player._critical_chance - stat_luck).max(0);
 
     // Mark as unequipped
     if let Ok(mut item) = item_arc.lock() {
@@ -400,10 +450,32 @@ fn unequip_slot(player: &mut Body, slot: EquipmentSlot) -> CommandResult {
                 if let Some(weapon) = weapon_ref.upgrade() {
                     if let Ok(w) = weapon.lock() {
                         let name = w.getString("이름");
-                        let attack = w.getInt("공격력") as i32;
-
-                        player.attpower -= attack;
+                        // 모든 속성 수집
+                        let stat_attack = w.getInt("공격력") as i32;
+                        let stat_defense = w.getInt("방어력") as i32;
+                        let stat_strength = w.getInt("힘") as i32;
+                        let stat_dexterity = w.getInt("민첩") as i32;
+                        let stat_armor = w.getInt("맷집") as i32;
+                        let stat_hp = w.getInt("체력") as i32;
+                        let stat_mp = w.getInt("내공") as i32;
+                        let stat_hit = w.getInt("명중") as i32;
+                        let stat_miss = w.getInt("회피") as i32;
+                        let stat_critical = w.getInt("치명") as i32;
+                        let stat_luck = w.getInt("운") as i32;
                         drop(w);
+
+                        // 모든 속성 제거 (음수 방지)
+                        player.attpower = (player.attpower - stat_attack).max(0);
+                        player.armor = (player.armor - stat_defense).max(0);
+                        player._str = (player._str - stat_strength).max(0);
+                        player._dex = (player._dex - stat_dexterity).max(0);
+                        player._arm = (player._arm - stat_armor).max(0);
+                        player._maxhp = (player._maxhp - stat_hp).max(0);
+                        player._maxmp = (player._maxmp - stat_mp).max(0);
+                        player._hit = (player._hit - stat_hit).max(0);
+                        player._miss = (player._miss - stat_miss).max(0);
+                        player._critical = (player._critical - stat_critical).max(0);
+                        player._critical_chance = (player._critical_chance - stat_luck).max(0);
 
                         // Mark as unequipped
                         if let Some(weapon) = weapon_ref.upgrade() {
@@ -427,19 +499,34 @@ fn unequip_slot(player: &mut Body, slot: EquipmentSlot) -> CommandResult {
             let slot_name = slot.display_name();
             let mut found = false;
             let mut item_name = String::new();
+            let mut stat_attack = 0i32;
             let mut stat_defense = 0i32;
-            let mut stat_armor = 0i32;
+            let mut stat_strength = 0i32;
             let mut stat_dexterity = 0i32;
+            let mut stat_armor = 0i32;
             let mut stat_hp = 0i32;
+            let mut stat_mp = 0i32;
+            let mut stat_hit = 0i32;
+            let mut stat_miss = 0i32;
+            let mut stat_critical = 0i32;
+            let mut stat_luck = 0i32;
 
             for obj in &player.object.objs {
                 if let Ok(item) = obj.lock() {
                     if item.getBool("inUse") && item.getString("타입") == slot_name {
                         item_name = item.getString("이름");
+                        // 모든 속성 수집
+                        stat_attack = item.getInt("공격력") as i32;
                         stat_defense = item.getInt("방어력") as i32;
-                        stat_armor = item.getInt("맷집") as i32;
+                        stat_strength = item.getInt("힘") as i32;
                         stat_dexterity = item.getInt("민첩") as i32;
+                        stat_armor = item.getInt("맷집") as i32;
                         stat_hp = item.getInt("체력") as i32;
+                        stat_mp = item.getInt("내공") as i32;
+                        stat_hit = item.getInt("명중") as i32;
+                        stat_miss = item.getInt("회피") as i32;
+                        stat_critical = item.getInt("치명") as i32;
+                        stat_luck = item.getInt("운") as i32;
                         found = true;
                         break;
                     }
@@ -447,10 +534,18 @@ fn unequip_slot(player: &mut Body, slot: EquipmentSlot) -> CommandResult {
             }
 
             if found {
-                player.armor -= stat_defense;
-                player._arm -= stat_armor;
-                player._dex -= stat_dexterity;
-                player._maxhp -= stat_hp;
+                // 모든 속성 제거 (음수 방지)
+                player.attpower = (player.attpower - stat_attack).max(0);
+                player.armor = (player.armor - stat_defense).max(0);
+                player._str = (player._str - stat_strength).max(0);
+                player._dex = (player._dex - stat_dexterity).max(0);
+                player._arm = (player._arm - stat_armor).max(0);
+                player._maxhp = (player._maxhp - stat_hp).max(0);
+                player._maxmp = (player._maxmp - stat_mp).max(0);
+                player._hit = (player._hit - stat_hit).max(0);
+                player._miss = (player._miss - stat_miss).max(0);
+                player._critical = (player._critical - stat_critical).max(0);
+                player._critical_chance = (player._critical_chance - stat_luck).max(0);
 
                 // Mark as unequipped
                 for obj in &player.object.objs {
