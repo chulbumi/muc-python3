@@ -3,6 +3,7 @@
 //! This module contains structures and functionality for managing
 //! the game world including rooms, zones, mobs, items, and navigation.
 
+pub mod difficulty;
 pub mod event;
 pub mod guild;
 pub mod item;
@@ -12,6 +13,8 @@ pub mod room;
 pub mod skill;
 
 // Re-export commonly used types
+pub use difficulty::{base_zone_name, difficulty_from_zone, DifficultyConfig, DifficultyLevel};
+
 pub use room::{
     format_exits_long, format_room_header, get_room, handle_player_enter, handle_player_exit,
     Direction, EnterMode, Exit, ExitMode, Room, RoomCache, RoomError,
@@ -335,13 +338,41 @@ impl WorldState {
 
     /// Spawn mobs for a room from 맵정보.몹 (called when player enters, on-demand load). room은 "1" 또는 사용자맵 "이름".
     pub fn spawn_mobs_for_room(&mut self, zone: &str, room: &str) {
+        self.spawn_mobs_for_room_with_difficulty(zone, room, 0)
+    }
+
+    /// Spawn mobs for a room with difficulty support.
+    /// Loads room data from base zone and spawns mobs with difficulty-adjusted stats.
+    ///
+    /// # Arguments
+    /// * `zone` - Zone name (can include difficulty suffix)
+    /// * `room` - Room id
+    /// * `difficulty` - Difficulty level (0-7)
+    pub fn spawn_mobs_for_room_with_difficulty(
+        &mut self,
+        zone: &str,
+        room: &str,
+        difficulty: DifficultyLevel,
+    ) {
+        use crate::world::difficulty::{base_zone_name, difficulty_from_zone};
+
+        let effective_difficulty = if difficulty > 0 {
+            difficulty
+        } else {
+            difficulty_from_zone(zone)
+        };
+
+        // Get mob_ids from room (load from base zone)
+        let base_zone = base_zone_name(zone);
         let mob_ids = self
             .room_cache
-            .get_room(zone, room)
+            .get_room(base_zone, room)
             .ok()
             .and_then(|r| r.read().ok().map(|g| g.mob_ids.clone()))
             .unwrap_or_default();
-        self.mob_cache.spawn_mobs_for_room(zone, room, &mob_ids);
+
+        self.mob_cache
+            .spawn_mobs_for_room_with_difficulty(zone, room, &mob_ids, effective_difficulty);
     }
 
     /// Update world state (respawns, etc.)

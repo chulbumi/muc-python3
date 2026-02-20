@@ -1145,6 +1145,43 @@ pub fn create_engine() -> Engine {
     );
 
     // ============================================================
+    // DIFFICULTY ZONE FUNCTIONS
+    // ============================================================
+
+    // Get difficulty level from zone name (e.g., "낙양성1" -> 1, "낙양성" -> 0)
+    engine.register_fn("get_difficulty_from_zone", |zone: &str| -> i64 {
+        use crate::world::difficulty_from_zone;
+        difficulty_from_zone(zone) as i64
+    });
+
+    // Get base zone name (e.g., "낙양성1" -> "낙양성")
+    engine.register_fn("get_base_zone_name", |zone: &str| -> String {
+        use crate::world::base_zone_name;
+        base_zone_name(zone).to_string()
+    });
+
+    // Get minimum level required for a difficulty zone
+    engine.register_fn("get_min_level_for_difficulty", |difficulty: i64| -> i64 {
+        use crate::world::DifficultyConfig;
+        DifficultyConfig::min_level_for_difficulty(difficulty as u8)
+    });
+
+    // Get difficulty config for a level
+    engine.register_fn("get_difficulty_config", |difficulty: i64| -> rhai::Map {
+        use crate::world::DifficultyConfig;
+        let config = DifficultyConfig::get(difficulty as u8);
+        let mut map = rhai::Map::new();
+        map.insert("level_bonus".into(), rhai::Dynamic::from(config.level_bonus));
+        map.insert("hp_multiplier".into(), rhai::Dynamic::from(config.hp_multiplier as i64));
+        map.insert("str_multiplier".into(), rhai::Dynamic::from(config.str_multiplier as i64));
+        map.insert("arm_multiplier".into(), rhai::Dynamic::from(config.arm_multiplier as i64));
+        map.insert("agi_multiplier".into(), rhai::Dynamic::from(config.agi_multiplier as i64));
+        map.insert("exp_multiplier".into(), rhai::Dynamic::from(config.exp_multiplier as i64));
+        map.insert("gold_multiplier".into(), rhai::Dynamic::from(config.gold_multiplier as i64));
+        map
+    });
+
+    // ============================================================
     // STRING MANIPULATION HELPERS
     // ============================================================
 
@@ -5030,28 +5067,14 @@ pub fn create_engine_with_body_and_output(
 
             // 몹 생성
             if let Ok(mut world) = get_world_state().write() {
-                let mob_instance = MobInstance {
-                    mob_key: format!("{}/{}", zone, mob_name),
-                    zone: zone.to_string(),
-                    room: room.to_string(),
-                    name: mob_data.name.clone(),
-                    hp: mob_data.max_hp,
-                    max_hp: mob_data.max_hp,
-                    spawn_time: std::time::SystemTime::now()
-                        .duration_since(std::time::UNIX_EPOCH)
-                        .unwrap_or_default()
-                        .as_secs() as i64,
-                    death_time: 0,
-                    alive: true,
-                    targets: Vec::new(),
-                    act: 0, // ACT_STAND
-                    skills: mob_data
-                        .skills
-                        .iter()
-                        .map(|(name, _, _)| name.clone())
-                        .collect(),
-                    mob_type: mob_data.mob_type,
-                };
+                // Use with_difficulty constructor for proper stat initialization
+                let mob_instance = MobInstance::with_difficulty(
+                    format!("{}:{}", zone, mob_name),
+                    zone.to_string(),
+                    room.to_string(),
+                    &mob_data,
+                    0, // difficulty 0 for spawned mobs
+                );
 
                 world.mob_cache.add_mob_instance(mob_instance);
                 String::new() // 성공 시 빈 문자열 반환

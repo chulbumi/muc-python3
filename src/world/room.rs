@@ -2,11 +2,19 @@
 //!
 //! This module provides room loading and management functionality.
 //! Rooms are loaded from JSON files in the data/map/ directory.
+//!
+//! # Difficulty Zones
+//!
+//! Rooms support difficulty levels (0-7). When a room is requested with a difficulty > 0,
+//! the room data is loaded from the base zone but cached separately per difficulty.
+//! This allows sharing static room data while maintaining separate dynamic state.
 
 use serde_json::Value as JsonValue;
 use std::collections::HashMap;
 use std::path::{Path, PathBuf};
 use std::sync::{Arc, RwLock};
+
+use super::difficulty::{base_zone_name, difficulty_from_zone, DifficultyLevel};
 
 /// Direction types for room exits. 파이썬 objs/room.sortExit·longExitStr와 동일(동서남북위아래 + 대각 4방향).
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
@@ -313,6 +321,65 @@ impl RoomCache {
     pub fn get_room_cached(&self, zone: &str, name: &str) -> Option<Arc<RwLock<Room>>> {
         let key = format!("{}:{}", zone, name);
         self.rooms.get(&key).cloned()
+    }
+
+    /// Get a room with difficulty support
+    ///
+    /// # Arguments
+    /// * `zone` - Zone name (can include difficulty suffix, e.g., "낙양성1")
+    /// * `name` - Room name/number
+    /// * `difficulty` - Difficulty level (0 = base, 1-7 = difficulty zones)
+    ///
+    /// # Returns
+    /// Room with separate cache key for each difficulty level.
+    /// Room data is loaded from the base zone (without difficulty suffix).
+    pub fn get_room_with_difficulty(
+        &mut self,
+        zone: &str,
+        name: &str,
+        difficulty: DifficultyLevel,
+    ) -> Result<Arc<RwLock<Room>>, RoomError> {
+        // Use difficulty from parameter, or extract from zone name if parameter is 0
+        let effective_difficulty = if difficulty > 0 {
+            difficulty
+        } else {
+            difficulty_from_zone(zone)
+        };
+
+        // Get base zone name for loading data
+        let base_zone = base_zone_name(zone);
+
+        // Cache key includes difficulty for separate dynamic state
+        let cache_key = format!("{}:{}:{}", base_zone, name, effective_difficulty);
+
+        // Check cache first
+        if let Some(room) = self.rooms.get(&cache_key) {
+            return Ok(room.clone());
+        }
+
+        // Load room from base zone (without difficulty suffix)
+        let mut room = self.load_room(base_zone, name)?;
+
+        // Set the zone to include difficulty suffix if difficulty > 0
+        if effective_difficulty > 0 {
+            room.zone = format!("{}{}", base_zone, effective_difficulty);
+        }
+
+        let room_arc = Arc::new(RwLock::new(room));
+        self.rooms.insert(cache_key, room_arc.clone());
+        Ok(room_arc)
+    }
+
+    /// Get a room from cache with difficulty (immutable, won't load new rooms)
+    pub fn get_room_cached_with_difficulty(
+        &self,
+        zone: &str,
+        name: &str,
+        difficulty: DifficultyLevel,
+    ) -> Option<Arc<RwLock<Room>>> {
+        let base_zone = base_zone_name(zone);
+        let cache_key = format!("{}:{}:{}", base_zone, name, difficulty);
+        self.rooms.get(&cache_key).cloned()
     }
 
     /// Load a room from JSON file
@@ -624,7 +691,7 @@ pub fn handle_player_enter(room: &mut Room, player_name: &str, mode: EnterMode) 
 
     // List other players in the room
     if !room.players.is_empty() {
-        let others: Vec<&String> = room.players.iter().filter(|p| *p != &player_name).collect();
+        let others: Vec<&String> = room.players.iter().filter(|p| **p != player_name).collect();
         if !others.is_empty() {
             let others_str: Vec<&str> = others.iter().map(|s| s.as_str()).collect();
             messages.push(format!("여기에는: {} 있습니다.", others_str.join(", ")));

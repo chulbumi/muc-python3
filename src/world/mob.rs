@@ -32,6 +32,8 @@ pub struct RawMobData {
     pub inner_power: i64,
     /// Strength (힘)
     pub strength: i64,
+    /// Arm/Defense (맷집 - 방어력)
+    pub arm: i64,
     /// Agility (민첩성)
     pub agility: i64,
     /// Description 1 (short description for room display)
@@ -91,6 +93,7 @@ impl RawMobData {
             max_hp: 100,
             inner_power: 0,
             strength: 10,
+            arm: 10,
             agility: 10,
             desc1: String::new(),
             desc2: Vec::new(),
@@ -153,11 +156,42 @@ pub struct MobInstance {
     pub skills: Vec<String>,
     /// Mob type (for display filtering, e.g., type 7 is hidden)
     pub mob_type: i64,
+    /// Difficulty level (0 = base, 1-7 = difficulty zones)
+    pub difficulty: u8,
+    /// Difficulty-adjusted level
+    pub level: i64,
+    /// Difficulty-adjusted strength
+    pub strength: i64,
+    /// Difficulty-adjusted defense/arm
+    pub arm: i64,
+    /// Difficulty-adjusted agility
+    pub agility: i64,
 }
 
 impl MobInstance {
     /// Create a new mob instance. room은 "1" 또는 사용자맵 "이름" 등.
     pub fn new(mob_key: String, zone: String, room: impl ToString, data: &RawMobData) -> Self {
+        Self::with_difficulty(mob_key, zone, room, data, 0)
+    }
+
+    /// Create a new mob instance with difficulty level.
+    /// Applies difficulty multipliers to stats.
+    ///
+    /// # Arguments
+    /// * `mob_key` - Mob key (zone:filename)
+    /// * `zone` - Current zone
+    /// * `room` - Current room
+    /// * `data` - Raw mob data (template)
+    /// * `difficulty` - Difficulty level (0-7)
+    pub fn with_difficulty(
+        mob_key: String,
+        zone: String,
+        room: impl ToString,
+        data: &RawMobData,
+        difficulty: u8,
+    ) -> Self {
+        use super::difficulty::DifficultyConfig;
+
         // Load skill names from the skills Vec<(String, i64, i64)>
         let skill_names: Vec<String> = data
             .skills
@@ -165,13 +199,23 @@ impl MobInstance {
             .map(|(name, _level, _prob)| name.clone())
             .collect();
 
+        // Get difficulty config
+        let config = DifficultyConfig::get(difficulty);
+
+        // Apply difficulty to stats
+        let level = config.apply_level(data.level);
+        let max_hp = config.apply_hp(data.max_hp);
+        let strength = config.apply_str(data.strength);
+        let arm = config.apply_arm(data.arm);
+        let agility = config.apply_agi(data.agility);
+
         Self {
             mob_key,
             zone,
             room: room.to_string(),
             name: data.name.clone(),
-            hp: data.hp,
-            max_hp: data.max_hp,
+            hp: max_hp, // Start at full health
+            max_hp,
             spawn_time: chrono::Utc::now().timestamp(),
             death_time: 0,
             alive: true,
@@ -179,6 +223,11 @@ impl MobInstance {
             act: 0, // ACT_STAND
             skills: skill_names,
             mob_type: data.mob_type,
+            difficulty,
+            level,
+            strength,
+            arm,
+            agility,
         }
     }
 
@@ -193,7 +242,17 @@ impl MobInstance {
 
     /// Respawn the mob
     pub fn respawn(&mut self, data: &RawMobData) {
-        self.hp = data.max_hp;
+        use super::difficulty::DifficultyConfig;
+
+        // Reapply difficulty to stats
+        let config = DifficultyConfig::get(self.difficulty);
+        self.max_hp = config.apply_hp(data.max_hp);
+        self.hp = self.max_hp;
+        self.level = config.apply_level(data.level);
+        self.strength = config.apply_str(data.strength);
+        self.arm = config.apply_arm(data.arm);
+        self.agility = config.apply_agi(data.agility);
+
         self.alive = true;
         self.death_time = 0;
         self.spawn_time = chrono::Utc::now().timestamp();
@@ -432,6 +491,45 @@ impl MobCache {
         self.mobs.get(&key)
     }
 
+    /// Get mutable mob data by key (zone:filename)
+    pub fn get_mob_mut(&mut self, key: &str) -> Option<&mut RawMobData> {
+        self.mobs.get_mut(key)
+    }
+
+    /// Check if mob has a specific event (Python: target.checkEvent(event_key))
+    pub fn check_mob_event(&self, key: &str, event_key: &str) -> bool {
+        if let Some(mob_data) = self.mobs.get(key) {
+            // Check if event key exists (이벤트 $...)
+            let full_key = format!("이벤트 {}", event_key);
+            mob_data.events.contains_key(&full_key)
+        } else {
+            false
+        }
+    }
+
+    /// Set an event on a mob (Python: target.setEvent(event_key))
+    /// Adds "이벤트 $<event_key>" to the mob's events with empty script
+    pub fn set_mob_event(&mut self, key: &str, event_key: &str) -> bool {
+        if let Some(mob_data) = self.mobs.get_mut(key) {
+            let full_key = format!("이벤트 {}", event_key);
+            // Add event with empty legacy script (just marks it as set)
+            mob_data.events.insert(full_key, EventScript::Legacy(vec![]));
+            true
+        } else {
+            false
+        }
+    }
+
+    /// Delete an event from a mob (Python: target.delEvent(event_key))
+    pub fn del_mob_event(&mut self, key: &str, event_key: &str) -> bool {
+        if let Some(mob_data) = self.mobs.get_mut(key) {
+            let full_key = format!("이벤트 {}", event_key);
+            mob_data.events.remove(&full_key).is_some()
+        } else {
+            false
+        }
+    }
+
     /// Load a mob from JSON file
     pub fn load_mob(&mut self, zone: &str, filename: &str) -> Result<RawMobData, MobError> {
         let key = format!("{}:{}", zone, filename);
@@ -498,13 +596,9 @@ impl MobCache {
         data.hp = mob_info.get("체력").and_then(|v| v.as_i64()).unwrap_or(100);
         data.max_hp = data.hp;
 
-        // Also check for 맷집
-        if let Some(hp) = mob_info.get("맷집").and_then(|v| v.as_i64()) {
-            data.max_hp = hp;
-            if data.hp == 100 {
-                data.hp = hp;
-            }
-        }
+        // Arm/Defense (맷집 - 방어력)
+        // Python: mob.getArm() returns 맷집 value
+        data.arm = mob_info.get("맷집").and_then(|v| v.as_i64()).unwrap_or(10);
 
         // Inner power (내공)
         data.inner_power = mob_info.get("내공").and_then(|v| v.as_i64()).unwrap_or(0);
@@ -767,16 +861,46 @@ impl MobCache {
 
     /// Spawn mobs for a room from map's `몹` list (on-demand load, no zone-wide preload). room은 "1" 또는 사용자맵 "이름".
     pub fn spawn_mobs_for_room(&mut self, zone: &str, room: &str, mob_ids: &[String]) {
-        let room_key = format!("{}:{}", zone, room);
+        self.spawn_mobs_for_room_with_difficulty(zone, room, mob_ids, 0)
+    }
+
+    /// Spawn mobs for a room with difficulty support.
+    /// Mobs are loaded from base zone but instanced with difficulty-adjusted stats.
+    ///
+    /// # Arguments
+    /// * `zone` - Zone name (can include difficulty suffix)
+    /// * `room` - Room id
+    /// * `mob_ids` - List of mob IDs to spawn
+    /// * `difficulty` - Difficulty level (0-7)
+    pub fn spawn_mobs_for_room_with_difficulty(
+        &mut self,
+        zone: &str,
+        room: &str,
+        mob_ids: &[String],
+        difficulty: u8,
+    ) {
+        use super::difficulty::{base_zone_name, difficulty_from_zone};
+
+        // Get effective difficulty from parameter or zone name
+        let effective_difficulty = if difficulty > 0 {
+            difficulty
+        } else {
+            difficulty_from_zone(zone)
+        };
+
+        // Use base zone for loading mob data
+        let base_zone = base_zone_name(zone);
+
+        // Room key includes difficulty for separate instances
+        let room_key = format!("{}:{}:{}", base_zone, room, effective_difficulty);
 
         for mob_id in mob_ids {
-            let key = format!("{}:{}", zone, mob_id);
+            // Mob key uses base zone
+            let key = format!("{}:{}", base_zone, mob_id);
 
-            // Load mob on demand if not cached
-            if !self.mobs.contains_key(&key) {
-                if self.load_mob(zone, mob_id).is_err() {
-                    continue;
-                }
+            // Load mob on demand if not cached (from base zone)
+            if !self.mobs.contains_key(&key) && self.load_mob(base_zone, mob_id).is_err() {
+                continue;
             }
 
             let data = match self.mobs.get(&key) {
@@ -784,6 +908,7 @@ impl MobCache {
                 None => continue,
             };
 
+            // Check if mob already exists in this room+difficulty
             let exists = self
                 .instances
                 .get(&room_key)
@@ -791,10 +916,17 @@ impl MobCache {
                 .unwrap_or(false);
 
             if !exists {
-                let instance = MobInstance::new(key.clone(), zone.to_string(), room, data);
+                // Create instance with difficulty-adjusted stats
+                let instance = MobInstance::with_difficulty(
+                    key.clone(),
+                    zone.to_string(), // Keep original zone name for display
+                    room,
+                    data,
+                    effective_difficulty,
+                );
                 self.instances
                     .entry(room_key.clone())
-                    .or_insert_with(Vec::new)
+                    .or_default()
                     .push(instance);
             }
         }
@@ -802,7 +934,40 @@ impl MobCache {
 
     /// Get active mobs in a room
     pub fn get_mobs_in_room(&self, zone: &str, room: &str) -> Vec<&MobInstance> {
+        // Try to find mobs with difficulty suffix first, then without
+        use super::difficulty::{base_zone_name, difficulty_from_zone};
+
+        let effective_difficulty = difficulty_from_zone(zone);
+        let base_zone = base_zone_name(zone);
+
+        // Try with difficulty in key
+        let room_key_with_diff = format!("{}:{}:{}", base_zone, room, effective_difficulty);
+        if let Some(instances) = self.instances.get(&room_key_with_diff) {
+            let result: Vec<&MobInstance> = instances.iter().filter(|m| m.alive).collect();
+            if !result.is_empty() {
+                return result;
+            }
+        }
+
+        // Fallback to legacy key format for compatibility
         let room_key = format!("{}:{}", zone, room);
+        self.instances
+            .get(&room_key)
+            .map(|instances| instances.iter().filter(|m| m.alive).collect())
+            .unwrap_or_default()
+    }
+
+    /// Get active mobs in a room with specific difficulty
+    pub fn get_mobs_in_room_with_difficulty(
+        &self,
+        zone: &str,
+        room: &str,
+        difficulty: u8,
+    ) -> Vec<&MobInstance> {
+        use super::difficulty::base_zone_name;
+
+        let base_zone = base_zone_name(zone);
+        let room_key = format!("{}:{}:{}", base_zone, room, difficulty);
         self.instances
             .get(&room_key)
             .map(|instances| instances.iter().filter(|m| m.alive).collect())
@@ -891,7 +1056,7 @@ impl MobCache {
         let mut respawn_data: std::collections::HashMap<String, RawMobData> =
             std::collections::HashMap::new();
 
-        for (_room_key, instances) in &self.instances {
+        for instances in self.instances.values() {
             for instance in instances {
                 if !instance.alive && !respawn_data.contains_key(&instance.mob_key) {
                     if let Some(data) = self.get_mob(&instance.mob_key) {
@@ -902,7 +1067,7 @@ impl MobCache {
         }
 
         // Now do the respawns
-        for (_room_key, instances) in &mut self.instances {
+        for instances in self.instances.values_mut() {
             for instance in instances {
                 if !instance.alive {
                     if let Some(data) = respawn_data.get(&instance.mob_key) {
@@ -951,7 +1116,7 @@ impl MobCache {
         let room_key = format!("{}:{}", mob.zone, mob.room);
         self.instances
             .entry(room_key)
-            .or_insert_with(Vec::new)
+            .or_default()
             .push(mob);
     }
 
@@ -1085,9 +1250,7 @@ impl MobReward {
         } else {
             exp -= exp_var;
         }
-        if exp < 1 {
-            exp = 1;
-        }
+        exp = exp.max(1);
         // Cap at MAX_INT equivalent
         if exp > 2_000_000_000 {
             exp = 2_000_000_000;
@@ -1101,9 +1264,7 @@ impl MobReward {
         } else {
             gold -= gold_var;
         }
-        if gold < 1 {
-            gold = 1;
-        }
+        gold = gold.max(1);
         if gold > 2_000_000_000 {
             gold = 2_000_000_000;
         }

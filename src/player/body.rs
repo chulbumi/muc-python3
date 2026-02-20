@@ -225,6 +225,8 @@ pub struct Body {
     pub corpse_duration: u64,
     /// Regeneration duration (seconds before regen)
     pub regen_duration: u64,
+    /// Current difficulty level (0 = base zone, 1-7 = difficulty zones)
+    pub difficulty: u8,
 }
 
 /// 쪽지 한 통. 파이썬 memo[키] = {제목,시간,작성자,내용}.
@@ -281,6 +283,7 @@ impl Body {
             time_of_death: None,
             corpse_duration: 60, // Default 60 seconds
             regen_duration: 300, // Default 5 minutes
+            difficulty: 0,       // Base zone by default
         }
     }
 
@@ -289,6 +292,25 @@ impl Body {
         let mut body = Self::new();
         body.object = object;
         body
+    }
+
+    // ==================== Difficulty Methods ====================
+
+    /// Get current difficulty level
+    pub fn get_difficulty(&self) -> u8 {
+        self.difficulty
+    }
+
+    /// Set difficulty level
+    pub fn set_difficulty(&mut self, difficulty: u8) {
+        self.difficulty = difficulty.min(7); // Cap at 7
+    }
+
+    /// Check if player can enter a difficulty zone
+    pub fn can_enter_difficulty(&self, target_difficulty: u8) -> bool {
+        use crate::world::DifficultyConfig;
+        let min_level = DifficultyConfig::min_level_for_difficulty(target_difficulty);
+        self.object.getInt("레벨") >= min_level
     }
 
     // ==================== Stat Getters ====================
