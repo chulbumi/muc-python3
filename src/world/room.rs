@@ -303,6 +303,15 @@ impl RoomCache {
 
     /// Get a room from cache or load it
     pub fn get_room(&mut self, zone: &str, name: &str) -> Result<Arc<RwLock<Room>>, RoomError> {
+        // Check if zone has a difficulty suffix (e.g., "낙양성1" -> difficulty 1)
+        let difficulty = difficulty_from_zone(zone);
+        let base_zone = base_zone_name(zone);
+
+        // If zone has difficulty suffix, use difficulty-aware loading
+        if difficulty > 0 {
+            return self.get_room_with_difficulty(zone, name, difficulty);
+        }
+
         let key = format!("{}:{}", zone, name);
 
         // Check cache first
@@ -318,7 +327,13 @@ impl RoomCache {
     }
 
     /// Get a room from cache only (immutable, won't load new rooms)
+    /// Automatically handles difficulty zones by detecting suffix in zone name.
     pub fn get_room_cached(&self, zone: &str, name: &str) -> Option<Arc<RwLock<Room>>> {
+        // Check if zone has a difficulty suffix
+        let difficulty = difficulty_from_zone(zone);
+        if difficulty > 0 {
+            return self.get_room_cached_with_difficulty(zone, name, difficulty);
+        }
         let key = format!("{}:{}", zone, name);
         self.rooms.get(&key).cloned()
     }
