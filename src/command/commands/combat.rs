@@ -70,10 +70,8 @@ pub fn check_pvp_allowed(
 
     // Check for combat-forbidden attributes
     for (attr, _value) in room_attrs {
-        if attr == "전투금지" || attr == "사용자전투금지" {
-            if !config.safe_zone_pvp {
-                return PvPResult::SafeZone;
-            }
+        if (attr == "전투금지" || attr == "사용자전투금지") && !config.safe_zone_pvp {
+            return PvPResult::SafeZone;
         }
     }
 
@@ -138,7 +136,7 @@ pub fn format_pvp_message(
         .replace("[공]", attacker_name)
         .replace("[방]", target_name)
         .replace("[대상]", target_name)
-        .replace("[ particle]", &particle);
+        .replace("[ particle]", particle);
 
     let to_target = target_msg
         .replace("[공]", attacker_name)
@@ -469,7 +467,7 @@ mod tests {
         player.set("레벨", 10i64);
         player.set("민첩", 15i64);
         player.set("체력", 80i64);
-        player.set("최대체력", 100i64);
+        player.set("최고체력", 100i64);
         player.act = ActState::Stand;
         player
     }
@@ -490,7 +488,7 @@ mod tests {
     fn test_pvp_config_default() {
         let config = PvPConfig::default();
         assert_eq!(config.max_level_diff, 20);
-        assert_eq!(config.safe_zone_pvp, false);
+        assert!(!config.safe_zone_pvp);
         assert_eq!(config.death_penalty_pct, 5);
         assert_eq!(config.kill_exp_reward, 100);
     }
@@ -508,11 +506,14 @@ mod tests {
         target.set("레벨", 20i64);
         target.set("맷집", 40i64);
         target.set("민첩", 30i64);
-        target.set("최대체력", 200i64);
+        target.set("최고체력", 200i64);
 
         let damage = calculate_pvp_damage(&attacker, &target);
         assert!(damage > 0);
-        assert!(damage <= 50); // Max 25% of 200
+        // Max damage is capped at 25% of target's max HP
+        // get_max_hp() = 최고체력 + get_arm() * 30 = 200 + 40 * 30 = 1400
+        // max_damage = 1400 / 4 = 350
+        assert!(damage <= 350);
     }
 
     #[test]

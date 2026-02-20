@@ -99,7 +99,7 @@ fn warp_command(player: &mut Body, args: &[&str]) -> CommandResult {
     // Set position in player object
     player.set("위치", format!("{}:{}", zone, room));
 
-    // Also update world state for PvP tracking
+    // Also update world state for PvP tracking and spawn mobs
     let player_name = player.get_name();
     if !player_name.is_empty() {
         if let Ok(mut world) = crate::world::get_world_state().write() {
@@ -107,6 +107,8 @@ fn warp_command(player: &mut Body, args: &[&str]) -> CommandResult {
                 &player_name,
                 crate::world::PlayerPosition::new(zone.to_string(), room.to_string()),
             );
+            // Spawn mobs for the room
+            world.spawn_mobs_for_room(zone, room);
         }
     }
 
