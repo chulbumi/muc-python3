@@ -2,7 +2,7 @@
 // Python: cmds/아이템제작.py
 
 fn cmd(ob, line) {
-    let words = split(line, " ");
+    let words = line_args(line);
     if len(words) < 1 {
         send_line(ob, "☞ 사용법: [파일명] 아이템제작");
         return;

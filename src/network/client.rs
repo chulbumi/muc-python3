@@ -35,7 +35,8 @@ use crate::script::{
     clear_precomputed_all_online, clear_precomputed_box_context,
     clear_precomputed_room_view_players, immediate_exit_destinations,
     installed_box_party_snapshots, load_body_from_json, load_user_password_hash,
-    missing_party_person, password_hash, password_verify, save_body_to_json, set_cast_room_players,
+    missing_party_person, password_hash, password_needs_upgrade, password_verify,
+    save_body_to_json, set_cast_room_players, upgrade_user_password_hash,
     set_precomputed_adult_channel, set_precomputed_all_online, set_precomputed_box_context,
     set_precomputed_connected_names, set_precomputed_online_names, set_precomputed_party_context,
     set_precomputed_room_inventories, set_precomputed_room_mugong_targets,
@@ -699,6 +700,11 @@ async fn process_login_state(
                         LoginAction::AskPasswordRetry
                     }
                 } else {
+                    if stored.as_ref().is_some_and(|s| password_needs_upgrade(s)) {
+                        if let Err(error) = upgrade_user_password_hash(&name, input) {
+                            log::error!("failed to upgrade password hash for {}: {}", name, error);
+                        }
+                    }
                     session.attempts = 0;
                     if has_duplicate {
                         session.state = LoginState::AskKickExisting;
@@ -3033,7 +3039,7 @@ async fn handle_pending_change_password(
                     // 일반 저장/로그아웃 흐름에서 파일에 기록한다.
                     body.object.attr.insert(
                         "암호".to_string(),
-                        crate::object::Value::String(input.to_string()),
+                        crate::object::Value::String(password_hash(input)),
                     );
                     (None, text.success, true)
                 }
@@ -3205,12 +3211,9 @@ async fn handle_pending_change_password(
                             {
                                 info.insert(
                                     "설명".to_string(),
-                                    serde_json::Value::Array(
-                                        description
-                                            .split("\r\n")
-                                            .map(|line| serde_json::Value::String(line.to_string()))
-                                            .collect(),
-                                    ),
+                                    // Python write_lines assigns the joined
+                                    // _lineData string directly to Room['설명'].
+                                    serde_json::Value::String(description.clone()),
                                 );
                                 if let Ok(saved) = serde_json::to_string_pretty(&json) {
                                     let _ = std::fs::write(&map_path, saved);
@@ -3604,13 +3607,16 @@ async fn handle_single_game_command(
         cast_command_requested || command_requested("쳐") || command_requested("도망");
     let global_snapshot_needs = global_player_snapshot_needs(&move_cmd, first_command.as_deref());
     let all_online_details_requested = global_snapshot_needs.details;
+    let socket_details_requested = command_requested("소켓");
     let online_names_requested = global_snapshot_needs.online_names;
     let connected_names_requested = global_snapshot_needs.connected_names;
     let tell_players_requested = global_snapshot_needs.tell_players;
     let adult_channel_requested = ["채널입장", "채널퇴장", "채널잡담", "채널누구"]
         .iter()
         .any(|name| command_requested(name));
-    let party_command_requested = ["따라", "무리", "무리제외", "무리말"]
+    // 방파입문 also needs the same scoped room-player vitals/config
+    // snapshot to reproduce target.lpPrompt() without scanning all clients.
+    let party_command_requested = ["따라", "무리", "무리제외", "무리말", "방파입문", "부셔", "소각", "분해", "세트착용", "쉬어"]
         .iter()
         .any(|name| command_requested(name));
     let box_command_requested = ["넣어", "꺼내"].iter().any(|name| command_requested(name));
@@ -3827,6 +3833,13 @@ async fn handle_single_game_command(
                         p.body.get_max_mp(),
                         client_addr == addr,
                     ));
+                }
+                if socket_details_requested {
+                    let mut details = Map::new();
+                    details.insert("이름".into(), Dynamic::from(name.clone()));
+                    details.insert("host".into(), Dynamic::from(client_addr.ip().to_string()));
+                    all_online.push(Dynamic::from(details));
+                    continue;
                 }
                 if client.state != ClientState::Active {
                     continue;
@@ -5700,7 +5713,13 @@ mod tests {
 
         let saved: serde_json::Value =
             serde_json::from_str(&std::fs::read_to_string(&path).unwrap()).unwrap();
-        assert_eq!(saved["맵정보"]["설명"], serde_json::json!(["첫줄", " "]));
+        assert_eq!(saved["맵정보"]["설명"], "첫줄\r\n ");
+        let mut reloaded = crate::world::RoomCache::with_data_dir("data/map");
+        let room_data = reloaded.get_room(&zone, &room).unwrap();
+        assert_eq!(
+            room_data.read().unwrap().description,
+            vec!["첫줄".to_string(), " ".to_string()]
+        );
         assert!(broadcaster
             .clients
             .lock()
@@ -6201,10 +6220,10 @@ mod tests {
         let clients = broadcaster.clients.lock();
         let client = clients.get(&addr).unwrap();
         assert!(client.pending_input.is_none());
-        assert_eq!(
-            client.player.as_ref().unwrap().body.get_string("암호"),
-            "  "
-        );
+        let stored = client.player.as_ref().unwrap().body.get_string("암호");
+        assert!(stored.starts_with("$2"));
+        assert!(password_verify(&stored, "  "));
+        assert!(!password_verify(&stored, " "));
         assert!(
             rx.try_recv().is_err(),
             "Python flow does not append a game prompt"

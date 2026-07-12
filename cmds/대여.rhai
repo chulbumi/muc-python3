@@ -10,7 +10,7 @@ fn cmd(ob, line) {
         send_line(ob, "☞ 이곳에서는 불가능해요.");
         return;
     }
-    let result = book_borrow(ob, to_int(line));
+    let result = book_borrow(ob, python_get_int(line));
     if result == "ok" { send_line(ob, "☞ 대여가 완료 되었습니다."); }
     else if result == "borrowed" { send_line(ob, "☞ 현재 대여중 입니다."); }
     else if result == "persist_failed" { send_line(ob, "☞ 대여 할 수 없습니다."); }

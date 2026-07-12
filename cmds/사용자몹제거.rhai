@@ -11,7 +11,7 @@ fn cmd(ob, line) {
         send_line(ob, "사용법: [사용자 이름] 사용자몹제거");
         return;
     }
-    if remove_room_mob(ob, line) {
+    if remove_room_user_mob(ob, line) {
         send_line(ob, "사용자몹이 제거되었습니다.");
     } else {
         send_line(ob, "그런 몹이 없어요!");

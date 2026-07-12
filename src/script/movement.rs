@@ -747,15 +747,10 @@ pub(crate) fn python_map_explore(body: &Body, excluded: &str) -> Array {
         return Array::new();
     };
     let mut mapq = HashMap::new();
-    mapq.insert(
-        start.clone(),
-        graph
-            .get(&start)
-            .unwrap()
-            .iter()
-            .map(|(d, _)| d.clone())
-            .collect(),
-    );
+    // cmds/맵.py initializes ob.mapQ[current_room] to [], not to the
+    // current room's remaining exits.  Seeding the exits adds a spurious
+    // reverse-direction marker at the end of an otherwise terminal branch.
+    mapq.insert(start.clone(), Vec::new());
     let mut walk = Vec::new();
     // Python's implementation is recursive too, but a malformed/cyclic map
     // must not monopolize the Rust command worker.  This is ample for the

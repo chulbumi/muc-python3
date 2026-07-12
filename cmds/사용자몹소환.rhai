@@ -12,10 +12,13 @@ fn cmd(ob, line) {
         return;
     }
     let result = create_user_mob(ob, line);
-    if result == "" {
-        send_line(ob, "\x1b[1m" + line + "\x1b[0;37m" + han_eul(line) + " 소환하였습니다.");
-    } else {
+    if result == "존재하지않는 사용자입니다."
+        || result == "월드 상태를 가져올 수 없습니다."
+        || result == "위치 정보를 찾을 수 없습니다."
+        || result == "관리자 권한이 없습니다." {
         send_line(ob, result);
+    } else {
+        send_line(ob, "\x1b[1m" + result + "\x1b[0;37m" + han_eul(result) + " 소환하였습니다.");
     }
 }
 

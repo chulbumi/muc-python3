@@ -1,6 +1,13 @@
 // Python cmds/방파입문.py. State transitions live in guild_accept_member;
 // every visible byte remains here.
 
+fn guild_accept_prompt(person) {
+    if !person["show_prompt"] { return ""; }
+    "\r\n\x1b[0;37;40m[ " + person["hp"].to_string() + "/"
+        + person["max_hp"].to_string() + ", " + person["mp"].to_string() + "/"
+        + person["max_mp"].to_string() + " ] "
+}
+
 fn cmd(ob, line) {
     let position = get_string(ob, "직위");
     if position != "방주" && position != "부방주" {
@@ -34,7 +41,16 @@ fn cmd(ob, line) {
     let target_a = "\x1b[1m" + line + "\x1b[0;37m";
     let actor_a = "\x1b[1m" + own_name + "\x1b[0;37m";
     send_line(ob, "당신이 " + target_a + han_eul(line) + " 방파에 입문시켰음을 선포합니다.");
-    send_to_user(line, actor_a + han_iga(own_name) + " 당신을 방파에 입문시켰음을 선포합니다.");
+    let recipient = "\r\n" + actor_a + han_iga(own_name)
+        + " 당신을 방파에 입문시켰음을 선포합니다.\r\n";
+    let context = get_party_context();
+    for player in context["room_players"] {
+        if player["name"] == line {
+            recipient += guild_accept_prompt(player);
+            break;
+        }
+    }
+    send_to_user(line, recipient);
 }
 
 fn main(ob, line) { cmd(ob, line); }

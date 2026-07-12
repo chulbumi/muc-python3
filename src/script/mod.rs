@@ -1661,6 +1661,7 @@ fn destroy_item_result(status: &str, name: String, count: i64) -> rhai::Map {
     result.insert("status".into(), Dynamic::from(status.to_string()));
     result.insert("name".into(), Dynamic::from(name));
     result.insert("count".into(), Dynamic::from(count));
+    result.insert("post".into(), Dynamic::from(String::new()));
     result
 }
 
@@ -1698,6 +1699,7 @@ fn destroy_inventory_for_command(
     let mut matched = 0usize;
     let mut selected: Vec<Arc<Mutex<Object>>> = Vec::new();
     let mut last_name = String::new();
+    let mut last_ansi = String::new();
     for item in &body.object.objs {
         let Ok(object) = item.lock() else { continue };
         let aliases = reaction_names(&object.getString("반응이름"));
@@ -1720,6 +1722,7 @@ fn destroy_inventory_for_command(
             continue;
         }
         last_name = object.getName();
+        last_ansi = object.getString("안시");
         selected.push(item.clone());
         if selected.len() >= count {
             break;
@@ -1741,7 +1744,17 @@ fn destroy_inventory_for_command(
     }
     let removed = selected.len() as i64;
     let _ = save_body_to_json(body, &format!("data/user/{}.json", body.get_name()));
-    destroy_item_result("ok", last_name, removed)
+    let mut result = destroy_item_result("ok", last_name.clone(), removed);
+    let name_a = if last_ansi.is_empty() {
+        format!("\x1b[0;36m{last_name}\x1b[37m")
+    } else {
+        format!("{last_ansi}{last_name}\x1b[0;37m")
+    };
+    result.insert(
+        "post".into(),
+        Dynamic::from(format!("{name_a}{}", han_eul(&last_name))),
+    );
+    result
 }
 
 // ============================================================
@@ -2060,27 +2073,55 @@ fn han_uro(name: &str) -> String {
 }
 
 // ---------------------------------------------------------------------------
-// 비밀번호 SHA-512 해시
+// 비밀번호 bcrypt 해시와 레거시 검증
 // ---------------------------------------------------------------------------
 
-/// 평문을 SHA-512 해시한 16진수 문자열(128자)로 반환. 저장용.
+/// 평문을 bcrypt로 해시한다. bcrypt 문자열에는 알고리즘, cost, salt가 포함된다.
 pub fn password_hash(plain: &str) -> String {
-    use sha2::{Digest, Sha512};
-    let mut h = Sha512::new();
-    h.update(plain.as_bytes());
-    format!("{:x}", h.finalize())
+    bcrypt::hash(plain, bcrypt::DEFAULT_COST).expect("bcrypt password hashing failed")
 }
 
 /// 저장된 값(해시 또는 레거시 평문)과 평문 입력이 일치하는지 검사.
-/// - 저장이 128자 16진수면 SHA-512(plain)==stored
-/// - 아니면 레거시: stored==plain
+/// 신규 bcrypt와 기존 SHA-512/평문 계정을 모두 읽어 점진적으로 이관한다.
 pub fn password_verify(stored: &str, plain: &str) -> bool {
+    if stored.starts_with("$2a$") || stored.starts_with("$2b$") || stored.starts_with("$2y$") {
+        return bcrypt::verify(plain, stored).unwrap_or(false);
+    }
     let is_sha512_hex = stored.len() == 128 && stored.chars().all(|c| c.is_ascii_hexdigit());
     if is_sha512_hex {
-        password_hash(plain) == stored
+        use sha2::{Digest, Sha512};
+        let mut h = Sha512::new();
+        h.update(plain.as_bytes());
+        format!("{:x}", h.finalize()) == stored
     } else {
         stored == plain
     }
+}
+
+pub fn password_needs_upgrade(stored: &str) -> bool {
+    !(stored.starts_with("$2a$") || stored.starts_with("$2b$") || stored.starts_with("$2y$"))
+}
+
+/// 기존 평문/SHA-512 계정이 정상 로그인하면 파일의 암호만 bcrypt로 교체한다.
+pub fn upgrade_user_password_hash(name: &str, plain: &str) -> std::io::Result<()> {
+    let path = Path::new("data/user").join(format!("{}.json", name));
+    let content = std::fs::read_to_string(&path)?;
+    let mut json: serde_json::Value = serde_json::from_str(&content)
+        .map_err(|e| std::io::Error::new(std::io::ErrorKind::InvalidData, e))?;
+    let stored = json
+        .get("사용자오브젝트")
+        .and_then(|v| v.get("암호"))
+        .and_then(|v| v.as_str())
+        .unwrap_or_default();
+    if !password_verify(stored, plain) || !password_needs_upgrade(stored) {
+        return Ok(());
+    }
+    json["사용자오브젝트"]["암호"] = serde_json::Value::String(password_hash(plain));
+    let serialized = serde_json::to_string_pretty(&json)
+        .map_err(|e| std::io::Error::new(std::io::ErrorKind::InvalidData, e))?;
+    let tmp = path.with_extension("json.tmp");
+    std::fs::write(&tmp, serialized)?;
+    std::fs::rename(tmp, path)
 }
 
 /// Rhai가 읽을 수 있는 텍스트 파일을 공개 데이터 디렉토리로 제한한다.
@@ -2514,6 +2555,9 @@ pub(crate) fn load_script_file(path: &str) -> Option<Vec<String>> {
 /// Returns None if file missing or invalid; else Some((object, 아이템정보.이름 or key)).
 /// world::event::$아이템주기에서 사용. pub(crate).
 pub(crate) fn object_from_item_json(key: &str) -> Option<(Arc<Mutex<Object>>, String)> {
+    if crate::world::item::is_runtime_deleted(key) {
+        return None;
+    }
     let path = format!("data/item/{}.json", key);
     let content = std::fs::read_to_string(&path).ok()?;
     let json: serde_json::Value = serde_json::from_str(&content).ok()?;
@@ -2564,6 +2608,9 @@ pub(crate) fn object_from_item_json(key: &str) -> Option<(Arc<Mutex<Object>>, St
 
 /// item JSON에서 이름, 반응이름, 판매가격(또는 값), 무게 반환. 구입 가격 계산용.
 fn get_item_info(key: &str) -> Option<(String, String, i64, i64)> {
+    if crate::world::item::is_runtime_deleted(key) {
+        return None;
+    }
     let path = format!("data/item/{}.json", key);
     let content = std::fs::read_to_string(&path).ok()?;
     let json: serde_json::Value = serde_json::from_str(&content).ok()?;
@@ -2600,6 +2647,9 @@ fn get_item_info(key: &str) -> Option<(String, String, i64, i64)> {
 /// 소비성 아이템 정보 가져오기 (이름, 체력회복, 내공회복)
 /// 종류가 "먹는것"인 경우에만 값을 반환, 아니면 (0, 0, 0)
 fn get_consumable_info(key: &str) -> (String, i64, i64) {
+    if crate::world::item::is_runtime_deleted(key) {
+        return (String::new(), 0, 0);
+    }
     let path = format!("data/item/{}.json", key);
     let content = match std::fs::read_to_string(&path) {
         Ok(c) => c,
@@ -2806,6 +2856,15 @@ fn item_catalog() -> rhai::Array {
             "type".into(),
             Dynamic::from(
                 info.get("종류")
+                    .and_then(|value| value.as_str())
+                    .unwrap_or("")
+                    .to_string(),
+            ),
+        );
+        item.insert(
+            "ansi".into(),
+            Dynamic::from(
+                info.get("안시")
                     .and_then(|value| value.as_str())
                     .unwrap_or("")
                     .to_string(),
@@ -4473,6 +4532,9 @@ pub fn create_engine_with_output(output_collector: Arc<Mutex<Vec<String>>>) -> E
             .map(|x| rhai::Dynamic::from(x.to_string()))
             .collect()
     });
+    engine.register_fn("first_arg", |line: &str| -> String {
+        line.split_whitespace().next().unwrap_or("").to_string()
+    });
 
     // require_arg: 기능만. line이 비었으면 false. usage/오류 메시지는 Rhai에서 send_line.
     engine.register_fn("require_arg", |_ob: &mut rhai::Map, line: &str| -> bool {
@@ -4658,7 +4720,7 @@ pub fn create_engine_with_output(output_collector: Arc<Mutex<Vec<String>>>) -> E
             Ok(g) => g,
             Err(_) => return rhai::Array::new(),
         };
-        let numeric_type = search_term.trim().parse::<i64>().unwrap_or(0);
+        let numeric_type = python_get_int(search_term);
         let mut arr = rhai::Array::new();
         for (key, data) in world.mob_cache.ordered_mob_templates() {
             let matched = if numeric_type != 0 {
@@ -4692,16 +4754,10 @@ pub fn create_engine_with_output(output_collector: Arc<Mutex<Vec<String>>>) -> E
     });
 
     // get_help(topic): data/config/help.json의 {"도움말": { "도움말": [...], ... }}에서
-    // topic이 비거나 "도움말"이면 ["도움말"]["도움말"], 아니면 ["도움말"][topic] 배열을 "\r\n"으로 이어서 반환. 없으면 "".
+    // topic이 "도움말"이면 ["도움말"]["도움말"], 아니면 ["도움말"][topic] 배열을 "\r\n"으로 이어서 반환. 없으면 "".
+    // Python HELP[line]은 비어 있지 않은 line을 trim하지 않는다.
     engine.register_fn("get_help", |topic: &str| -> String {
-        let key = {
-            let t = topic.trim();
-            if t.is_empty() || t == "도움말" {
-                "도움말"
-            } else {
-                t
-            }
-        };
+        let key = topic;
         let content = match std::fs::read_to_string("data/config/help.json") {
             Ok(c) => c,
             Err(_) => return String::new(),
@@ -5172,19 +5228,39 @@ pub fn create_engine_with_body_and_output(
         let Some((zone, room)) = current_body_position(body) else {
             return result("no_merchant", rhai::Array::new(), 0);
         };
-        let merchant = get_world_state()
+        let merchant_buys = get_world_state()
             .read()
             .ok()
-            .map(|world| {
-                world.get_mobs_in_room(&zone, &room).into_iter().any(|mob| {
-                    world
-                        .get_mob_data(&mob.mob_key)
-                        .map(|data| data.buy_percent > 0 || !data.items_for_sale.is_empty())
-                        .unwrap_or(false)
+            .and_then(|world| {
+                let ordered = world.get_room_object_order(&zone, &room);
+                let all = world.mob_cache.get_all_mobs_in_room(&zone, &room);
+                let mut ids = ordered
+                    .into_iter()
+                    .filter_map(|object| match object {
+                        crate::world::RoomObjectRef::Mob(id) => Some(id),
+                        _ => None,
+                    })
+                    .collect::<Vec<_>>();
+                if ids.is_empty() {
+                    ids.extend(all.iter().map(|mob| mob.instance_id));
+                }
+                ids.into_iter().find_map(|id| {
+                    let mob = all.iter().find(|mob| mob.instance_id == id)?;
+                    let data = world.get_mob_data(&mob.mob_key)?;
+                    let nonempty = |key: &str| {
+                        data.attributes.get(key).is_some_and(|value| match value {
+                            serde_json::Value::String(value) => !value.is_empty(),
+                            serde_json::Value::Array(value) => !value.is_empty(),
+                            serde_json::Value::Null => false,
+                            _ => true,
+                        })
+                    };
+                    (nonempty("물건판매") || nonempty("물건구입"))
+                        .then(|| nonempty("물건구입"))
                 })
             })
             .unwrap_or(false);
-        if !merchant {
+        if !merchant_buys {
             return result("no_merchant", rhai::Array::new(), 0);
         }
         let mut shards = 0i64;
@@ -5215,7 +5291,10 @@ pub fn create_engine_with_body_and_output(
             }
             shards += 1;
             remove.push(arc.clone());
-            names.push(Dynamic::from(item.getName()));
+            let mut shown = rhai::Map::new();
+            shown.insert("이름".into(), Dynamic::from(item.getName()));
+            shown.insert("안시".into(), Dynamic::from(item.getString("안시")));
+            names.push(Dynamic::from(shown));
         }
         for arc in remove {
             body.object.remove(&arc);
@@ -5334,27 +5413,33 @@ pub fn create_engine_with_body_and_output(
         "get_saved_set_items",
         move |_ob: &mut rhai::Map, set_name: &str| -> rhai::Array {
             let body = unsafe { &*body_ptr_saved_set };
-            body.object
-                .objs
-                .iter()
-                .filter_map(|arc| {
-                    let item = arc.lock().ok()?;
+            let mut orders = HashMap::<String, i64>::new();
+            let mut result = rhai::Array::new();
+            for arc in &body.object.objs {
+                if let Ok(item) = arc.lock() {
                     if item.getBool("inUse") {
-                        return None;
+                        continue;
                     }
+                    let name = item.getName();
+                    let order = orders.entry(name.clone()).or_insert(0);
+                    *order += 1;
                     let kind = item.getString("종류");
                     if kind != "방어구" && kind != "무기" {
-                        return None;
+                        continue;
                     }
                     if !reaction_names(&item.getString("반응이름"))
                         .iter()
                         .any(|name| name == set_name)
                     {
-                        return None;
+                        continue;
                     }
-                    Some(Dynamic::from(item.getName()))
-                })
-                .collect()
+                    let mut saved = rhai::Map::new();
+                    saved.insert("name".into(), Dynamic::from(name));
+                    saved.insert("order".into(), Dynamic::from(*order));
+                    result.push(Dynamic::from(saved));
+                }
+            }
+            result
         },
     );
 
@@ -7045,7 +7130,15 @@ pub fn create_engine_with_body_and_output(
             world
                 .room_cache
                 .get_room_cached(zone, room)
-                .and_then(|room| room.read().ok().map(|room| room.exits.contains_key(name)))
+                .and_then(|room| {
+                    room.read().ok().map(|room| {
+                        if let Some(raw) = name.strip_suffix('$') {
+                            room.exits.get(raw).is_some_and(|exit| exit.hidden)
+                        } else {
+                            room.exits.contains_key(name)
+                        }
+                    })
+                })
                 .unwrap_or(false)
         },
     );
@@ -7058,7 +7151,15 @@ pub fn create_engine_with_body_and_output(
             world
                 .room_cache
                 .get_room_cached(zone, &room.to_string())
-                .and_then(|room| room.read().ok().map(|room| room.exits.contains_key(name)))
+                .and_then(|room| {
+                    room.read().ok().map(|room| {
+                        if let Some(raw) = name.strip_suffix('$') {
+                            room.exits.get(raw).is_some_and(|exit| exit.hidden)
+                        } else {
+                            room.exits.contains_key(name)
+                        }
+                    })
+                })
                 .unwrap_or(false)
         },
     );
@@ -7871,16 +7972,21 @@ pub fn create_engine_with_body_and_output(
             };
             let destination = format!("{zone}:{room}");
             let status = rewrite_room_exits(&zone, &room, |exits| {
+                let mut updated = false;
                 for exit in exits {
                     let Some(raw_name) = exit.split_whitespace().next() else {
                         continue;
                     };
                     if raw_name.trim_end_matches('$') == name {
                         *exit = format!("{raw_name} {destination}");
-                        return "updated".to_string();
+                        updated = true;
                     }
                 }
-                "missing".to_string()
+                if updated {
+                    "updated".to_string()
+                } else {
+                    "missing".to_string()
+                }
             });
             if status == "missing" {
                 return false;
@@ -8129,7 +8235,7 @@ pub fn create_engine_with_body_and_output(
         },
     );
 
-    // password_hash(plain): 평문을 SHA-512 해시 16진수 문자열로. 암호 저장/암호변경용.
+    // password_hash(plain): 평문을 bcrypt 문자열로 해시. 암호 저장/암호변경용.
     engine.register_fn("password_hash", |plain: &str| -> String {
         password_hash(plain)
     });
@@ -8788,6 +8894,7 @@ pub fn create_engine_with_body_and_output(
             let mut result = rhai::Map::new();
             result.insert("name".into(), Dynamic::from(String::new()));
             result.insert("script".into(), Dynamic::from(String::new()));
+            result.insert("post".into(), Dynamic::from(String::new()));
             let Some(item) = body.object.findObjInven(name, order.max(1) as usize) else {
                 return Dynamic::from(result);
             };
@@ -8795,7 +8902,16 @@ pub fn create_engine_with_body_and_output(
                 return Dynamic::from(result);
             };
             let item_name = item.getName();
+            let name_a = if item.getString("안시").is_empty() {
+                format!("\x1b[0;36m{item_name}\x1b[37m")
+            } else {
+                format!("{}{item_name}\x1b[0;37m", item.getString("안시"))
+            };
             result.insert("name".into(), Dynamic::from(item_name.clone()));
+            result.insert(
+                "post".into(),
+                Dynamic::from(format!("{name_a}{}", han_eul(&item_name))),
+            );
             result.insert(
                 "script".into(),
                 Dynamic::from(
@@ -9027,8 +9143,8 @@ pub fn create_engine_with_body_and_output(
                         let max_mp = body.get_max_mp();
                         let cur_hp = body.get_hp();
                         let cur_mp = body.get_mp();
-                        let new_hp = (cur_hp + hp).min(max_hp).max(0);
-                        let new_mp = (cur_mp + mp).min(max_mp).max(0);
+                        let new_hp = (cur_hp + hp).min(max_hp);
+                        let new_mp = (cur_mp + mp).min(max_mp);
                         body.set("체력", new_hp);
                         body.set("내공", new_mp);
 
@@ -9092,8 +9208,8 @@ pub fn create_engine_with_body_and_output(
             let max_mp = body.get_max_mp();
             let cur_hp = body.get_hp();
             let cur_mp = body.get_mp();
-            let new_hp = (cur_hp + hp).min(max_hp).max(0);
-            let new_mp = (cur_mp + mp).min(max_mp).max(0);
+            let new_hp = (cur_hp + hp).min(max_hp);
+            let new_mp = (cur_mp + mp).min(max_mp);
             body.set("체력", new_hp);
             body.set("내공", new_mp);
             if max_mp_gain != 0 {
@@ -9881,7 +9997,7 @@ pub fn create_engine_with_body_and_output(
         get_world_state()
             .write()
             .ok()
-            .map(|mut world| world.mob_cache.remove_mob(index))
+            .map(|mut world| world.mob_cache.remove_mob_definition(index))
             .unwrap_or(false)
     });
 
@@ -13443,11 +13559,27 @@ pub fn create_engine_with_body_and_output(
                 return "존재하지않는 사용자입니다.".to_string();
             }
             summoned.act = crate::player::ActState::Stand;
+            let loaded_name = summoned.get_name();
             get_world_state().write().unwrap().add_summoned_user(
                 summoned,
                 crate::world::PlayerPosition::new(zone, room),
             );
-            String::new()
+            loaded_name
+        },
+    );
+
+    let body_ptr_remove_room_user = body_ptr;
+    engine.register_fn(
+        "remove_room_user_mob",
+        move |_admin_ob: &mut rhai::Map, query: &str| -> bool {
+            let body = unsafe { &*body_ptr_remove_room_user };
+            let Some((zone, room)) = current_body_position(body) else {
+                return false;
+            };
+            get_world_state()
+                .write()
+                .map(|mut world| world.remove_summoned_user_in_room(&zone, &room, query))
+                .unwrap_or(false)
         },
     );
 
@@ -13491,30 +13623,42 @@ pub fn create_engine_with_body_and_output(
             let Some((zone, room)) = current_body_position(body) else {
                 return false;
             };
-            let key = get_world_state().read().ok().and_then(|world| {
-                world
-                    .get_mobs_in_room(&zone, &room)
-                    .into_iter()
-                    .find_map(|mob| {
-                        let data = world.get_mob_data(&mob.mob_key)?;
-                        if data.desc1 == mob_name
-                            || data.name == mob_name
-                            || data.reaction_names.iter().any(|alias| alias == mob_name)
-                        {
-                            Some(mob.mob_key.clone())
-                        } else {
-                            None
-                        }
-                    })
-            });
-            let Some(key) = key else {
+            let Ok(mut world) = get_world_state().write() else {
                 return false;
             };
-            get_world_state()
-                .write()
-                .ok()
-                .map(|mut world| world.mob_cache.remove_instance(&zone, &room, &key))
-                .unwrap_or(false)
+            let metadata = world
+                .mob_cache
+                .get_all_mobs_in_room(&zone, &room)
+                .into_iter()
+                .filter_map(|mob| {
+                    world
+                        .mob_cache
+                        .get_mob(&mob.mob_key)
+                        .cloned()
+                        .map(|data| (mob.mob_key.clone(), data))
+                })
+                .collect::<HashMap<_, _>>();
+            let selected = {
+                let mobs = world
+                    .mob_cache
+                    .get_all_mobs_in_room(&zone, &room)
+                    .into_iter()
+                    .cloned()
+                    .collect::<Vec<_>>();
+                admin_combat::python_room_mob_index(&mobs, &metadata, mob_name)
+            };
+            let Some(index) = selected else { return false };
+            let Some(mobs) = world
+                .mob_cache
+                .get_all_mobs_in_room_mut(&zone, &room)
+            else {
+                return false;
+            };
+            if index >= mobs.len() {
+                return false;
+            }
+            mobs.remove(index);
+            true
         },
     );
 
@@ -16329,6 +16473,36 @@ mod tests {
     }
 
     #[test]
+    fn eating_poison_preserves_python_negative_vitals_without_lower_clamp() {
+        let storage = ScriptStorage::default();
+        let mut body = Body::new();
+        body.set("이름", "독음식검사");
+        body.set("체력", 5_i64);
+        body.set("내공", 3_i64);
+        body.set("최고체력", 100_i64);
+        body.set("최고내공", 100_i64);
+        let mut poison = Object::new();
+        poison.set("이름", "독버섯");
+        poison.set("반응이름", "독버섯");
+        poison.set("종류", "먹는것");
+        poison.set("체력", -10_i64);
+        poison.set("내공", -8_i64);
+        poison.set("사용스크립", "$아이템$을 먹고 고통스러워합니다.");
+        body.object.objs.push(Arc::new(Mutex::new(poison)));
+
+        let eaten = storage
+            .execute("먹어", &mut body, "독버섯", None, None, None)
+            .unwrap();
+        assert_eq!(body.get_int("체력"), -5);
+        assert_eq!(body.get_int("내공"), -5);
+        assert!(body.object.objs.is_empty());
+        assert_eq!(
+            eaten.0,
+            vec!["당신이 \x1b[0;36m독버섯\x1b[37m을 먹고 고통스러워합니다."]
+        );
+    }
+
+    #[test]
     fn eating_requeues_any_healing_food_when_python_continuous_aliases_are_enabled() {
         use crate::command::handler::CommandResult;
 
@@ -16341,7 +16515,7 @@ mod tests {
             ALIAS_LIST_ATTR,
             encode_alias_entries(&[
                 ("체력약".into(), "다른약".into()),
-                ("체력".into(), "9000".into()),
+                ("체력".into(), "9000이하".into()),
                 ("연속복용".into(), "켜기".into()),
             ]),
         );
@@ -16975,7 +17149,7 @@ mod tests {
             Some(CommandResult::OutputAndSendToUsers(_, ref sends))
                 if sends == &vec![(
                     target.clone(),
-                    format!("\x1b[1m{leader}\x1b[0;37m{} 당신을 방파에 입문시켰음을 선포합니다.", han_iga(&leader))
+                    format!("\r\n\x1b[1m{leader}\x1b[0;37m{} 당신을 방파에 입문시켰음을 선포합니다.\r\n", han_iga(&leader))
                 )]
         ));
         assert_eq!(body.get_string("입문신청자"), "다른신청자");
@@ -17690,7 +17864,7 @@ mod tests {
             vec!["\x1b[33m검색산적대장\x1b[37m(첫몹) : ['11', '20-23']"]
         );
         let by_type = storage
-            .execute("몹찾기", &mut body, "6", None, None, None)
+            .execute("몹찾기", &mut body, "6종", None, None, None)
             .unwrap();
         assert_eq!(
             by_type.0,
@@ -17721,7 +17895,7 @@ mod tests {
             found
                 .0
                 .iter()
-                .any(|line| line == "\x1b[33m간장검\x1b[37m : 77"),
+                .any(|line| line == "\x1b[0;36m간장검\x1b[37m : 77"),
             "{:?}",
             found.0
         );
@@ -17736,6 +17910,18 @@ mod tests {
             )
             .unwrap();
         assert_eq!(missing.0, vec!["☞ 찾으시는 아이템이 없습니다."]);
+
+        let armor = storage
+            .execute("방어구찾기", &mut body, "무시됨", None, None, None)
+            .unwrap();
+        assert!(
+            armor
+                .0
+                .iter()
+                .any(|line| line == "\x1b[0;36m비단머리띠\x1b[37m : 423"),
+            "{:?}",
+            armor.0
+        );
     }
 
     #[test]
@@ -17901,14 +18087,25 @@ mod tests {
 
     #[test]
     fn force_command_queues_real_target_reentry_and_has_no_admin_success_text() {
-        use crate::world::{get_world_state, PlayerPosition};
+        use crate::world::{get_world_state, MobInstance, PlayerPosition, RawMobData};
 
         let suffix = std::process::id();
         let admin = format!("명령관리자-{suffix}");
         let target = format!("명령대상-{suffix}");
         let zone = format!("명령시험존-{suffix}");
+        let mob_key = format!("{zone}:명령몹");
+        let mut mob_data = RawMobData::new();
+        mob_data.name = "명령몹".into();
+        mob_data.zone = zone.clone();
         {
             let mut world = get_world_state().write().unwrap();
+            world.mob_cache.insert_mob_data(mob_key.clone(), mob_data.clone());
+            world.mob_cache.add_mob_instance(MobInstance::new(
+                mob_key.clone(),
+                zone.clone(),
+                "1",
+                &mob_data,
+            ));
             world.set_player_position(
                 &admin,
                 PlayerPosition::new(zone.clone(), "1".into()),
@@ -17929,9 +18126,305 @@ mod tests {
             take_force_command_request(&mut body),
             vec![(target.clone(), "점수".to_string())]
         );
+        let mob_target = ScriptStorage::default()
+            .execute("명령", &mut body, "명령몹 점수", None, None, None)
+            .unwrap();
+        assert_eq!(
+            mob_target.0,
+            vec!["☞ 그런 대상이 없어요. *^_^*"],
+            "Python rejects non-player room objects with the generic target message"
+        );
+        assert!(take_force_command_request(&mut body).is_empty());
         let mut world = get_world_state().write().unwrap();
         world.remove_player_position(&admin);
         world.remove_player_position(&target);
+        world.mob_cache.remove_mob(&mob_key);
+    }
+
+    #[test]
+    fn admin_command_list_matches_python_level_filter_and_three_column_layout() {
+        let storage = ScriptStorage::default();
+        let mut body = Body::new();
+        body.set("이름", "명령어리스트검사");
+        body.set("관리자등급", 999_i64);
+        let denied = storage
+            .execute("명령어리스트", &mut body, "", None, None, None)
+            .unwrap();
+        assert_eq!(denied.0, vec!["☞ 무슨 말인지 모르겠어요. *^_^*"]);
+
+        body.set("관리자등급", 1000_i64);
+        let listed = storage
+            .execute("명령어리스트", &mut body, "", None, None, None)
+            .unwrap();
+        assert_eq!(listed.0.len(), 1);
+        let output = &listed.0[0];
+        let mut expected_names = Vec::new();
+        for entry in std::fs::read_dir("cmds").unwrap().flatten() {
+            let path = entry.path();
+            if path.extension().and_then(|value| value.to_str()) != Some("py") {
+                continue;
+            }
+            let source = std::fs::read_to_string(&path).unwrap();
+            if source.lines().any(|line| {
+                let code = line.trim_start();
+                !code.starts_with('#')
+                    && (code.contains("level = 1000") || code.contains("level=1000"))
+            }) {
+                expected_names.push(path.file_stem().unwrap().to_string_lossy().to_string());
+            }
+        }
+        let mut expected = String::new();
+        for (index, name) in expected_names.iter().enumerate() {
+            expected.push_str(&format!("{:>20}", name));
+            if (index + 1) % 3 == 0 {
+                expected.push_str("\r\n");
+            }
+        }
+        assert_eq!(output, &expected);
+    }
+
+    #[test]
+    fn mob_delete_removes_python_template_but_keeps_existing_room_clone() {
+        use crate::world::{get_world_state, MobInstance, RawMobData};
+
+        let suffix = std::process::id();
+        let zone = format!("몹삭제존-{suffix}");
+        let key = format!("{zone}:삭제시험몹");
+        let mut data = RawMobData::new();
+        data.name = "삭제시험몹".into();
+        data.zone = zone.clone();
+        {
+            let mut world = get_world_state().write().unwrap();
+            world.mob_cache.insert_mob_data(key.clone(), data.clone());
+            world.mob_cache.add_mob_instance(MobInstance::new(
+                key.clone(),
+                zone.clone(),
+                "1",
+                &data,
+            ));
+        }
+        let storage = ScriptStorage::default();
+        let mut body = Body::new();
+        body.set("관리자등급", 2000_i64);
+        let usage = storage
+            .execute("몹삭제", &mut body, "", None, None, None)
+            .unwrap();
+        assert_eq!(usage.0, vec!["사용법: [몹 인덱스] 몹삭제"]);
+        let deleted = storage
+            .execute("몹삭제", &mut body, &key, None, None, None)
+            .unwrap();
+        assert_eq!(deleted.0, vec!["몹이 삭제되었습니다."]);
+        {
+            let world = get_world_state().read().unwrap();
+            assert!(world.mob_cache.get_mob(&key).is_none());
+            assert_eq!(
+                world.mob_cache.get_all_mobs_in_room(&zone, "1").len(),
+                1,
+                "Python room clone survives deletion from Mob.Mobs"
+            );
+        }
+        let missing = storage
+            .execute("몹삭제", &mut body, &key, None, None, None)
+            .unwrap();
+        assert_eq!(missing.0, vec!["존재하지않는 몹입니다."]);
+
+        get_world_state()
+            .write()
+            .unwrap()
+            .mob_cache
+            .remove_mob(&key);
+    }
+
+    #[test]
+    fn mob_editor_uses_python_whitespace_split_and_usage_before_permission() {
+        use crate::command::handler::{CommandResult, PendingInput};
+
+        let storage = ScriptStorage::default();
+        let mut body = Body::new();
+        body.set("관리자등급", 0_i64);
+        let whitespace = storage
+            .execute("몹제작", &mut body, "   ", None, None, None)
+            .unwrap();
+        assert_eq!(whitespace.0, vec!["☞ 사용법: [존이름] [몹이름] 몹제작"]);
+
+        let denied = storage
+            .execute("몹제작", &mut body, "시험존 시험몹", None, None, None)
+            .unwrap();
+        assert_eq!(denied.0, vec!["☞ 무슨 말인지 모르겠어요. *^_^"]);
+
+        body.set("관리자등급", 1000_i64);
+        let editor = storage
+            .execute(
+                "몹제작",
+                &mut body,
+                "  시험존\t시험몹   뒤의값은무시 ",
+                None,
+                None,
+                None,
+            )
+            .unwrap();
+        assert!(matches!(
+            editor.1,
+            Some(CommandResult::RequestInput {
+                ref prompt,
+                state: PendingInput::FileEdit { ref relative_path, ref lines }
+            }) if prompt == "작성을 마치시려면 '.' 를 입력하세요.\r\n:"
+                && relative_path == "mob/시험존/시험몹.json"
+                && lines.is_empty()
+        ));
+    }
+
+    #[test]
+    fn room_editor_and_delete_match_python_whitespace_path_and_memory_only_removal() {
+        use crate::command::handler::{CommandResult, PendingInput};
+        use crate::world::get_world_state;
+
+        let storage = ScriptStorage::default();
+        let mut body = Body::new();
+        body.set("관리자등급", 0_i64);
+        let usage = storage
+            .execute("방제작", &mut body, "\t  ", None, None, None)
+            .unwrap();
+        assert_eq!(usage.0, vec!["☞ 사용법: [존이름] [방이름] 방제작"]);
+        let denied = storage
+            .execute("방제작", &mut body, "시험존 시험방", None, None, None)
+            .unwrap();
+        assert_eq!(denied.0, vec!["☞ 무슨 말인지 모르겠어요. *^_^"]);
+
+        body.set("관리자등급", 1000_i64);
+        let editor = storage
+            .execute(
+                "방제작",
+                &mut body,
+                "  시험존\t시험방   추가단어 ",
+                None,
+                None,
+                None,
+            )
+            .unwrap();
+        assert!(matches!(
+            editor.1,
+            Some(CommandResult::RequestInput {
+                ref prompt,
+                state: PendingInput::FileEdit { ref relative_path, ref lines }
+            }) if prompt == "작성을 마치시려면 '.' 를 입력하세요.\r\n:"
+                && relative_path == "map/시험존/시험방.json"
+                && lines.is_empty()
+        ));
+
+        let suffix = std::process::id();
+        let zone = format!("방제거존-{suffix}가");
+        let dir = std::path::Path::new("data/map").join(&zone);
+        let path = dir.join("1.json");
+        std::fs::create_dir_all(&dir).unwrap();
+        std::fs::write(
+            &path,
+            format!(r#"{{"맵정보":{{"이름":"삭제방","존이름":"{zone}","설명":[],"출구":[]}}}}"#),
+        )
+        .unwrap();
+        get_world_state()
+            .write()
+            .unwrap()
+            .room_cache
+            .get_room(&zone, "1")
+            .unwrap();
+        body.set("관리자등급", 2000_i64);
+        let deleted = storage
+            .execute(
+                "방제거",
+                &mut body,
+                &format!("{zone}:1"),
+                None,
+                None,
+                None,
+            )
+            .unwrap();
+        assert_eq!(deleted.0, vec!["방이 제거되었습니다."]);
+        assert!(path.exists(), "Python deletes only Room.Zones entry");
+        assert!(get_world_state()
+            .read()
+            .unwrap()
+            .room_cache
+            .get_room_cached(&zone, "1")
+            .is_none());
+        let repeated = storage
+            .execute(
+                "방제거",
+                &mut body,
+                &format!("{zone}:1"),
+                None,
+                None,
+                None,
+            )
+            .unwrap();
+        assert_eq!(repeated.0, vec!["존재하지않는 방입니다."]);
+        std::fs::remove_dir_all(dir).unwrap();
+    }
+
+    #[test]
+    fn item_editor_and_delete_match_python_runtime_registry_semantics() {
+        use crate::command::handler::{CommandResult, PendingInput};
+
+        let storage = ScriptStorage::default();
+        let mut body = Body::new();
+        body.set("관리자등급", 0_i64);
+        let usage = storage
+            .execute("아이템제작", &mut body, "   ", None, None, None)
+            .unwrap();
+        assert_eq!(usage.0, vec!["☞ 사용법: [파일명] 아이템제작"]);
+        let denied = storage
+            .execute("아이템제작", &mut body, "시험파일", None, None, None)
+            .unwrap();
+        assert_eq!(denied.0, vec!["☞ 무슨 말인지 모르겠어요. *^_^"]);
+        body.set("관리자등급", 1000_i64);
+        let editor = storage
+            .execute(
+                "아이템제작",
+                &mut body,
+                "  시험파일\t뒤의값은무시 ",
+                None,
+                None,
+                None,
+            )
+            .unwrap();
+        assert!(matches!(
+            editor.1,
+            Some(CommandResult::RequestInput {
+                ref prompt,
+                state: PendingInput::FileEdit { ref relative_path, ref lines }
+            }) if prompt == "작성을 마치시려면 '.' 를 입력하세요.\r\n:"
+                && relative_path == "item/시험파일.json" && lines.is_empty()
+        ));
+
+        let key = format!("아이템삭제회귀-{}", std::process::id());
+        let path = std::path::Path::new("data/item").join(format!("{key}.json"));
+        std::fs::write(
+            &path,
+            serde_json::json!({"아이템정보":{"이름":"삭제시험품","종류":"기타","반응이름":["삭제시험품"]}})
+                .to_string(),
+        )
+        .unwrap();
+        get_world_state()
+            .write()
+            .unwrap()
+            .item_cache
+            .load_item(&key)
+            .unwrap();
+        let existing = object_from_item_json(&key).unwrap().0;
+        body.object.objs.push(existing.clone());
+        body.set("관리자등급", 2000_i64);
+        let deleted = storage
+            .execute("아이템삭제", &mut body, &key, None, None, None)
+            .unwrap();
+        assert_eq!(deleted.0, vec!["아이템이 삭제되었습니다."]);
+        assert!(path.exists());
+        assert_eq!(existing.lock().unwrap().getName(), "삭제시험품");
+        let cannot_recreate = storage
+            .execute("생성", &mut body, &key, None, None, None)
+            .unwrap();
+        assert_eq!(cannot_recreate.0, vec!["* 생성 실패!!!"]);
+        assert_eq!(body.object.objs.len(), 1);
+        std::fs::remove_file(path).unwrap();
     }
 
     #[test]
@@ -18251,10 +18744,11 @@ mod tests {
         let suffix = std::process::id();
         let admin_name = format!("사용자몹관리자-{suffix}");
         let summoned_name = format!("사용자몹대상-{suffix}");
+        let loaded_name = format!("사용자몹실제이름-{suffix}");
         let zone = format!("사용자몹시험존-{suffix}");
         let user_path = format!("data/user/{summoned_name}.json");
         let mut saved = Body::new();
-        saved.set("이름", summoned_name.as_str());
+        saved.set("이름", loaded_name.as_str());
         saved.set("설명1", "소환된 사용자가 서 있습니다.");
         assert!(save_body_to_json(&mut saved, &user_path));
         get_world_state().write().unwrap().set_player_position(
@@ -18283,14 +18777,14 @@ mod tests {
         assert_eq!(
             summoned.0,
             vec![format!(
-                "\x1b[1m{summoned_name}\x1b[0;37m{} 소환하였습니다.",
-                han_eul(&summoned_name)
+                "\x1b[1m{loaded_name}\x1b[0;37m{} 소환하였습니다.",
+                han_eul(&loaded_name)
             )]
         );
         {
             let world = get_world_state().read().unwrap();
             assert_eq!(world.summoned_users().len(), 1);
-            assert_eq!(world.summoned_users()[0].body.get_name(), summoned_name);
+            assert_eq!(world.summoned_users()[0].body.get_name(), loaded_name);
             assert!(matches!(
                 world.get_room_object_order(&zone, "1").first(),
                 Some(RoomObjectRef::SummonedUser(_))
@@ -18300,11 +18794,42 @@ mod tests {
             .execute("사용자몹제거1", &mut admin, "없는사용자", None, None, None)
             .unwrap();
         assert!(absent.0.is_empty(), "Python silently returns when no name matches");
+        let removed_in_room = storage
+            .execute(
+                "사용자몹제거",
+                &mut admin,
+                &loaded_name,
+                None,
+                None,
+                None,
+            )
+            .unwrap();
+        assert_eq!(removed_in_room.0, vec!["사용자몹이 제거되었습니다."]);
+        assert!(get_world_state().read().unwrap().summoned_users().is_empty());
+
+        storage
+            .execute(
+                "사용자몹소환",
+                &mut admin,
+                &summoned_name,
+                None,
+                None,
+                None,
+            )
+            .unwrap();
+        get_world_state().write().unwrap().set_player_position(
+            &admin_name,
+            PlayerPosition::new(zone.clone(), "2".into()),
+        );
+        let wrong_room = storage
+            .execute("사용자몹제거", &mut admin, &loaded_name, None, None, None)
+            .unwrap();
+        assert_eq!(wrong_room.0, vec!["그런 몹이 없어요!"]);
         let removed = storage
             .execute(
                 "사용자몹제거1",
                 &mut admin,
-                &summoned_name,
+                &loaded_name,
                 None,
                 None,
                 None,
@@ -18542,6 +19067,97 @@ mod tests {
             .execute("맵", &mut body, "동", None, None, None)
             .unwrap();
         assert_eq!(invisible.0, vec!["\r\n* 아무것도 보이지 않습니다.\r\n"]);
+    }
+
+    #[test]
+    fn map_command_uses_python_first_word_and_raw_hidden_exit_membership() {
+        use crate::world::{get_world_state, PlayerPosition};
+
+        let suffix = std::process::id();
+        let player = format!("맵탐색검사-{suffix}");
+        // A trailing ASCII digit denotes Python difficulty-zone suffixing, so
+        // keep the synthetic base-zone name non-numeric.
+        let zone = format!("맵탐색존-{suffix}가");
+        let dir = std::path::Path::new("data/map").join(&zone);
+        std::fs::create_dir_all(&dir).unwrap();
+        let write_room = |number: &str, exits: Vec<&str>| {
+            std::fs::write(
+                dir.join(format!("{number}.json")),
+                serde_json::to_string_pretty(&serde_json::json!({
+                    "맵정보": {
+                        "이름": format!("지도방{number}"),
+                        "존이름": zone,
+                        "설명": ["지도 탐색 시험"],
+                        "출구": exits,
+                        "몹": []
+                    }
+                }))
+                .unwrap(),
+            )
+            .unwrap();
+        };
+        write_room("1", vec!["동 2", "서 3", "비밀$ 4"]);
+        write_room("2", vec!["서 1"]);
+        write_room("3", vec!["동 1"]);
+        write_room("4", vec!["서 1"]);
+
+        {
+            let mut world = get_world_state().write().unwrap();
+            for room in ["1", "2", "3", "4"] {
+                world.room_cache.get_room(&zone, room).unwrap();
+            }
+            let loaded = world.room_cache.get_room_cached(&zone, "1").unwrap();
+            assert!(loaded.read().unwrap().exits.contains_key("동"));
+            world.set_player_position(
+                &player,
+                PlayerPosition::new(zone.clone(), "1".to_string()),
+            );
+        }
+        let storage = ScriptStorage::default();
+        let mut body = Body::new();
+        body.set("이름", player.as_str());
+        body.set("관리자등급", 2000_i64);
+
+        let direct = python_map_explore(&body, "동")
+            .into_iter()
+            .map(|value| value.into_string().unwrap())
+            .collect::<Vec<_>>();
+        assert_eq!(direct, vec!["서"]);
+
+        let single_word = storage
+            .execute("맵", &mut body, "동", None, None, None)
+            .unwrap();
+        assert_eq!(single_word.0, vec!["서;"]);
+
+        let extra_words = storage
+            .execute("맵", &mut body, "  동   뒤의말은무시  ", None, None, None)
+            .unwrap();
+        assert_eq!(extra_words.0, vec!["서;"]);
+
+        let hidden_raw_name = storage
+            .execute("맵", &mut body, "비밀$", None, None, None)
+            .unwrap();
+        assert_ne!(hidden_raw_name.0, vec!["☞ 그 방향으로는 갈수가 없어요!."]);
+
+        let mut world = get_world_state().write().unwrap();
+        world.remove_player_position(&player);
+        drop(world);
+        std::fs::remove_dir_all(dir).unwrap();
+    }
+
+    #[test]
+    fn ansi_command_is_python_hp_bar_not_a_persisted_toggle() {
+        let storage = ScriptStorage::default();
+        let mut body = Body::new();
+        body.set("이름", "안시막대검사");
+        body.set("체력", 45_i64);
+        body.set("최고체력", 100_i64);
+        body.set("안시", 77_i64);
+        let shown = storage
+            .execute("안시", &mut body, "꺼기", None, None, None)
+            .unwrap();
+        assert_eq!(shown.0, vec!["\x1b[32m━━━━\x1b[37m━━━━━━"]);
+        assert_eq!(body.get_int("안시"), 77, "Python ignores the command argument");
     }
 
     #[test]
@@ -18913,7 +19529,7 @@ mod tests {
                     && sends == &vec![(
                         same_room_name.to_string(),
                         format!(
-                            "\x1b[1m{}\x1b[0;37m{} 자세를 편안히 하며 운기조식에 들어갑니다.",
+                            "\r\n\x1b[1m{}\x1b[0;37m{} 자세를 편안히 하며 운기조식에 들어갑니다.\r\n",
                             self_name,
                             han_iga(self_name)
                         )
@@ -19206,6 +19822,34 @@ mod tests {
         assert!(output.iter().any(|line| line.contains("금전 :                   33 개")));
         assert!(!output.iter().any(|line| line.contains("금전 :                   99 개")));
         assert_eq!(output.last().unwrap(), "─────────────────");
+    }
+
+    #[test]
+    fn socket_command_sorts_host_name_pairs_and_right_aligns_python_host_column() {
+        let entries = [
+            ("10.0.0.2", "나"),
+            ("10.0.0.1", "다"),
+            ("10.0.0.1", "가"),
+        ]
+        .into_iter()
+        .map(|(host, name)| {
+            let mut map = rhai::Map::new();
+            map.insert("host".into(), Dynamic::from(host.to_string()));
+            map.insert("이름".into(), Dynamic::from(name.to_string()));
+            Dynamic::from(map)
+        })
+        .collect();
+        set_precomputed_all_online(entries);
+        let mut body = Body::new();
+        body.set("관리자등급", 1000_i64);
+        let output = ScriptStorage::default()
+            .execute("소켓", &mut body, "", None, None, None)
+            .unwrap();
+        clear_precomputed_all_online();
+        assert_eq!(
+            output.0,
+            vec!["\r\n        10.0.0.1 : 가, 다\r\n        10.0.0.2 : 나"]
+        );
     }
 
     #[test]
@@ -19665,6 +20309,38 @@ mod tests {
     }
 
     #[test]
+    fn set_wear_equips_the_tagged_same_name_instance_by_python_inventory_order() {
+        let mut body = Body::new();
+        body.set("이름", "세트순번검사");
+        body.set("세트기억", "SET-선택");
+        let mut ordinary = Object::new();
+        ordinary.set("이름", "쌍검");
+        ordinary.set("반응이름", "쌍검");
+        ordinary.set("종류", "무기");
+        ordinary.set("계층", "무기");
+        let ordinary = Arc::new(Mutex::new(ordinary));
+        let mut tagged = Object::new();
+        tagged.set("이름", "쌍검");
+        tagged.set("반응이름", "쌍검\r\nSET-선택");
+        tagged.set("종류", "무기");
+        tagged.set("계층", "무기");
+        tagged.set("안시", "\x1b[35m");
+        let tagged = Arc::new(Mutex::new(tagged));
+        body.object.objs.push(ordinary.clone());
+        body.object.objs.push(tagged.clone());
+
+        let worn = ScriptStorage::default()
+            .execute("세트착용", &mut body, "", None, None, None)
+            .unwrap();
+        assert!(!ordinary.lock().unwrap().getBool("inUse"));
+        assert!(tagged.lock().unwrap().getBool("inUse"));
+        assert_eq!(
+            worn.0,
+            vec!["당신이 \x1b[36m\x1b[35m쌍검\x1b[0;37m을\x1b[37m 착용합니다."]
+        );
+    }
+
+    #[test]
     fn burn_and_break_use_actual_item_text_notify_room_and_persist_removal() {
         let _oneitem_guard = ONEITEM_COMMAND_TEST_LOCK.lock().unwrap();
         use crate::command::handler::CommandResult;
@@ -19696,15 +20372,18 @@ mod tests {
         let (output, special) = storage
             .execute("소각", &mut body, "과일", None, None, None)
             .unwrap();
-        assert_eq!(output, vec!["당신이 \x1b[36m설삼과를\x1b[37m 소각해버립니다."]);
+        assert_eq!(
+            output,
+            vec!["당신이 \x1b[36m\x1b[0;36m설삼과\x1b[37m를\x1b[37m 소각해버립니다."]
+        );
         assert!(body.object.objs.is_empty());
         assert!(matches!(
             special,
             Some(CommandResult::OutputAndSendToUsers(ref own, ref sends))
-                if own == "당신이 \x1b[36m설삼과를\x1b[37m 소각해버립니다."
+                if own == "당신이 \x1b[36m\x1b[0;36m설삼과\x1b[37m를\x1b[37m 소각해버립니다."
                     && sends == &vec![(
                         observer.clone(),
-                        format!("\x1b[1m{self_name}\x1b[0;37m{} \x1b[36m설삼과를\x1b[37m 소각해버립니다.", han_iga(&self_name))
+                        format!("\r\n\x1b[1m{self_name}\x1b[0;37m{} \x1b[36m\x1b[0;36m설삼과\x1b[37m를\x1b[37m 소각해버립니다.\r\n", han_iga(&self_name))
                     )]
         ));
 
@@ -19735,6 +20414,20 @@ mod tests {
         );
         assert!(body.object.objs.is_empty());
 
+        let mut colored = Object::new();
+        colored.set("이름", "옥");
+        colored.set("반응이름", "옥");
+        colored.set("안시", "\x1b[35m");
+        body.object.append(Arc::new(Mutex::new(colored)));
+        let single = storage
+            .execute("부셔", &mut body, "옥 1개", None, None, None)
+            .unwrap();
+        assert_eq!(
+            single.0,
+            vec!["당신이 \x1b[36m\x1b[35m옥\x1b[0;37m을\x1b[37m 부셔버립니다."]
+        );
+        assert!(body.object.objs.is_empty());
+
         let unique_index = format!("파괴단일-{suffix}");
         let mut unique = Object::new();
         unique.set("이름", "단일옥패");
@@ -19752,6 +20445,71 @@ mod tests {
         let mut world = get_world_state().write().unwrap();
         world.remove_player_position(&self_name);
         world.remove_player_position(&observer);
+    }
+
+    #[test]
+    fn decompose_uses_first_python_merchant_and_preserves_item_ansi_and_shard_bug() {
+        use crate::world::{get_world_state, MobInstance, PlayerPosition, RawMobData, RoomObjectRef};
+
+        let suffix = std::process::id();
+        let player = format!("분해회귀-{suffix}");
+        let zone = format!("분해회귀존-{suffix}");
+        let seller_key = format!("{zone}:판매만");
+        let buyer_key = format!("{zone}:매입상인");
+        let mut seller_data = RawMobData::new();
+        seller_data
+            .attributes
+            .insert("물건판매".into(), serde_json::json!(["물품"]));
+        let seller = MobInstance::new(seller_key.clone(), zone.clone(), "1", &seller_data);
+        let seller_id = seller.instance_id;
+        let mut buyer_data = RawMobData::new();
+        buyer_data
+            .attributes
+            .insert("물건구입".into(), serde_json::json!("고물상 40"));
+        let buyer = MobInstance::new(buyer_key.clone(), zone.clone(), "1", &buyer_data);
+        let buyer_id = buyer.instance_id;
+        {
+            let mut world = get_world_state().write().unwrap();
+            world.mob_cache.insert_mob_data(seller_key.clone(), seller_data);
+            world.mob_cache.insert_mob_data(buyer_key.clone(), buyer_data);
+            world.mob_cache.add_mob_instance(seller);
+            world.mob_cache.add_mob_instance(buyer);
+            world.record_test_room_object(&zone, "1", RoomObjectRef::Mob(buyer_id));
+            world.record_test_room_object(&zone, "1", RoomObjectRef::Mob(seller_id));
+            world.set_player_position(&player, PlayerPosition::new(zone.clone(), "1".into()));
+        }
+        let mut body = Body::new();
+        body.set("이름", player.as_str());
+        let mut weapon = Object::new();
+        weapon.set("이름", "자빛검");
+        weapon.set("종류", "무기");
+        weapon.set("안시", "\x1b[35m");
+        weapon.set_option(&HashMap::from([
+            ("힘".into(), 1), ("맷집".into(), 1),
+            ("민첩성".into(), 1), ("운".into(), 1),
+        ]));
+        body.object.objs.push(Arc::new(Mutex::new(weapon)));
+        let storage = ScriptStorage::default();
+        let blocked = storage.execute("분해", &mut body, "모두", None, None, None).unwrap();
+        assert_eq!(blocked.0, vec!["☞ 상인이 없어요. ^_^"]);
+        assert_eq!(body.object.objs.len(), 1);
+
+        {
+            let mut world = get_world_state().write().unwrap();
+            world.mob_cache.remove_instance(&zone, "1", &seller_key);
+            world.record_test_room_object(&zone, "1", RoomObjectRef::Mob(buyer_id));
+        }
+        let decomposed = storage.execute("분해", &mut body, "모두", None, None, None).unwrap();
+        assert_eq!(decomposed.0, vec!["당신이 \x1b[35m자빛검\x1b[0;37m 1개를 분해합니다."]);
+        assert_eq!(body.object.objs.iter().filter(|item| {
+            item.lock().is_ok_and(|item| item.getName() == "강철조각")
+        }).count(), 2);
+
+        let mut world = get_world_state().write().unwrap();
+        world.remove_player_position(&player);
+        world.mob_cache.remove_mob(&seller_key);
+        world.mob_cache.remove_mob(&buyer_key);
+        let _ = std::fs::remove_file(format!("data/user/{player}.json"));
     }
 
     #[test]
@@ -20342,7 +21100,10 @@ mod tests {
         let invalid = storage.execute("대여", &mut body, "0", None, None, None).unwrap();
         assert_eq!(invalid.0, vec!["☞ 대여 가능한 물품이 없습니다."]);
 
-        let borrowed = storage.execute("대여", &mut body, "1", None, None, None).unwrap();
+        // Python getInt accepts a decimal prefix even when text follows it.
+        let borrowed = storage
+            .execute("대여", &mut body, "1번", None, None, None)
+            .unwrap();
         assert_eq!(borrowed.0, vec!["☞ 대여가 완료 되었습니다."]);
         assert_eq!(body.object.objs.len(), 1);
         assert_eq!(
@@ -20391,6 +21152,21 @@ mod tests {
         assert!(list.0[0].starts_with("2\t등록시험철퇴\t\t("));
         assert!(list.0[0].ends_with(")\t대여가능"));
 
+        let whitespace_does_not_match = storage
+            .execute(
+                "대여목록",
+                &mut body,
+                " 등록시험철퇴 ",
+                None,
+                None,
+                None,
+            )
+            .unwrap();
+        assert_eq!(
+            whitespace_does_not_match.0,
+            vec!["☞ 대여가능한 품목이 없어요."]
+        );
+
         let canceled = storage
             .execute("등록취소", &mut body, "2", None, None, None)
             .unwrap();
@@ -20420,6 +21196,29 @@ mod tests {
             .write()
             .unwrap()
             .remove_player_position(&player_name);
+    }
+
+    #[test]
+    fn say_includes_speaker_in_python_send_room_output_and_converts_ansi() {
+        let storage = ScriptStorage::default();
+        let mut body = Body::new();
+        body.set("이름", "철수");
+
+        let empty = storage
+            .execute("말", &mut body, "", None, None, None)
+            .unwrap();
+        assert_eq!(empty.0, vec!["\r\nSay What???"]);
+
+        let spoken = storage
+            .execute("말", &mut body, "{빨}안녕", None, None, None)
+            .unwrap();
+        assert_eq!(
+            spoken.0,
+            vec![
+                "당신이 말합니다 : '\x1b[31m안녕\x1b[0;40;37m'",
+                "\x1b[33m철수\x1b[37m가 말합니다 : '\x1b[31m안녕\x1b[0;40;37m'"
+            ]
+        );
     }
 
     #[test]
@@ -20483,7 +21282,7 @@ mod tests {
             serde_json::to_string_pretty(&serde_json::json!({
                 "맵정보": {
                     "이름": "출구 시험방", "존이름": zone,
-                    "설명": ["시험방"], "출구": ["동 2", "비밀$ 3"], "몹": []
+                    "설명": ["시험방"], "출구": ["동 2", "비밀$ 3", "비밀 4"], "몹": []
                 }
             }))
             .unwrap(),
@@ -20526,6 +21325,16 @@ mod tests {
             .unwrap()
             .iter()
             .any(|v| v == &format!("비밀$ {zone}:1")));
+        assert!(json["맵정보"]["출구"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .any(|v| v == &format!("비밀 {zone}:1")));
+
+        let spaced_wander = storage
+            .execute("맴돌이", &mut body, " 비밀 ", None, None, None)
+            .unwrap();
+        assert_eq!(spaced_wander.0, vec!["☞ 그런 출구가 없습니다."]);
 
         let usage = storage
             .execute("출구제거", &mut body, "", None, None, None)

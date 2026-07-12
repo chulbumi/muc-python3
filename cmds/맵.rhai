@@ -3,7 +3,7 @@
 
 fn cmd(ob, line) {
     if !require_admin(ob, 2000) { send_line(ob, "☞ 무슨 말인지 모르겠어요. *^_^*"); return; }
-    let requested = trim(line);
+    let requested = first_arg(line);
     if requested == "" {
         send_line(ob, "☞ 사용법: [제외할방향] 맵");
         return;

@@ -1608,7 +1608,7 @@ mod tests {
         assert!(matches!(
             result,
             CommandResult::OutputAndSendToUsers(ref output, ref sends)
-                if output == own
+                if output == &format!("{own}\r\n{room}")
                     && sends == &vec![(same_room_name.to_string(), room)]
         ));
 
@@ -1654,6 +1654,14 @@ mod tests {
         let result = (command.handler)(&mut body, &["__없는_항목__"]);
         assert!(matches!(
             result,
+            CommandResult::Output(ref output) if output == "☞ 해당 도움말이 없어요. ^^"
+        ));
+
+        // Python does not trim a non-empty HELP key.  This must not resolve
+        // to the ordinary "도움말" topic.
+        let spaced = (command.handler)(&mut body, &[" 도움말 "]);
+        assert!(matches!(
+            spaced,
             CommandResult::Output(ref output) if output == "☞ 해당 도움말이 없어요. ^^"
         ));
     }

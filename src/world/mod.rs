@@ -314,6 +314,48 @@ impl WorldState {
         true
     }
 
+    /// Safe counterpart of Python `사용자몹제거`: select only a socket-less
+    /// summoned Player in the administrator's current room.  The legacy code
+    /// could also detach a real connected player from channel.players, which
+    /// is an unsafe Python bug and is intentionally not reproduced.
+    pub fn remove_summoned_user_in_room(
+        &mut self,
+        zone: &str,
+        room: &str,
+        query: &str,
+    ) -> bool {
+        let first = query.split_whitespace().next().unwrap_or("");
+        if first.is_empty() || first.chars().all(|ch| ch.is_ascii_digit()) {
+            return false;
+        }
+        let room_key = format!("{zone}:{room}");
+        let ordered = self
+            .room_object_order
+            .get(&room_key)
+            .cloned()
+            .unwrap_or_default();
+        let selected = ordered.into_iter().find_map(|object| {
+            let RoomObjectRef::SummonedUser(id) = object else {
+                return None;
+            };
+            let user = self.summoned_users.iter().find(|user| user.id == id)?;
+            let name = user.body.get_name();
+            let aliases = user.body.get_string("반응이름");
+            (name == first
+                || aliases.split(['\r', '\n']).any(|alias| {
+                    !alias.is_empty() && (alias == first || alias.starts_with(first))
+                }))
+            .then_some(id)
+        });
+        let Some(id) = selected else { return false };
+        let Some(index) = self.summoned_users.iter().position(|user| user.id == id) else {
+            return false;
+        };
+        self.summoned_users.remove(index);
+        self.remove_room_object(zone, room, &RoomObjectRef::SummonedUser(id));
+        true
+    }
+
     /// 방 속성 (값설정 "방"용). key = "zone:room". room은 "1" 또는 사용자맵 "이름" 등.
     pub fn get_room_attrs_mut(&mut self, zone: &str, room: &str) -> &mut HashMap<String, String> {
         let key = format!("{}:{}", zone, room);

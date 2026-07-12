@@ -1,17 +1,14 @@
-// 안시.rhai - 안시(ANSI) on/off 설정
-// Python: cmds/안시.py
+// Python `cmds/안시.py`: current HP as a ten-cell ANSI bar.
 
 fn cmd(ob, line) {
-    let v = if is_empty(line) { 1 } else { max(0, min(1, to_int(trim(line)))) };
-    set_value(ob, "안시", v);
-    body_save(ob);
-    if v == 1 {
-        send_line(ob, "☞ 안시가 켜졌습니다.");
-    } else {
-        send_line(ob, "☞ 안시가 꺼졌습니다.");
-    }
+    let hp = get_int(ob, "체력");
+    let max_hp = get_int(ob, "최고체력");
+    // Normal Player bodies always have positive max HP, matching Python's
+    // direct integer division contract.
+    let green = 10 * hp / max_hp;
+    send_line(ob,
+        "\x1b[32m" + repeat("━", green)
+        + "\x1b[37m" + repeat("━", 10 - green));
 }
 
-fn main(ob, line) {
-    cmd(ob, line);
-}
+fn main(ob, line) { cmd(ob, line); }

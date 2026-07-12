@@ -61,6 +61,8 @@ fn cmd(ob, line) {
     let name = get_body_string(ob, "이름");
     let room_msg = "\x1b[33m" + name + "\x1b[37m" + han_iga(name)
         + " 말합니다 : '" + m1 + "'";
+    // Python Room.sendRoom includes the speaking player as well.
+    send_line(ob, room_msg);
     for player_name in get_room_players(ob) {
         if player_name != name {
             send_to_user(player_name, room_msg);

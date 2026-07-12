@@ -536,15 +536,14 @@ impl RoomCache {
             .unwrap_or_default();
 
         // Parse 설명 (description)
-        let description = map_info
-            .get("설명")
-            .and_then(|v| v.as_array())
-            .map(|arr| {
-                arr.iter()
-                    .filter_map(|v| v.as_str().map(|s| s.to_string()))
-                    .collect()
-            })
-            .unwrap_or_default();
+        let description = match map_info.get("설명") {
+            Some(JsonValue::Array(lines)) => lines
+                .iter()
+                .filter_map(|line| line.as_str().map(str::to_string))
+                .collect(),
+            Some(JsonValue::String(text)) => text.split("\r\n").map(str::to_string).collect(),
+            _ => Vec::new(),
+        };
 
         // Parse 이름 (name)
         let name = map_info

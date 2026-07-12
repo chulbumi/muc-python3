@@ -23,26 +23,26 @@ fn cmd(ob, line) {
     let gain = result["max_mp_gain"];
     if gain > 0 {
         send_line(ob, "\r\n\x1b[1m당신의 단전에 회오리가 몰아치며 몸주위에 하얀 진기가 맴돕니다.\x1b[0;37m (\x1b[1;36m+" + gain.to_string() + "\x1b[0;37m)");
-        room_message += "\r\n\r\n\x1b[1m\x1b[1m" + own_name + "\x1b[0;37m의 단전에 회오리가 몰아치며 몸주위에 하얀 진기가 맴돕니다.\x1b[0;37m (\x1b[1;36m+" + gain.to_string() + "\x1b[0;37m)";
+        room_message += "\r\n\r\n\x1b[1m\x1b[33m" + own_name + "\x1b[37m의 단전에 회오리가 몰아치며 몸주위에 하얀 진기가 맴돕니다.\x1b[0;37m (\x1b[1;36m+" + gain.to_string() + "\x1b[0;37m)";
     } else if gain < 0 {
         send_line(ob, "\r\n\x1b[1m당신의 단전에 심한 요동이 일어나며 고통이 몰려오기 시작합니다.\x1b[0;37m (\x1b[1;31m" + gain.to_string() + "\x1b[0;37m)");
-        room_message += "\r\n\r\n\x1b[1m\x1b[1m" + own_name + "\x1b[0;37m의 단전에 심한 요동이 일어나며 고통이 몰려오기 시작합니다.\x1b[0;37m (\x1b[1;31m" + gain.to_string() + "\x1b[0;37m)";
+        room_message += "\r\n\r\n\x1b[1m\x1b[33m" + own_name + "\x1b[37m의 단전에 심한 요동이 일어나며 고통이 몰려오기 시작합니다.\x1b[0;37m (\x1b[1;31m" + gain.to_string() + "\x1b[0;37m)";
     }
     for player in get_cast_room_players(ob) {
-        if player["name"] != own_name && !player["reject_fight"] { send_to_user(player["name"], room_message); }
+        if player["name"] != own_name && !player["reject_fight"] { send_to_user(player["name"], "\r\n" + room_message); }
     }
 
     if alias_has(ob, "내공약") && alias_get(ob, "내공약") == result["name"]
-        && alias_has(ob, "내공약하한") && result["remaining"] <= to_int(alias_get(ob, "내공약하한")) {
+        && alias_has(ob, "내공약하한") && result["remaining"] <= python_get_int(alias_get(ob, "내공약하한")) {
         send_line(ob, "☞ 알림 : 내공약 개수 부족");
     }
     if alias_has(ob, "체력약") && alias_get(ob, "체력약") == result["name"]
-        && alias_has(ob, "체력약하한") && result["remaining"] <= to_int(alias_get(ob, "체력약하한")) {
+        && alias_has(ob, "체력약하한") && result["remaining"] <= python_get_int(alias_get(ob, "체력약하한")) {
         send_line(ob, "☞ 알림 : 체력약 개수 부족");
     }
     if alias_has(ob, "체력약") && alias_has(ob, "체력") && alias_has(ob, "연속복용")
         && alias_get(ob, "연속복용") == "켜기"
-        && result["hp"] != 0 && get_int(ob, "체력") < to_int(alias_get(ob, "체력")) {
+        && result["hp"] != 0 && get_int(ob, "체력") < python_get_int(alias_get(ob, "체력")) {
         queue_self_command(ob, line + " 먹어");
     }
 }

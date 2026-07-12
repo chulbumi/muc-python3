@@ -25,13 +25,8 @@ fn cmd(ob, line) {
         if player == target_name { found_player = true; break; }
     }
     if !found_player {
-        // 몹인지 확인
-        let mob_info = find_mob_in_room(ob, target_name);
-        if mob_info == () {
-            send_line(ob, "☞ 그런 대상이 없어요. *^_^*");
-            return;
-        }
-        send_line(ob, "☞ 몹에게는 명령을 내릴 수 없습니다.");
+        // Python folds missing, item, box and mob targets into one message.
+        send_line(ob, "☞ 그런 대상이 없어요. *^_^*");
         return;
     }
 

@@ -10,7 +10,12 @@ fn cmd(ob, line) {
     let found = 0;
     for item in get_item_catalog() {
         if item["type"] == "방어구" {
-            send_line(ob, item["name"] + " : " + item["index"]);
+            let name_a = if item["ansi"] != "" {
+                item["ansi"] + item["name"] + "\x1b[0;37m"
+            } else {
+                "\x1b[0;36m" + item["name"] + "\x1b[37m"
+            };
+            send_line(ob, name_a + " : " + item["index"]);
             found += 1;
         }
     }

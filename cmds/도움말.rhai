@@ -2,7 +2,8 @@
 // Python: cmds/도움말.py
 
 fn cmd(ob, line) {
-    let topic = if is_empty(line) { "도움말" } else { trim(line) };
+    // Python indexes HELP with the non-empty argument exactly as received.
+    let topic = if is_empty(line) { "도움말" } else { line };
     let txt = get_help(topic);
     if length(txt) > 0 {
         send_line(ob, txt);

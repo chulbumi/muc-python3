@@ -13,23 +13,10 @@ fn cmd(ob, line) {
         return;
     }
 
-    // 현재 방에서 몹 찾기
-    let mob = find_mob_in_room(ob, line);
-    if mob.is_unit() {
-        send_line(ob, "그런 몹이 없어요!");
-        return;
-    }
-
-    // 몹 데이터 확인
-    let mob_name = get_string(mob, "이름");
-    if mob_name == "" {
-        send_line(ob, "그런 몹이 없어요!");
-        return;
-    }
-
-    // 몹 제거 시도
     if remove_room_mob(ob, line) {
         send_line(ob, "몹이 제거되었습니다.");
+    } else {
+        send_line(ob, "그런 몹이 없어요!");
     }
 }
 

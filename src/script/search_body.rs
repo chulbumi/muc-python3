@@ -84,6 +84,7 @@ fn search_mob(body: &mut Body, query: &str) -> Map {
         return result;
     }
 
+    let had_items = !mob.inventory.is_empty();
     let mut taken = Array::new();
     while let Some(item) = mob.inventory.first().cloned() {
         let Ok(item_guard) = item.lock() else { break };
@@ -108,8 +109,12 @@ fn search_mob(body: &mut Body, query: &str) -> Map {
         item_data.insert("안시".into(), Dynamic::from(item_ansi));
         taken.push(Dynamic::from(item_data));
     }
-    // Python updates timeofregen even when capacity prevents the first item.
-    mob.time_of_regen = chrono::Utc::now().timestamp();
+    // Python returns before this assignment for an already-empty corpse, but
+    // does refresh it when an item existed and capacity rejected the first
+    // transfer.
+    if had_items {
+        mob.time_of_regen = chrono::Utc::now().timestamp();
+    }
     result.insert("items".into(), Dynamic::from(taken));
     result
 }
@@ -205,5 +210,97 @@ mod tests {
         let mut world = get_world_state().write().unwrap();
         world.remove_player_position(&player_name);
         world.mob_cache.remove_mob(&mob_key);
+    }
+
+    #[test]
+    fn empty_corpse_does_not_refresh_regen_but_rejected_loot_does() {
+        let suffix = std::process::id();
+        let player_name = format!("뒤져빈시체-{suffix}");
+        let zone = format!("뒤져빈시체존-{suffix}");
+        let empty_key = format!("{zone}:빈시체");
+        let blocked_key = format!("{zone}:무거운시체");
+
+        let mut empty_data = RawMobData::new();
+        empty_data.name = "빈시체몹".into();
+        empty_data.zone = zone.clone();
+        let mut empty = MobInstance::new(empty_key.clone(), zone.clone(), "1", &empty_data);
+        empty.act = 2;
+        empty.time_of_regen = 123;
+
+        let mut blocked_data = RawMobData::new();
+        blocked_data.name = "무거운시체몹".into();
+        blocked_data.zone = zone.clone();
+        let mut blocked =
+            MobInstance::new(blocked_key.clone(), zone.clone(), "2", &blocked_data);
+        blocked.act = 2;
+        let mut stone = Object::new();
+        stone.set("이름", "무거운돌");
+        stone.set("무게", 1_i64);
+        blocked.inventory.push(Arc::new(Mutex::new(stone)));
+
+        {
+            let mut world = get_world_state().write().unwrap();
+            world.mob_cache.insert_mob_data(empty_key.clone(), empty_data);
+            world
+                .mob_cache
+                .insert_mob_data(blocked_key.clone(), blocked_data);
+            world.mob_cache.add_mob_instance(empty);
+            world.mob_cache.add_mob_instance(blocked);
+            world.set_player_position(
+                &player_name,
+                PlayerPosition::new(zone.clone(), "1".into()),
+            );
+        }
+
+        let storage = ScriptStorage::default();
+        let mut body = Body::new();
+        body.set("이름", player_name.as_str());
+        body.set("힘", 0_i64);
+
+        let empty_output = storage
+            .execute("뒤져", &mut body, "시체", None, None, None)
+            .unwrap();
+        assert_eq!(
+            empty_output.0[0],
+            "당신이 \x1b[33m빈시체몹\x1b[37m의 시체를 뒤집니다. '뒤적~ 뒤적~'"
+        );
+        {
+            let world = get_world_state().read().unwrap();
+            let mob = world
+                .mob_cache
+                .get_all_mobs_in_room(&zone, "1")
+                .into_iter()
+                .find(|mob| mob.mob_key == empty_key)
+                .unwrap();
+            assert_eq!(mob.time_of_regen, 123);
+        }
+
+        get_world_state().write().unwrap().set_player_position(
+            &player_name,
+            PlayerPosition::new(zone.clone(), "2".into()),
+        );
+        let rejected = storage
+            .execute("뒤져", &mut body, "시체", None, None, None)
+            .unwrap();
+        assert_eq!(
+            rejected.0[0],
+            "당신이 \x1b[33m무거운시체몹\x1b[37m의 시체를 뒤집니다. '뒤적~ 뒤적~'"
+        );
+        {
+            let world = get_world_state().read().unwrap();
+            let mob = world
+                .mob_cache
+                .get_all_mobs_in_room(&zone, "2")
+                .into_iter()
+                .find(|mob| mob.mob_key == blocked_key)
+                .unwrap();
+            assert!(mob.time_of_regen > 0);
+            assert_eq!(mob.inventory.len(), 1);
+        }
+
+        let mut world = get_world_state().write().unwrap();
+        world.remove_player_position(&player_name);
+        world.mob_cache.remove_mob(&empty_key);
+        world.mob_cache.remove_mob(&blocked_key);
     }
 }

@@ -7,6 +7,86 @@ use crate::world::get_world_state;
 use rhai::{Array, Dynamic, Engine, Map};
 use std::collections::HashMap;
 
+pub(super) fn python_room_mob_index(
+    mobs: &[crate::world::MobInstance],
+    metadata: &HashMap<String, crate::world::RawMobData>,
+    raw_query: &str,
+) -> Option<usize> {
+    let mut name = if raw_query.trim() == "." {
+        "1"
+    } else {
+        raw_query.split_whitespace().next().unwrap_or("")
+    };
+    if name.is_empty() {
+        return None;
+    }
+
+    // Room.findObjName treats a pure number as the Nth visible live mob and
+    // excludes mob type 7 from that particular enumeration.
+    if name.chars().all(|ch| ch.is_ascii_digit()) {
+        let order = name.parse::<usize>().ok()?;
+        if order == 0 {
+            return None;
+        }
+        return mobs
+            .iter()
+            .enumerate()
+            .filter(|(_, mob)| {
+                mob.act != 2
+                    && mob.act != 3
+                    && metadata
+                        .get(&mob.mob_key)
+                        .is_some_and(|data| data.mob_type != 7)
+            })
+            .nth(order - 1)
+            .map(|(index, _)| index);
+    }
+
+    let digit_count = name.chars().take_while(|ch| ch.is_ascii_digit()).count();
+    let order = if digit_count == 0 {
+        1
+    } else {
+        let parsed = name[..digit_count].parse::<usize>().unwrap_or(0);
+        name = &name[digit_count..];
+        parsed
+    };
+    if order == 0 || name.is_empty() {
+        return None;
+    }
+
+    let mut exact_count = 0usize;
+    let mut prefix_count = 0usize;
+    for (index, mob) in mobs.iter().enumerate() {
+        let Some(data) = metadata.get(&mob.mob_key) else {
+            continue;
+        };
+        if name != "시체" && (mob.act == 2 || mob.act == 3) {
+            continue;
+        }
+        if name == "시체" && mob.act == 2 {
+            exact_count += 1;
+            if exact_count == order {
+                return Some(index);
+            }
+        } else if data.name == name || data.reaction_names.iter().any(|alias| alias == name) {
+            exact_count += 1;
+            if exact_count == order {
+                return Some(index);
+            }
+        } else if data
+            .reaction_names
+            .iter()
+            .any(|alias| alias.starts_with(name))
+        {
+            prefix_count += 1;
+            if prefix_count == order {
+                return Some(index);
+            }
+        }
+    }
+    None
+}
+
 fn regen_mobs(body: &Body, query: &str) -> Map {
     let mut result = Map::new();
     result.insert("status".into(), Dynamic::from("unknown"));
@@ -45,27 +125,16 @@ fn regen_mobs(body: &Body, query: &str) -> Map {
             result.insert("status".into(), Dynamic::from("empty"));
             return result;
         }
-    } else if query == "시체" {
-        if let Some(index) = mobs.iter().position(|mob| mob.act == 2) {
-            selected.push(index);
-        } else {
+    } else {
+        let Some(index) = python_room_mob_index(mobs, &metadata, query) else {
             result.insert("status".into(), Dynamic::from("unknown"));
             return result;
+        };
+        if mobs[index].act != 2 {
+            result.insert("status".into(), Dynamic::from("not_corpse"));
+            return result;
         }
-    } else {
-        // Room.findObjName hides ACT_DEATH/ACT_REGEN unless queried as 시체.
-        let live_match = mobs.iter().any(|mob| {
-            mob.act != 2
-                && mob.act != 3
-                && metadata.get(&mob.mob_key).is_some_and(|data| {
-                    data.name == query || data.reaction_names.iter().any(|name| name == query)
-                })
-        });
-        result.insert(
-            "status".into(),
-            Dynamic::from(if live_match { "not_corpse" } else { "unknown" }),
-        );
-        return result;
+        selected.push(index);
     }
 
     let mut messages = Array::new();
@@ -157,11 +226,30 @@ fn recover_named_mob(body: &Body, query: &str) -> bool {
     let Some(mobs) = world.mob_cache.get_all_mobs_in_room_mut(&zone, &room) else {
         return false;
     };
-    let first = query.split_whitespace().next().unwrap_or("");
+    let mut first = if query.trim() == "." {
+        "1"
+    } else {
+        query.split_whitespace().next().unwrap_or("")
+    };
     if first.is_empty() {
         return false;
     }
-    let numeric = first.parse::<usize>().ok().filter(|number| *number != 0);
+    let pure_numeric = first.chars().all(|ch| ch.is_ascii_digit());
+    let numeric = pure_numeric
+        .then(|| first.parse::<usize>().ok())
+        .flatten()
+        .filter(|number| *number != 0);
+    let digit_count = first.chars().take_while(|ch| ch.is_ascii_digit()).count();
+    let order = if pure_numeric || digit_count == 0 {
+        1
+    } else {
+        let order = first[..digit_count].parse::<usize>().unwrap_or(0);
+        first = &first[digit_count..];
+        order
+    };
+    if order == 0 || first.is_empty() {
+        return false;
+    }
     let mut count = 0usize;
     let mut prefix_count = 0usize;
     for object in ordered {
@@ -185,7 +273,7 @@ fn recover_named_mob(body: &Body, query: &str) -> bool {
         } else if first == "시체" {
             if mob.act == 2 {
                 count += 1;
-                count == 1
+                count == order
             } else {
                 false
             }
@@ -194,14 +282,14 @@ fn recover_named_mob(body: &Body, query: &str) -> bool {
                 false
             } else if data.name == first || data.reaction_names.iter().any(|name| name == first) {
                 count += 1;
-                count == 1
+                count == order
             } else if data
                 .reaction_names
                 .iter()
                 .any(|alias| alias.starts_with(first))
             {
                 prefix_count += 1;
-                prefix_count == 1
+                prefix_count == order
             } else {
                 false
             }
@@ -495,10 +583,89 @@ mod tests {
             .unwrap();
         assert_eq!(live_target.0, vec!["☞ 시체만 가능합니다. *^_^*"]);
 
+        let numeric_live_target = storage
+            .execute("리젠", &mut body, "1", None, None, None)
+            .unwrap();
+        assert_eq!(
+            numeric_live_target.0,
+            vec!["☞ 시체만 가능합니다. *^_^*"]
+        );
+
+        {
+            let mut world = get_world_state().write().unwrap();
+            let revived = world
+                .mob_cache
+                .get_all_mobs_in_room_mut(&zone, room)
+                .unwrap()
+                .iter_mut()
+                .find(|mob| mob.mob_key == dead_key)
+                .unwrap();
+            revived.kill();
+        }
+        let numbered_corpse = storage
+            .execute("리젠", &mut body, "1시체", None, None, None)
+            .unwrap();
+        assert_eq!(
+            numbered_corpse.0,
+            vec!["\r\n죽은몹이 다시 나타납니다."],
+            "개별 리젠은 Python처럼 완료 확인문을 출력하지 않는다"
+        );
+
         let mut world = get_world_state().write().unwrap();
         world.remove_player_position(&player);
         world.mob_cache.remove_mob(&dead_key);
         world.mob_cache.remove_mob(&live_key);
+    }
+
+    #[test]
+    fn regen_target_lookup_matches_python_numeric_corpse_and_alias_rules() {
+        let zone = "리젠선택규칙존";
+        let room = "1";
+        let live_key = format!("{zone}:산몹");
+        let dead_one_key = format!("{zone}:죽은몹1");
+        let dead_two_key = format!("{zone}:죽은몹2");
+        let hidden_number_key = format!("{zone}:유형7");
+        let mut metadata = HashMap::new();
+
+        let mut live_data = crate::world::RawMobData::new();
+        live_data.name = "산몹".into();
+        live_data.reaction_names = vec!["산몹별칭".into()];
+        let live =
+            crate::world::MobInstance::new(live_key.clone(), zone.into(), room, &live_data);
+        metadata.insert(live_key, live_data);
+
+        let mut dead_one_data = crate::world::RawMobData::new();
+        dead_one_data.name = "죽은몹1".into();
+        let mut dead_one =
+            crate::world::MobInstance::new(dead_one_key.clone(), zone.into(), room, &dead_one_data);
+        dead_one.act = 2;
+        metadata.insert(dead_one_key, dead_one_data);
+
+        let mut dead_two_data = crate::world::RawMobData::new();
+        dead_two_data.name = "죽은몹2".into();
+        let mut dead_two =
+            crate::world::MobInstance::new(dead_two_key.clone(), zone.into(), room, &dead_two_data);
+        dead_two.act = 2;
+        metadata.insert(dead_two_key, dead_two_data);
+
+        let mut type_seven_data = crate::world::RawMobData::new();
+        type_seven_data.name = "유형7".into();
+        type_seven_data.mob_type = 7;
+        let type_seven = crate::world::MobInstance::new(
+            hidden_number_key.clone(),
+            zone.into(),
+            room,
+            &type_seven_data,
+        );
+        metadata.insert(hidden_number_key, type_seven_data);
+
+        let mobs = vec![type_seven, live, dead_one, dead_two];
+        assert_eq!(python_room_mob_index(&mobs, &metadata, "1"), Some(1));
+        assert_eq!(python_room_mob_index(&mobs, &metadata, "."), Some(1));
+        assert_eq!(python_room_mob_index(&mobs, &metadata, "1 무시됨"), Some(1));
+        assert_eq!(python_room_mob_index(&mobs, &metadata, "산몹별"), Some(1));
+        assert_eq!(python_room_mob_index(&mobs, &metadata, "시체"), Some(2));
+        assert_eq!(python_room_mob_index(&mobs, &metadata, "2시체"), Some(3));
     }
 
     #[test]
@@ -562,10 +729,31 @@ mod tests {
             vec!["\x1b[1;32m* [두방몹] 생성 되었습니다.\x1b[0;37m"]
         );
         {
-            let world = get_world_state().read().unwrap();
+            let mut world = get_world_state().write().unwrap();
             assert_eq!(world.mob_cache.get_all_mobs_in_room(&zone, "1").len(), 1);
             assert_eq!(world.mob_cache.get_all_mobs_in_room(&zone, "2").len(), 1);
+            let template = world.mob_cache.get_mob(&key).unwrap().clone();
+            world.mob_cache.add_mob_instance(crate::world::MobInstance::new(
+                key.clone(),
+                zone.clone(),
+                "1",
+                &template,
+            ));
         }
+        let numbered = storage
+            .execute("몹제거", &mut body, "2", None, None, None)
+            .unwrap();
+        assert_eq!(numbered.0, vec!["몹이 제거되었습니다."]);
+        assert_eq!(
+            get_world_state()
+                .read()
+                .unwrap()
+                .mob_cache
+                .get_all_mobs_in_room(&zone, "1")
+                .len(),
+            1,
+            "Python removes only the selected duplicate object"
+        );
         let removed = storage
             .execute("몹제거", &mut body, "두방몹", None, None, None)
             .unwrap();
@@ -575,6 +763,28 @@ mod tests {
             assert!(world.mob_cache.get_all_mobs_in_room(&zone, "1").is_empty());
             assert_eq!(world.mob_cache.get_all_mobs_in_room(&zone, "2").len(), 1);
         }
+        {
+            let mut world = get_world_state().write().unwrap();
+            let template = world.mob_cache.get_mob(&key).unwrap().clone();
+            let mut corpse = crate::world::MobInstance::new(
+                key.clone(),
+                zone.clone(),
+                "1",
+                &template,
+            );
+            corpse.kill();
+            world.mob_cache.add_mob_instance(corpse);
+        }
+        let corpse_removed = storage
+            .execute("몹제거", &mut body, "시체", None, None, None)
+            .unwrap();
+        assert_eq!(corpse_removed.0, vec!["몹이 제거되었습니다."]);
+        assert!(get_world_state()
+            .read()
+            .unwrap()
+            .mob_cache
+            .get_all_mobs_in_room(&zone, "1")
+            .is_empty());
         let failed = storage
             .execute("몹생성", &mut body, "없는존:없는몹", None, None, None)
             .unwrap();
@@ -617,6 +827,8 @@ mod tests {
         let mut body = Body::new();
         body.set("이름", "관리자");
         body.set("관리자등급", 1000_i64);
+        body.set("체력", 1_i64);
+        body.set("최고체력", 100_i64);
         let snapshot = serde_json::json!([{
             "name":"대상자", "level":20, "age":30, "hp":400, "max_hp":600,
             "mp":200, "max_mp":300, "attack":12, "strength":44, "armor":8,
@@ -631,13 +843,17 @@ mod tests {
             crate::object::Value::String(snapshot.to_string()),
         );
         let (output, _) = storage
-            .execute("상태보기", &mut body, "대상자", None, None, None)
+            .execute("상태보기", &mut body, "대상자 뒤의단어", None, None, None)
             .unwrap();
         assert!(output
             .iter()
             .any(|line| line.contains("대상자의 현재 상태")));
         assert!(output.iter().any(|line| line.contains("[命  中]")));
         assert!(output.iter().any(|line| line.contains("2개의 여유 특성치")));
+        assert!(
+            output.iter().any(|line| line.contains("대상자에게 저승사자가 손짓")),
+            "Python status line uses the administrator's 1/100 HP, not target 400/600"
+        );
     }
 
     #[test]
@@ -757,6 +973,68 @@ mod tests {
         assert_eq!(mob.hp, 123);
         assert_eq!(mob.act, 2, "Python only assigns hp and leaves corpse state");
         drop(world);
+        let mut world = get_world_state().write().unwrap();
+        world.remove_player_position(&player);
+        world.mob_cache.remove_mob(&key);
+    }
+
+    #[test]
+    fn mob_recover_uses_python_numbered_prefix_and_dot_selection() {
+        use crate::world::{MobInstance, PlayerPosition, RawMobData, RoomObjectRef};
+
+        let suffix = std::process::id();
+        let player = format!("몹회복순번관리자-{suffix}");
+        let zone = format!("몹회복순번존-{suffix}");
+        let key = format!("{zone}:회복순번몹");
+        let mut data = RawMobData::new();
+        data.name = "회복순번몹".into();
+        data.reaction_names = vec!["회복별칭".into()];
+        data.zone = zone.clone();
+        data.hp = 222;
+        let mut first = MobInstance::new(key.clone(), zone.clone(), "1", &data);
+        first.hp = 10;
+        let first_id = first.instance_id;
+        let mut second = MobInstance::new(key.clone(), zone.clone(), "1", &data);
+        second.hp = 20;
+        let second_id = second.instance_id;
+        {
+            let mut world = get_world_state().write().unwrap();
+            world.mob_cache.insert_mob_data(key.clone(), data);
+            world.mob_cache.add_mob_instance(first);
+            world.mob_cache.add_mob_instance(second);
+            world.record_test_room_object(&zone, "1", RoomObjectRef::Mob(first_id));
+            world.record_test_room_object(&zone, "1", RoomObjectRef::Mob(second_id));
+            world.set_player_position(
+                &player,
+                PlayerPosition::new(zone.clone(), "1".into()),
+            );
+        }
+        let storage = ScriptStorage::default();
+        let mut body = Body::new();
+        body.set("이름", player.as_str());
+        body.set("관리자등급", 1000_i64);
+
+        let numbered = storage
+            .execute("몹회복", &mut body, "2회복", None, None, None)
+            .unwrap();
+        assert_eq!(numbered.0, vec!["* 회복되었습니다."]);
+        {
+            let world = get_world_state().read().unwrap();
+            let mobs = world.mob_cache.get_all_mobs_in_room(&zone, "1");
+            assert_eq!(mobs[0].hp, 20);
+            assert_eq!(mobs[1].hp, 222);
+        }
+        let dot = storage
+            .execute("몹회복", &mut body, ".", None, None, None)
+            .unwrap();
+        assert_eq!(dot.0, vec!["* 회복되었습니다."]);
+        {
+            let world = get_world_state().read().unwrap();
+            let mobs = world.mob_cache.get_all_mobs_in_room(&zone, "1");
+            assert_eq!(mobs[0].hp, 222);
+            assert_eq!(mobs[1].hp, 222);
+        }
+
         let mut world = get_world_state().write().unwrap();
         world.remove_player_position(&player);
         world.mob_cache.remove_mob(&key);

@@ -740,6 +740,17 @@ impl MobCache {
         removed
     }
 
+    /// Python `cmds/몹삭제.py` removes only the entry from `Mob.Mobs`.
+    /// Existing room objects are independent clones and remain until their
+    /// normal lifecycle removes them.
+    pub fn remove_mob_definition(&mut self, key: &str) -> bool {
+        let removed = self.mobs.remove(key).is_some();
+        if removed {
+            self.mob_order.retain(|loaded| loaded != key);
+        }
+        removed
+    }
+
     /// Remove one active instance from a room without deleting its template.
     pub fn remove_instance(&mut self, zone: &str, room: &str, mob_key: &str) -> bool {
         let room_key = format!("{}:{}", zone, room);

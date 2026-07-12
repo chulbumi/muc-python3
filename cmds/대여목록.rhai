@@ -10,7 +10,9 @@ fn cmd(ob, line) {
         send_line(ob, "☞ 대여가능한 품목이 없어요.");
         return;
     }
-    let wanted = line.trim();
+    // Python compares the command argument verbatim.  In particular, a
+    // leading/trailing space does not match an otherwise identical name.
+    let wanted = line;
     let shown = 0;
     for entry in entries {
         let number = entry["번호"].to_int();

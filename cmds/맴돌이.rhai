@@ -9,7 +9,7 @@ fn cmd(ob, line) {
         send_line(ob, "☞ 사용법: [출구] 맴돌이");
         return;
     }
-    if exit_set_wander(ob, trim(line)) {
+    if exit_set_wander(ob, line) {
         send_line(ob, "☞ 출구가 맴돌이 되었습니다.");
     } else {
         send_line(ob, "☞ 그런 출구가 없습니다.");

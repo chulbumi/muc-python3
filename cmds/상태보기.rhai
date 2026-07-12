@@ -33,7 +33,7 @@ fn render_player_status(ob, s) {
 fn cmd(ob, line) {
     if !require_admin(ob, 1000) { send_line(ob, "☞ 무슨 말인지 모르겠어요. *^_^*"); return; }
     if line == "" { send_line(ob, "☞ 운영자 명령: [대상] 상태보기"); return; }
-    let target = trim(line);
+    let target = first_arg(line);
     if target == get_string(ob, "이름") {
         let s = admin_self_status(ob); s["name"] = s["이름"];
         render_player_status(ob, s); return;
@@ -41,6 +41,8 @@ fn cmd(ob, line) {
     for s in get_room_players_admin(ob) {
         if s["name"] != target { continue; }
         s["insurance"] = admin_insurance_count(s["level"], s["insurance_premium"]);
+        // Python accidentally calls get_hp_script(ob), not get_hp_script(obj).
+        s["hp_script"] = get_hp_status_script(ob);
         render_player_status(ob, s); return;
     }
     let selected = find_attack_target(ob, target);

@@ -2,7 +2,7 @@
 // Python: cmds/방제작.py
 
 fn cmd(ob, line) {
-    let words = split(line, " ");
+    let words = line_args(line);
     if len(words) < 2 {
         send_line(ob, "☞ 사용법: [존이름] [방이름] 방제작");
         return;

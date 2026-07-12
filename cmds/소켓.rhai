@@ -11,7 +11,7 @@ fn cmd(ob, line) {
     for entry in get_online_socket_entries() {
         if entry["name"] == "" { continue; }
         if old != entry["host"] {
-            msg += "\r\n" + fill_space(16, entry["host"]) + " : " + entry["name"];
+            msg += "\r\n" + pad_start(entry["host"], 16, " ") + " : " + entry["name"];
         } else {
             msg += ", " + entry["name"];
         }
