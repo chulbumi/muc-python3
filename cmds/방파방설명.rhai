@@ -11,7 +11,7 @@ fn cmd(ob, line) {
         send_line(ob, "☞ 사용법: [이름] 방파방이름");
         return;
     }
-    let owner = get_string(ob, "방파주인");
+    let owner = get_room_attr(ob, "방파주인");
     if owner == "" || owner != get_string(ob, "소속") {
         send_line(ob, "☞ 무림인은 아무곳에나 이름을 새기지 않는다네.");
         return;

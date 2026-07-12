@@ -9,7 +9,7 @@
 //! 로드 시 "버림" 상태는 attr에 넣지 않음. have/drop/keep/destroy 시 save.
 
 use once_cell::sync::Lazy;
-use serde_json::{json, Value as JsonValue};
+use serde_json::Value as JsonValue;
 use std::collections::HashMap;
 use std::fs;
 use std::io::Write;
@@ -50,8 +50,9 @@ impl OneitemState {
 
         if Path::new(ATTR_PATH).exists() {
             let s = fs::read_to_string(ATTR_PATH)?;
-            let v: JsonValue = serde_json::from_str(&s)?;
-            if let Some(obj) = v.get("단일아이템").and_then(|o| o.as_object()) {
+            let v: indexmap::IndexMap<String, indexmap::IndexMap<String, JsonValue>> =
+                serde_json::from_str(&s)?;
+            if let Some(obj) = v.get("단일아이템") {
                 for (k, val) in obj {
                     let vs = val.as_str().unwrap_or("");
                     let words: Vec<&str> = vs.split_whitespace().collect();
@@ -66,8 +67,9 @@ impl OneitemState {
 
         if Path::new(INDEX_PATH).exists() {
             let s = fs::read_to_string(INDEX_PATH)?;
-            let v: JsonValue = serde_json::from_str(&s)?;
-            if let Some(obj) = v.get("단일아이템인덱스").and_then(|o| o.as_object()) {
+            let v: indexmap::IndexMap<String, indexmap::IndexMap<String, JsonValue>> =
+                serde_json::from_str(&s)?;
+            if let Some(obj) = v.get("단일아이템인덱스") {
                 for (name, idx) in obj {
                     let idx_s = if let Some(n) = idx.as_i64() {
                         n.to_string()
@@ -92,7 +94,12 @@ impl OneitemState {
 
     /// oneitem.json에 attr만 저장 (단일아이템 루트).
     fn save(&self) -> Result<(), Box<dyn std::error::Error>> {
-        let root = json!({ "단일아이템": self.attr });
+        let values: indexmap::IndexMap<String, String> = self
+            .attr_order
+            .iter()
+            .filter_map(|index| self.attr.get(index).map(|owner| (index.clone(), owner.clone())))
+            .collect();
+        let root = indexmap::IndexMap::from([("단일아이템", values)]);
         let pretty = serde_json::to_string_pretty(&root)?;
         let mut f = fs::File::create(ATTR_PATH)?;
         f.write_all(pretty.as_bytes())?;
@@ -253,7 +260,15 @@ pub fn oneitem_keep(index: &str, name: &str) -> bool {
 
 /// 스크립트 efunc: ONEITEM.destroy(index)
 pub fn oneitem_destroy(index: &str) -> bool {
-    ONEITEM.write().unwrap().destroy(index).is_ok()
+    let mut state = ONEITEM.write().unwrap();
+    if !state.attr.contains_key(index) {
+        return false;
+    }
+    state.destroy(index).is_ok()
+}
+
+pub fn oneitem_reload() -> bool {
+    ONEITEM.write().unwrap().load().is_ok()
 }
 
 /// 스크립트 efunc: ONEITEM.checkOneItemName(name) -> map { found, owner }

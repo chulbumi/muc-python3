@@ -707,19 +707,23 @@ impl MobCache {
     }
 
     pub fn item_holders(&self, item_key: &str) -> Vec<(String, String)> {
-        self.mob_order
-            .iter()
-            .filter_map(|key| {
-                let mob = self.mobs.get(key)?;
-                let held = mob.items_for_sale.iter().any(|(item, _)| item == item_key)
-                    || mob.use_items.iter().any(|(item, _, _, _)| item == item_key);
-                if held {
-                    Some((mob.name.clone(), key.clone()))
-                } else {
-                    None
+        let mut holders = Vec::new();
+        for key in &self.mob_order {
+            let Some(mob) = self.mobs.get(key) else {
+                continue;
+            };
+            for (item, _, _, _) in &mob.drop_items {
+                if item == item_key {
+                    holders.push((mob.name.clone(), key.clone()));
                 }
-            })
-            .collect()
+            }
+            for (item, _, _, _) in &mob.use_items {
+                if item == item_key {
+                    holders.push((mob.name.clone(), key.clone()));
+                }
+            }
+        }
+        holders
     }
 
     /// Remove a loaded mob template and its active instances (Python Mob.Mobs

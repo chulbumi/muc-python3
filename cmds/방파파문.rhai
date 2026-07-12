@@ -42,7 +42,7 @@ fn cmd(ob, line) {
                     + player["현재내공"].to_string() + "/"
                     + player["최고내공"].to_string() + " ] "
             };
-            send_to_user(line, "\r\n당신은 파문되었습니다." + prompt);
+            send_to_user(line, "당신은 파문되었습니다." + prompt);
         }
     }
     send_python_guild_group_except(ob, msg, line);

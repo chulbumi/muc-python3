@@ -26,6 +26,7 @@ fn cmd(ob, line) {
     let online = get_all_online_players();
     for player in online {
         if player["이름"].to_string() == target_name
+                && player["투명상태"] != 1
                 && player["zone"].to_string() == my_location["zone"].to_string()
                 && player["room"].to_string() == my_location["room"].to_string() {
             target = player;
@@ -60,30 +61,7 @@ fn cmd(ob, line) {
     let object = "\x1b[1m" + target_name + "\x1b[0;37m" + han_eul(target_name);
     let message = actor + " " + object + " \x1b[1m" + new_position
         + "\x1b[0m" + han_uro(new_position) + " 직위를 임명합니다.";
-    let title = guild_get(guild, get_string(ob, "직위") + "명칭");
-    let shown_title = if title == "" { get_string(ob, "직위") } else { title };
-    let group_line = "\x1b[1m《\x1b[36m" + shown_title + "\x1b[37mː\x1b[36m"
-        + own_name + "\x1b[37m》\x1b[0;37m " + message;
-
-    for player in online {
-        if player["소속"].to_string() != guild { continue; }
-        let config = player["설정상태"].to_string();
-        if config_text_is_enabled(config, "방파말거부") { continue; }
-        let name = player["이름"].to_string();
-        if name == own_name {
-            send_line(ob, group_line);
-        } else {
-            let prompt = if config_text_is_enabled(config, "엘피출력") {
-                ""
-            } else {
-                "\r\n\x1b[0;37;40m[ " + player["현재체력"].to_string() + "/"
-                    + player["최고체력"].to_string() + ", "
-                    + player["현재내공"].to_string() + "/"
-                    + player["최고내공"].to_string() + " ] "
-            };
-            send_to_user(name, "\r\n" + group_line + prompt);
-        }
-    }
+    send_python_guild_group(ob, message);
 }
 
 fn main(ob, line) { cmd(ob, line); }

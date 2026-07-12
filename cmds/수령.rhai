@@ -6,7 +6,7 @@ fn cmd(ob, line) {
         send_line(ob, "☞ 사용법: [금액] 수령");
         return;
     }
-    let amount = to_int(trim(line));
+    let amount = python_get_int(line);
     let result = receive_from_guard(ob, amount);
     let status = result["status"];
     if status == "no_guard" { send_line(ob, "☞ 이곳에 표국무사가 없네요."); return; }

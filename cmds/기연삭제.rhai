@@ -15,7 +15,10 @@ fn cmd(ob, line) {
         send_line(ob, "☞ 그런 아이템은 없습니다.!");
         return;
     }
-    oneitem_destroy(idx);
+    if !oneitem_destroy(idx) {
+        send_line(ob, "☞ 그런 아이템은 없습니다.!");
+        return;
+    }
     send_line(ob, "☞ 기연이 삭제되었습니다.");
 }
 

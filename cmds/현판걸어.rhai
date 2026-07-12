@@ -1,76 +1,67 @@
-// 현판걸어.rhai - 현판 걸기 (방파 생성)
-// Python: cmds/현판걸어.py
-// Uses: guild_create(ob, guild_name)
+// Python cmds/현판걸어.py. Rust efuns own guild/room/item state only;
+// every visible byte and its order remains here.
 
 fn cmd(ob, line) {
-    if is_empty(line) {
+    if line == "" {
         send_line(ob, "☞ 사용법 : [방파이름] 현판걸어");
         return;
     }
-
-    let guild_name = trim(line);
-
-    if length(guild_name) > 10 {
+    if length(line) > 10 {
         send_line(ob, "방파이름이 너무 길어요!.");
         return;
     }
-
-    if length(guild_name) < 2 {
+    if length(line) < 2 {
+        // Python's first length branch accidentally says "too long" here.
+        // Keep the intended correction rather than reproduce that typo.
         send_line(ob, "방파이름이 너무 짧아요!.");
         return;
     }
-
-    let my_level = get_attr(ob, "레벨");
-    if to_int(my_level) < 400 {
-        send_line(ob, "☞ 당신은 방파를 세울 수 없습니다.");
-        return;
-    }
-
-    let my_guild = get_attr(ob, "소속");
-    if my_guild != "" {
-        send_line(ob, "☞ 당신은 이미 방파에 소속되어 있습니다.");
-        return;
-    }
-
     if get_room_attr(ob, "방파자리") == "" || get_room_attr(ob, "방파주인") != "" {
         send_line(ob, "☞ 이곳엔 현판을 걸 수 없습니다.");
         return;
     }
-    if get_attr(ob, "방파금지") != "" || to_int(get_attr(ob, "은전")) < get_murim_config_int("방파세울은전") {
+    if get_string(ob, "소속") != "" || get_string(ob, "방파금지") != ""
+            || get_int(ob, "레벨") < 400 {
+        send_line(ob, "☞ 당신은 방파를 세울 수 없습니다.");
+        return;
+    }
+    let cost = to_int(get_murim_config("방파세울은전"));
+    if get_int(ob, "은전") < cost {
         send_line(ob, "☞ 방파를 세우는데는 은전 10,000,000개 이상이 필요합니다.");
         return;
     }
-    let guilds = guild_list();
-    let i = 0;
-    while i < len(guilds) {
-        if guild_get(guilds[i], "이름") == guild_name { send_line(ob, "☞ 존재하는 방파이름입니다."); return; }
-        i = i + 1;
+    for guild in guild_list() {
+        if guild_get(guild, "이름") == line {
+            send_line(ob, "☞ 존재하는 방파이름입니다.");
+            return;
+        }
     }
 
-    // guild_create efun 호출
-    let result = guild_create(ob, guild_name);
+    let result = guild_create(ob, line);
     if result != "" {
         send_line(ob, "☞ " + result);
         return;
     }
-
-    // 성공 메시지
-    let my_name = get_attr(ob, "이름");
-    let my_nickname = get_attr(ob, "무림별호");
-    let my_personality = get_attr(ob, "성격");
-
-    let color = if my_personality == "정파" { "1;32" } else { "1;31" };
-    let nickname = if my_nickname == "" { "무소속" } else { my_nickname };
-
-    send_line(ob, "\x1b[" + color + "m[" + nickname + "]\x1b[0m \x1b[1;36m" + my_name + "\x1b[0;37m 방파 \x1b[1m『" + guild_name + "』\x1b[0m을 창설했습니다.");
-
-    set_obj_attr(ob, "방", "방파주인", guild_name);
     item_create(ob, "보관함");
-    set_attr(ob, "은전", to_int(get_attr(ob, "은전")) - get_murim_config_int("방파세울은전"));
-    send_line(ob, "당신이 현판을 세우는데 은전 " + get_murim_config_int("방파세울은전") + "개를 사용합니다.");
-    send_notice(ob, guild_name + " 방파가 창설되었습니다.");
+    set_obj_attr(ob, "나", "은전", get_int(ob, "은전") - cost);
+    send_line(ob, "당신이 현판을 세우는데 은전 " + cost + "개를 사용합니다.");
+
+    let own_name = get_string(ob, "이름");
+    let personality = get_string(ob, "성격");
+    let identity = if personality == "정파" {
+        "[\x1b[1;32m" + get_string(ob, "무림별호") + "\x1b[0;37m] "
+    } else if personality == "사파" {
+        "[\x1b[1;31m" + get_string(ob, "무림별호") + "\x1b[0;37m] "
+    } else {
+        "[\x1b[1m무소속\x1b[0m] "
+    };
+    let body_line = identity + "\x1b[1;36m" + own_name + "\x1b[37m"
+        + han_iga(own_name) + " 방파 『" + line + "』" + han_eul(line)
+        + " 창설했습니다.\x1b[0m";
+    let head = join(get_murim_config("방파생성메세지머리"), "\r\n");
+    let tail = join(get_murim_config("방파생성메세지꼬리"), "\r\n");
+    let notice = head + "\r\n" + body_line + tail;
+    send_notice(ob, notice);
 }
 
-fn main(ob, line) {
-    cmd(ob, line);
-}
+fn main(ob, line) { cmd(ob, line); }

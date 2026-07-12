@@ -25,7 +25,7 @@ use crate::emotion::{self, EmotionTarget};
 use crate::hangul::han_wa;
 use crate::network::social::{RelationState, SocialAction};
 use crate::network::DelimiterCodec;
-use crate::player::{Player, STATE_ACTIVE};
+use crate::player::{Body, Player, STATE_ACTIVE};
 use crate::script::{
     build_adult_channel_member_snapshot, build_box_observer_snapshot,
     build_party_nonplayer_snapshot, build_party_person_snapshot, build_room_lines,
@@ -40,10 +40,11 @@ use crate::script::{
     set_precomputed_connected_names, set_precomputed_online_names, set_precomputed_party_context,
     set_precomputed_room_inventories, set_precomputed_room_mugong_targets,
     set_precomputed_room_view_players, set_precomputed_tell_players, take_adult_channel_requests,
-    take_auto_move_request, take_box_deliveries, take_change_player_request,
-    take_force_command_request, take_guild_accept_request,
+    take_admin_set_player_value_request, take_auto_move_request, take_box_deliveries,
+    take_change_player_request,
+    take_force_command_request, take_guild_accept_request, take_guild_apply_request,
     take_guild_kick_request, take_guild_nickname_request, take_guild_position_request,
-    take_guild_transfer_request,
+    take_guild_reset_request, take_guild_transfer_request,
     take_party_requests,
     take_remove_skill_request, take_save_all_request, take_set_player_attr_request,
     take_set_skill_request, take_summon_player_request, take_teach_skill_request,
@@ -2744,6 +2745,51 @@ fn save_all_active_players(broadcaster: &crate::network::Broadcaster) {
     }
 }
 
+fn append_guild_application(body: &mut Body, applicant: &str) -> bool {
+    let existing = body.get_string("입문신청자");
+    let mut names: Vec<String> = existing
+        .split(['\r', '\n', ','])
+        .filter(|name| !name.is_empty())
+        .map(str::to_string)
+        .collect();
+    if names.iter().any(|name| name == applicant) {
+        return false;
+    }
+    names.push(applicant.to_string());
+    body.set("입문신청자", names.join("\r\n"));
+    true
+}
+
+fn clear_live_guild_members(broadcaster: &crate::network::Broadcaster, guild: &str) {
+    let mut clients = broadcaster.clients.lock();
+    for client in clients.values_mut() {
+        let Some(player) = client.player.as_mut() else {
+            continue;
+        };
+        if player.body.get_string("소속") != guild {
+            continue;
+        }
+        player.body.object.attr.remove("소속");
+        player.body.object.attr.remove("직위");
+        let path = format!("data/user/{}.json", player.body.get_name());
+        let _ = save_body_to_json(&mut player.body, &path);
+    }
+}
+
+fn apply_admin_player_value(body: &mut Body, key: &str, value: serde_json::Value) {
+    let value = match value {
+        serde_json::Value::Number(value) if value.is_i64() => {
+            crate::object::Value::Int(value.as_i64().unwrap_or_default())
+        }
+        serde_json::Value::Number(value) => {
+            crate::object::Value::Float(value.as_f64().unwrap_or_default())
+        }
+        serde_json::Value::String(value) => crate::object::Value::String(value),
+        _ => crate::object::Value::String(String::new()),
+    };
+    body.set(key, value);
+}
+
 /// 특정 접속자(이름)에게만 메시지 전송. 스크립트 send_to_user에서 수집된 목록 처리용.
 pub(crate) fn send_to_one_user(broadcaster: &crate::network::Broadcaster, name: &str, msg: &str) {
     use crate::network::ClientState;
@@ -3172,12 +3218,13 @@ async fn handle_pending_change_password(
                             }
                         }
                     }
-                    (None, String::new(), true)
+                    (None, "작성을 마칩니다.\r\n".to_string(), true)
                 } else {
-                    lines.push(input.to_string());
+                    let line = if input.is_empty() { " " } else { input };
+                    lines.push(line.to_string());
                     (
                         Some(PendingInput::RoomDescription { zone, room, lines }),
-                        ":".to_string(),
+                        format!("{}\r\n:", line),
                         false,
                     )
                 }
@@ -3362,6 +3409,27 @@ fn global_player_snapshot_needs(
             .any(|name| requested(name)),
         tell_players: ["전음", "반전음"].iter().any(|name| requested(name)),
     }
+}
+
+fn global_snapshot_includes_transparent(
+    resolved_command: &str,
+    resolved_first_word: Option<&str>,
+) -> bool {
+    let requested = |name: &str| {
+        resolved_command == name || resolved_first_word.is_some_and(|first| first == name)
+    };
+    [
+        "모두소환",
+        "방파말",
+        "똥파말",
+        "방파별호",
+        "방파파문",
+        "방주권한양도",
+        "직위임명",
+        "명칭설정",
+    ]
+    .iter()
+    .any(|command| requested(command))
 }
 
 /// Handle one network input, including Python-compatible repeat/user-alias expansion.
@@ -3592,6 +3660,9 @@ async fn handle_single_game_command(
     let mut guild_position_pending: Option<(String, String)> = None;
     let mut guild_nickname_pending: Option<(String, String)> = None;
     let mut guild_accept_pending: Option<(String, String)> = None;
+    let mut guild_apply_pending: Option<(String, String)> = None;
+    let mut guild_reset_pending: Option<String> = None;
+    let mut admin_set_player_value_pending: Option<(String, String, serde_json::Value)> = None;
     let mut summon_player_pending: Vec<(String, String, String)> = Vec::new();
     let mut force_command_pending: Vec<(String, String)> = Vec::new();
     let mut change_player_pending: Option<String> = None;
@@ -3765,7 +3836,10 @@ async fn handle_single_game_command(
                 }
                 if !all_online_details_requested
                     || (p.body.get_int("투명상태") == 1
-                        && !command_requested("모두소환"))
+                        && !global_snapshot_includes_transparent(
+                            &move_cmd,
+                            first_command.as_deref(),
+                        ))
                 {
                     continue;
                 }
@@ -4044,7 +4118,16 @@ async fn handle_single_game_command(
                             "targets": player.body.targets.iter().filter_map(|target| {
                                 target.upgrade().and_then(|target| target.lock().ok().map(|object| object.getName()))
                             }).collect::<Vec<_>>(),
-                            "guards": guards
+                            "guards": guards,
+                            "raw_attrs": player.body.object.attr.iter().map(|(key, value)| {
+                                let value = match value {
+                                    crate::object::Value::Int(value) => serde_json::Value::Number((*value).into()),
+                                    crate::object::Value::Float(value) => serde_json::Number::from_f64(*value)
+                                        .map(serde_json::Value::Number).unwrap_or(serde_json::Value::Null),
+                                    crate::object::Value::String(value) => serde_json::Value::String(value.clone()),
+                                };
+                                (key.clone(), value)
+                            }).collect::<serde_json::Map<String, serde_json::Value>>()
                         })
                     })
                 })
@@ -4261,6 +4344,10 @@ async fn handle_single_game_command(
                 guild_position_pending = take_guild_position_request(&mut player.body);
                 guild_nickname_pending = take_guild_nickname_request(&mut player.body);
                 guild_accept_pending = take_guild_accept_request(&mut player.body);
+                guild_apply_pending = take_guild_apply_request(&mut player.body);
+                guild_reset_pending = take_guild_reset_request(&mut player.body);
+                admin_set_player_value_pending =
+                    take_admin_set_player_value_request(&mut player.body);
                 summon_player_pending = take_summon_player_request(&mut player.body);
                 force_command_pending = take_force_command_request(&mut player.body);
                 change_player_pending = take_change_player_request(&mut player.body);
@@ -4752,6 +4839,37 @@ async fn handle_single_game_command(
             target.body.set("직위", "방파인".to_string());
             let path = format!("data/user/{}.json", target.body.get_name());
             let _ = save_body_to_json(&mut target.body, &path);
+        }
+    }
+
+
+    if let Some((target_name, applicant)) = guild_apply_pending {
+        let mut clients = broadcaster.clients.lock();
+        if let Some(target) = clients.values_mut().find_map(|client| {
+            client
+                .player
+                .as_mut()
+                .filter(|player| player.body.get_name() == target_name)
+        }) {
+            if append_guild_application(&mut target.body, &applicant) {
+                let path = format!("data/user/{}.json", target.body.get_name());
+                let _ = save_body_to_json(&mut target.body, &path);
+            }
+        }
+    }
+
+    if let Some(guild) = guild_reset_pending {
+        clear_live_guild_members(broadcaster, &guild);
+    }
+    if let Some((target_name, key, value)) = admin_set_player_value_pending {
+        let mut clients = broadcaster.clients.lock();
+        if let Some(target) = clients.values_mut().find_map(|client| {
+            client
+                .player
+                .as_mut()
+                .filter(|player| player.body.get_name() == target_name)
+        }) {
+            apply_admin_player_value(&mut target.body, &key, value);
         }
     }
 
@@ -5475,6 +5593,121 @@ async fn handle_single_game_command(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn guild_application_appends_to_live_target_without_overwriting_or_substring_duplicates() {
+        let mut body = Body::new();
+        body.set("입문신청자", "홍길동\r\n길동이");
+        assert!(append_guild_application(&mut body, "길동"));
+        assert_eq!(body.get_string("입문신청자"), "홍길동\r\n길동이\r\n길동");
+        assert!(!append_guild_application(&mut body, "길동"));
+        assert_eq!(body.get_string("입문신청자"), "홍길동\r\n길동이\r\n길동");
+    }
+
+    #[test]
+    fn admin_player_value_request_preserves_runtime_number_and_string_types() {
+        let mut body = Body::new();
+        apply_admin_player_value(&mut body, "레벨", serde_json::json!(33));
+        apply_admin_player_value(&mut body, "배율", serde_json::json!(1.5));
+        apply_admin_player_value(&mut body, "설명", serde_json::json!("새 설명"));
+        assert_eq!(body.get_int("레벨"), 33);
+        assert!(matches!(body.object.attr.get("배율"), Some(crate::object::Value::Float(value)) if (*value - 1.5).abs() < f64::EPSILON));
+        assert_eq!(body.get_string("설명"), "새 설명");
+    }
+
+    #[test]
+    fn guild_reset_clears_only_matching_live_member_bodies() {
+        let suffix = std::process::id();
+        let guild = format!("실시간초기화-{suffix}");
+        let other_guild = format!("다른방파-{suffix}");
+        let member = format!("실시간방파원-{suffix}");
+        let outsider = format!("실시간타방파원-{suffix}");
+        let broadcaster = crate::network::Broadcaster::new();
+        for (port, name, affiliation) in [
+            (18331, member.as_str(), guild.as_str()),
+            (18332, outsider.as_str(), other_guild.as_str()),
+        ] {
+            let addr: SocketAddr = format!("127.0.0.1:{port}").parse().unwrap();
+            let (tx, _) = mpsc::unbounded_channel();
+            let mut client = Client::new(addr, tx);
+            let mut player = Player::new();
+            player.body.set("이름", name);
+            player.body.set("소속", affiliation);
+            player.body.set("직위", "방파인");
+            client.player = Some(player);
+            broadcaster.add_client(client);
+        }
+
+        clear_live_guild_members(&broadcaster, &guild);
+        let clients = broadcaster.clients.lock();
+        let by_name = |name: &str| {
+            clients.values().find_map(|client| {
+                client
+                    .player
+                    .as_ref()
+                    .filter(|player| player.body.get_name() == name)
+            })
+        };
+        let cleared = by_name(&member).unwrap();
+        assert_eq!(cleared.body.get_string("소속"), "");
+        assert_eq!(cleared.body.get_string("직위"), "");
+        let preserved = by_name(&outsider).unwrap();
+        assert_eq!(preserved.body.get_string("소속"), other_guild);
+        assert_eq!(preserved.body.get_string("직위"), "방파인");
+        drop(clients);
+        let _ = std::fs::remove_file(format!("data/user/{member}.json"));
+        let _ = std::fs::remove_file(format!("data/user/{outsider}.json"));
+    }
+
+    #[tokio::test]
+    async fn room_description_editor_echoes_lines_preserves_blank_and_finishes_like_python() {
+        let suffix = std::process::id();
+        let zone = format!("방설명입력존-{suffix}");
+        let room = "1".to_string();
+        let dir = format!("data/map/{zone}");
+        let path = format!("{dir}/{room}.json");
+        std::fs::create_dir_all(&dir).unwrap();
+        std::fs::write(&path, r#"{"맵정보":{"설명":["옛설명"]}}"#).unwrap();
+
+        let broadcaster = Arc::new(crate::network::Broadcaster::new());
+        let addr: SocketAddr = "127.0.0.1:18341".parse().unwrap();
+        let (tx, mut rx) = mpsc::unbounded_channel();
+        let mut client = Client::new(addr, tx);
+        client.complete_login();
+        let mut player = Player::new();
+        player.body.set("이름", format!("방설명작성자-{suffix}"));
+        client.player = Some(player);
+        client.pending_input = Some(PendingInput::RoomDescription {
+            zone: zone.clone(),
+            room: room.clone(),
+            lines: Vec::new(),
+        });
+        broadcaster.add_client(client);
+
+        handle_pending_change_password(&broadcaster, addr, "첫줄")
+            .await
+            .unwrap();
+        assert_eq!(rx.try_recv().unwrap(), "첫줄\r\n:");
+        handle_pending_change_password(&broadcaster, addr, "")
+            .await
+            .unwrap();
+        assert_eq!(rx.try_recv().unwrap(), " \r\n:");
+        handle_pending_change_password(&broadcaster, addr, ".")
+            .await
+            .unwrap();
+        let finished = rx.try_recv().unwrap();
+        assert!(finished.starts_with("작성을 마칩니다.\r\n"));
+
+        let saved: serde_json::Value =
+            serde_json::from_str(&std::fs::read_to_string(&path).unwrap()).unwrap();
+        assert_eq!(saved["맵정보"]["설명"], serde_json::json!(["첫줄", " "]));
+        assert!(broadcaster
+            .clients
+            .lock()
+            .get(&addr)
+            .is_some_and(|client| client.pending_input.is_none()));
+        let _ = std::fs::remove_dir_all(dir);
+    }
 
     #[test]
     fn save_all_matches_python_player_active_filter() {
@@ -6216,6 +6449,18 @@ mod tests {
             );
         }
         assert!(global_player_snapshot_needs("외쳐", None).online_names);
+        for command in [
+            "방파말",
+            "똥파말",
+            "방파별호",
+            "방파파문",
+            "방주권한양도",
+            "직위임명",
+            "명칭설정",
+        ] {
+            assert!(global_snapshot_includes_transparent(command, None), "{command}");
+        }
+        assert!(!global_snapshot_includes_transparent("누구", None));
         assert!(global_player_snapshot_needs("쪽지", None).connected_names);
         for command in ["전음", "반전음"] {
             let needs = global_player_snapshot_needs(command, None);

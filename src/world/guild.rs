@@ -164,6 +164,92 @@ pub fn guild_remove(id: &str) -> bool {
     ok
 }
 
+pub fn guild_create(id: &str, leader: &str, home: &str) -> bool {
+    let mut guild = get_guild().write().unwrap();
+    if guild.attr.contains_key(id) {
+        return false;
+    }
+    let mut attrs = Map::new();
+    attrs.insert("이름".into(), Value::String(id.to_string()));
+    attrs.insert("방주이름".into(), Value::String(leader.to_string()));
+    attrs.insert("방파원수".into(), Value::Number(1.into()));
+    attrs.insert("방파맵".into(), Value::String(home.to_string()));
+    for (role, title) in [
+        ("방주", "방주"),
+        ("부방주", "부방주"),
+        ("장로", "장로"),
+        ("방파인", "방파인"),
+    ] {
+        attrs.insert(format!("{role}명칭"), Value::String(title.to_string()));
+    }
+    guild.order.push(id.to_string());
+    guild.attr.insert(id.to_string(), attrs);
+    guild.save()
+}
+
+fn set_room_guild_owner(map_root: &std::path::Path, location: &str, guild: &str) -> Vec<String> {
+    let Some((zone, room)) = location.split_once(':') else {
+        return Vec::new();
+    };
+    let path = map_root.join(zone).join(format!("{room}.json"));
+    let Ok(raw) = std::fs::read_to_string(&path) else {
+        return Vec::new();
+    };
+    let Ok(mut root) = serde_json::from_str::<Value>(&raw) else {
+        return Vec::new();
+    };
+    let Some(info) = root.get_mut("맵정보").and_then(Value::as_object_mut) else {
+        return Vec::new();
+    };
+    let entrances = match info.get("방파입구") {
+        Some(Value::Array(values)) => values
+            .iter()
+            .filter_map(Value::as_str)
+            .map(str::to_string)
+            .collect(),
+        Some(Value::String(value)) => value
+            .split(['\r', '\n', ','])
+            .filter(|entry| !entry.is_empty())
+            .map(str::to_string)
+            .collect(),
+        _ => Vec::new(),
+    };
+    info.insert("방파주인".into(), Value::String(guild.to_string()));
+    if let Ok(serialized) = serde_json::to_string_pretty(&root) {
+        let _ = std::fs::write(path, serialized);
+    }
+    entrances
+}
+
+pub fn guild_claim_rooms(id: &str, home: &str) {
+    let Some((home_zone, _)) = home.split_once(':') else {
+        return;
+    };
+    let root = std::path::Path::new("data/map");
+    let entrances = set_room_guild_owner(root, home, id);
+    let mut claimed = vec![home.to_string()];
+    for entrance in entrances {
+        let location = if entrance.contains(':') {
+            entrance
+        } else {
+            format!("{home_zone}:{entrance}")
+        };
+        set_room_guild_owner(root, &location, id);
+        claimed.push(location);
+    }
+    if let Ok(mut world) = crate::world::get_world_state().write() {
+        for location in claimed {
+            let Some((zone, room)) = location.split_once(':') else {
+                continue;
+            };
+            world
+                .get_room_attrs_mut(zone, room)
+                .insert("방파주인".into(), id.to_string());
+            world.room_cache.remove_room(zone, room);
+        }
+    }
+}
+
 fn clear_room_guild_owner(map_root: &std::path::Path, location: &str) -> Vec<String> {
     let Some((zone, room)) = location.split_once(':') else {
         return Vec::new();
@@ -251,12 +337,19 @@ pub fn guild_reset(id: &str) -> bool {
         let Ok(mut json) = serde_json::from_str::<Value>(&raw) else {
             continue;
         };
-        let Some(attrs) = json
+        let Some(user_object) = json
             .get_mut("사용자오브젝트")
-            .and_then(|v| v.get_mut("attr"))
             .and_then(Value::as_object_mut)
         else {
             continue;
+        };
+        let attrs = if user_object.get("attr").is_some_and(Value::is_object) {
+            user_object
+                .get_mut("attr")
+                .and_then(Value::as_object_mut)
+                .unwrap()
+        } else {
+            user_object
         };
         let belongs = attrs.get("소속").and_then(Value::as_str) == Some(id);
         if belongs {

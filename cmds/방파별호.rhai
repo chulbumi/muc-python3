@@ -22,6 +22,7 @@ fn cmd(ob, line) {
     if !found {
         for player in online {
             if player["이름"].to_string() == target_name
+                    && player["투명상태"] != 1
                     && player["zone"].to_string() == location["zone"].to_string()
                     && player["room"].to_string() == location["room"].to_string() {
                 found = true;
@@ -55,22 +56,6 @@ fn cmd(ob, line) {
     let announcement = actor + " \x1b[1m" + target_display
         + "\x1b[0;37m의 방파별호를 『\x1b[1;32m" + nickname
         + "\x1b[0;37m』" + han_uro(nickname) + " 함을 선포합니다.";
-    let custom_title = guild_get(guild, get_string(ob, "직위") + "명칭");
-    let title = if custom_title == "" { get_string(ob, "직위") } else { custom_title };
-    let group_line = "\x1b[1m《\x1b[36m" + title + "\x1b[37mː\x1b[36m"
-        + own_name + "\x1b[37m》\x1b[0;37m " + announcement;
-    for player in online {
-        let name = player["이름"].to_string();
-        if name == own_name || player["소속"].to_string() != guild { continue; }
-        let config = player["설정상태"].to_string();
-        if config_text_is_enabled(config, "방파말거부") { continue; }
-        let prompt = if config_text_is_enabled(config, "엘피출력") { "" } else {
-            "\r\n\x1b[0;37;40m[ " + player["현재체력"].to_string() + "/"
-                + player["최고체력"].to_string() + ", "
-                + player["현재내공"].to_string() + "/"
-                + player["최고내공"].to_string() + " ] "
-        };
-        send_to_user(name, "\r\n" + group_line + prompt);
-    }
+    send_python_guild_group_except(ob, announcement, own_name);
 }
 fn main(ob, line) { cmd(ob, line); }

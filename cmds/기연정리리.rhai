@@ -16,7 +16,7 @@ fn cmd(ob, line) {
         return;
     }
     let owner = oneitem_get(idx);
-    let words = split(owner, " ");
+    let words = line_args(owner);
     let who = "";
     let where = "";
     if len(words) == 1 {

@@ -45,7 +45,8 @@ fn send_python_guild_group_except(ob, line, excluded) {
                     + player["현재내공"].to_string() + "/"
                     + player["최고내공"].to_string() + " ] "
             };
-            send_to_user(name, "\r\n" + group_line + prompt);
+            // send_to_user routing supplies Python's preceding blank line.
+            send_to_user(name, group_line + prompt);
         }
     }
 }

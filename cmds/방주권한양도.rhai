@@ -15,6 +15,7 @@ fn cmd(ob, line) {
         let found = false;
         for player in get_all_online_players() {
             if player["이름"].to_string() == line
+                    && player["투명상태"] != 1
                     && player["zone"].to_string() == location["zone"].to_string()
                     && player["room"].to_string() == location["room"].to_string() {
                 found = true;
@@ -33,6 +34,17 @@ fn cmd(ob, line) {
         let msg = "\x1b[1m" + own_name + "\x1b[0;37m" + han_iga(own_name)
             + " \x1b[1m" + line + "\x1b[0;37m" + han_eul(line)
             + " 방주로 권한이양을 선포합니다.";
+        for player in get_all_online_players() {
+            if player["이름"].to_string() != line { continue; }
+            if !config_text_is_enabled(player["설정상태"].to_string(), "엘피출력") {
+                send_to_user(line, "\x1b[0;37;40m[ "
+                    + player["현재체력"].to_string() + "/"
+                    + player["최고체력"].to_string() + ", "
+                    + player["현재내공"].to_string() + "/"
+                    + player["최고내공"].to_string() + " ] ");
+            }
+            break;
+        }
         send_python_guild_group(ob, msg);
     }
     else { send_line(ob, "☞ 이곳에 그런 무림인이 없습니다."); }

@@ -12,8 +12,14 @@ fn cmd(ob, line) {
         send_line(ob, "☞ 사용법: [힘|민첩성|맷집|명중|회피|필살|운|내공|체력] 내려");
         return;
     }
-    let x = get_int(ob, ln + "특성치");
-    let base = if x == 0 && contains(" 명중 회피 필살 운 ", " " + ln + " ") { get_int(ob, ln) } else { x };
+    let raw = get_attr(ob, ln + "특성치");
+    let missing = raw.is_unit() || raw.to_string() == "";
+    let x = if missing { 0 } else { to_int(raw.to_string()) };
+    let base = if missing && contains(" 명중 회피 필살 운 ", " " + ln + " ") {
+        get_int(ob, ln)
+    } else {
+        x
+    };
     if base <= 0 {
         send_line(ob, "☞ [" + ln + "] 더이상 내릴 수 없습니다.");
         return;

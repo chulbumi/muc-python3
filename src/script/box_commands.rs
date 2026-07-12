@@ -2124,6 +2124,35 @@ mod tests {
     }
 
     #[test]
+    fn money_put_matches_python_default_prefix_parse_and_guard_order() {
+        let directory = test_directory("money_edges");
+        let mut body = Body::new();
+        body.set("이름", "은전보관자");
+        body.set("은전", 10_i64);
+
+        let mut fixed = make_box(&directory, "고정함", "주인", 10, 10, &["무기"], &[]);
+        let fixed_result = put_money(&mut body, &mut fixed, 999);
+        assert_eq!(fixed_result.status, TransferStatus::NotExpandable);
+        assert_eq!(body.get_int("은전"), 10);
+
+        let mut box_object = make_box(&directory, "함", "주인", 1, 5, &["무기"], &[]);
+        let insufficient = put_money(&mut body, &mut box_object, 11);
+        assert_eq!(insufficient.status, TransferStatus::NotEnoughMoney);
+        assert_eq!(body.get_int("은전"), 10);
+        let default_one = put_money(&mut body, &mut box_object, python_get_int("0"));
+        assert_eq!(default_one.status, TransferStatus::Ok);
+        assert_eq!(default_one.money, 1);
+        assert_eq!(body.get_int("은전"), 9);
+        assert_eq!(box_object.getInt("은전"), 1);
+        let prefixed = put_money(&mut body, &mut box_object, python_get_int("8개"));
+        assert_eq!(prefixed.status, TransferStatus::Ok);
+        assert_eq!(prefixed.money, 8);
+        assert_eq!(body.get_int("은전"), 1);
+        assert_eq!(box_object.getInt("은전"), 9);
+        let _ = std::fs::remove_dir_all(directory);
+    }
+
+    #[test]
     fn put_bulk_prepends_each_identity_and_uses_actor_for_oneitem_location() {
         let directory = test_directory("put_bulk");
         let mut box_object = make_box(&directory, "함", "주인", 3, 10, &["무기"], &[]);
@@ -2236,6 +2265,61 @@ mod tests {
         );
         assert_eq!(result.status, TransferStatus::Ok);
         assert_eq!(object_names(&body.object.objs), ["첫째", "기존"]);
+        assert_eq!(object_names(&box_object.objs), ["둘째"]);
+        let _ = std::fs::remove_dir_all(directory);
+    }
+
+    #[test]
+    fn take_checks_weight_before_count_and_keeps_python_partial_success() {
+        let directory = test_directory("take_guards");
+        let mut box_object = make_box(&directory, "함", "주인", 10, 10, &["무기"], &[]);
+        box_object.objs = vec![make_item("1", "후보", "무기", &["후보"], &[], 1)];
+        let mut body = Body::new();
+        body.set("이름", "한계시험");
+        body.set("힘", 1_i64);
+        body.object.objs = vec![
+            make_item("a", "기존1", "무기", &["기존1"], &[], 5),
+            make_item("b", "기존2", "무기", &["기존2"], &[], 5),
+        ];
+        let mut oneitems = RecordingOneItems::default();
+        let both = take_bulk(
+            &mut body,
+            &mut box_object,
+            TakeBulkMode::All,
+            1,
+            &mut oneitems,
+        );
+        assert_eq!(both.status, TransferStatus::TooHeavy);
+        assert_eq!(object_names(&box_object.objs), ["후보"]);
+
+        body.set("힘", 100_i64);
+        let count_only = take_bulk(
+            &mut body,
+            &mut box_object,
+            TakeBulkMode::All,
+            1,
+            &mut oneitems,
+        );
+        assert_eq!(count_only.status, TransferStatus::ItemLimit);
+        assert_eq!(object_names(&box_object.objs), ["후보"]);
+
+        body.object.objs.clear();
+        body.set("힘", 1_i64);
+        box_object.objs = vec![
+            make_item("1", "첫째", "무기", &["첫째"], &[], 6),
+            make_item("2", "둘째", "무기", &["둘째"], &[], 6),
+        ];
+        let partial = take_bulk(
+            &mut body,
+            &mut box_object,
+            TakeBulkMode::All,
+            300,
+            &mut oneitems,
+        );
+        assert_eq!(partial.status, TransferStatus::Ok);
+        assert_eq!(partial.groups.len(), 1);
+        assert_eq!(partial.groups[0].name, "첫째");
+        assert_eq!(object_names(&body.object.objs), ["첫째"]);
         assert_eq!(object_names(&box_object.objs), ["둘째"]);
         let _ = std::fs::remove_dir_all(directory);
     }
