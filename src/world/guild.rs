@@ -13,6 +13,7 @@ pub struct Guild {
     path: PathBuf,
     /// guild_id -> { 이름, 방주리스트, 부방주리스트, ... }
     pub attr: HashMap<String, Map<String, Value>>,
+    order: Vec<String>,
 }
 
 impl Default for Guild {
@@ -26,6 +27,7 @@ impl Guild {
         Self {
             path: PathBuf::from(DEFAULT_PATH),
             attr: HashMap::new(),
+            order: Vec::new(),
         }
     }
 
@@ -33,6 +35,7 @@ impl Guild {
         Self {
             path: path.into(),
             attr: HashMap::new(),
+            order: Vec::new(),
         }
     }
 
@@ -40,22 +43,28 @@ impl Guild {
         let Ok(s) = std::fs::read_to_string(&self.path) else {
             return;
         };
-        let Ok(root) = serde_json::from_str::<Map<String, Value>>(&s) else {
+        let Ok(root) = serde_json::from_str::<indexmap::IndexMap<String, Value>>(&s) else {
             return;
         };
         self.attr.clear();
+        self.order.clear();
         for (k, v) in root {
             if let Some(m) = v.as_object() {
+                self.order.push(k.clone());
                 self.attr.insert(k, m.clone());
             }
         }
     }
 
     pub fn save(&self) -> bool {
-        let root: Map<String, Value> = self
-            .attr
+        let root: indexmap::IndexMap<String, Value> = self
+            .order
             .iter()
-            .map(|(k, v)| (k.clone(), Value::Object(v.clone())))
+            .filter_map(|key| {
+                self.attr
+                    .get(key)
+                    .map(|value| (key.clone(), Value::Object(value.clone())))
+            })
             .collect();
         let s = serde_json::to_string_pretty(&root).unwrap_or_default();
         std::fs::write(&self.path, s).is_ok()
@@ -66,12 +75,20 @@ impl Guild {
         self.attr
             .get(id)
             .and_then(|m| m.get(key))
-            .and_then(|v| v.as_str().map(String::from))
+            .map(|v| match v {
+                Value::String(value) => value.clone(),
+                Value::Number(value) => value.to_string(),
+                Value::Bool(value) => value.to_string(),
+                _ => String::new(),
+            })
             .unwrap_or_default()
     }
 
     /// guild_set(guild_id, key, value). value는 문자열. 리스트 등은 JSON 문자열로.
     pub fn set(&mut self, id: &str, key: &str, value: &str) {
+        if !self.attr.contains_key(id) {
+            self.order.push(id.to_string());
+        }
         self.attr
             .entry(id.to_string())
             .or_default()
@@ -88,7 +105,7 @@ impl Guild {
 
     /// guild_list() -> guild_id 목록.
     pub fn list(&self) -> Vec<String> {
-        self.attr.keys().cloned().collect()
+        self.order.clone()
     }
 
     /// guild_has(id) -> bool
@@ -98,7 +115,11 @@ impl Guild {
 
     /// guild_remove(id). 방파 삭제.
     pub fn remove(&mut self, id: &str) -> bool {
-        self.attr.remove(id).is_some()
+        let removed = self.attr.remove(id).is_some();
+        if removed {
+            self.order.retain(|saved| saved != id);
+        }
+        removed
     }
 }
 
@@ -268,6 +289,16 @@ fn role_members(value: Option<&Value>) -> Vec<String> {
             .collect(),
         _ => Vec::new(),
     }
+}
+
+pub fn guild_role_members(id: &str, role: &str) -> Vec<String> {
+    let guild = get_guild().read().unwrap();
+    let key = format!("{}리스트", role);
+    guild
+        .attr
+        .get(id)
+        .map(|attrs| role_members(attrs.get(&key)))
+        .unwrap_or_default()
 }
 
 /// Move one member between Python `GUILD` role lists and persist the guild.
@@ -476,6 +507,31 @@ pub fn guild_add_member(id: &str, role: &str, member: &str) -> bool {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn guild_load_save_and_list_preserve_python_json_order_and_numeric_values() {
+        let path = std::env::temp_dir().join(format!("muc-guild-order-{}.json", std::process::id()));
+        std::fs::write(
+            &path,
+            r#"{
+  "둘째": {"이름": "둘째방파", "방파원수": 12},
+  "첫째": {"이름": "첫방파", "방파원수": 3}
+}"#,
+        )
+        .unwrap();
+        let mut guild = Guild::with_path(&path);
+        guild.load();
+        assert_eq!(guild.list(), vec!["둘째", "첫째"]);
+        assert_eq!(guild.get_string("둘째", "방파원수"), "12");
+        guild.set("셋째", "이름", "셋방파");
+        guild.set("둘째", "방파맵", "존:1");
+        assert_eq!(guild.list(), vec!["둘째", "첫째", "셋째"]);
+        assert!(guild.save());
+        let saved = std::fs::read_to_string(&path).unwrap();
+        assert!(saved.find("\"둘째\"").unwrap() < saved.find("\"첫째\"").unwrap());
+        assert!(saved.find("\"첫째\"").unwrap() < saved.find("\"셋째\"").unwrap());
+        let _ = std::fs::remove_file(path);
+    }
 
     #[test]
     fn reset_room_cleanup_removes_owner_from_home_and_relative_or_absolute_entrances() {

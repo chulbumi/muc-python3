@@ -89,6 +89,7 @@ fn search_mob(body: &mut Body, query: &str) -> Map {
         let Ok(item_guard) = item.lock() else { break };
         let weight = item_guard.getInt("무게");
         let item_name = item_guard.getName();
+        let item_ansi = item_guard.getString("안시");
         let one_item = item_guard.checkAttr("아이템속성", "단일아이템");
         let item_index = item_guard.getString("인덱스");
         drop(item_guard);
@@ -102,7 +103,10 @@ fn search_mob(body: &mut Body, query: &str) -> Map {
         if one_item {
             crate::oneitem::oneitem_have(&item_index, &body.get_name());
         }
-        taken.push(Dynamic::from(item_name));
+        let mut item_data = Map::new();
+        item_data.insert("이름".into(), Dynamic::from(item_name));
+        item_data.insert("안시".into(), Dynamic::from(item_ansi));
+        taken.push(Dynamic::from(item_data));
     }
     // Python updates timeofregen even when capacity prevents the first item.
     mob.time_of_regen = chrono::Utc::now().timestamp();
@@ -120,7 +124,10 @@ pub(super) fn register_search_body_efun(engine: &mut Engine, body_ptr: *mut Body
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::object::Object;
     use crate::script::ScriptStorage;
+    use crate::world::{MobInstance, PlayerPosition, RawMobData};
+    use std::sync::{Arc, Mutex};
 
     #[test]
     fn rhai_search_usage_is_the_python_message() {
@@ -132,5 +139,71 @@ mod tests {
             .unwrap();
         assert_eq!(output, vec!["☞ 사용법: [대상] 뒤져"]);
         assert!(special.is_none());
+    }
+
+    #[test]
+    fn corpse_search_moves_items_and_preserves_python_ansi_particles_and_order() {
+        let suffix = std::process::id();
+        let player_name = format!("뒤져회귀-{suffix}");
+        let zone = format!("뒤져회귀존-{suffix}");
+        let mob_key = format!("{zone}:시험몹");
+        let mut data = RawMobData::new();
+        data.name = "시험몹".into();
+        data.zone = zone.clone();
+        let mut mob = MobInstance::new(mob_key.clone(), zone.clone(), "1", &data);
+        mob.act = 2;
+        let mut first = Object::new();
+        first.set("이름", "구슬");
+        first.set("반응이름", "구슬");
+        first.set("무게", 1_i64);
+        let mut second = Object::new();
+        second.set("이름", "부적");
+        second.set("반응이름", "부적");
+        second.set("무게", 1_i64);
+        second.set("안시", "\x1b[35m");
+        mob.inventory.push(Arc::new(Mutex::new(first)));
+        mob.inventory.push(Arc::new(Mutex::new(second)));
+        {
+            let mut world = get_world_state().write().unwrap();
+            world.mob_cache.insert_mob_data(mob_key.clone(), data);
+            world.mob_cache.add_mob_instance(mob);
+            world.set_player_position(
+                &player_name,
+                PlayerPosition::new(zone.clone(), "1".into()),
+            );
+        }
+        let mut body = Body::new();
+        body.set("이름", player_name.as_str());
+        body.set("힘", 100_i64);
+        let storage = ScriptStorage::default();
+        let result = storage
+            .execute("뒤져", &mut body, "시체", None, None, None)
+            .unwrap();
+        assert_eq!(
+            &result.0[..2],
+            &[
+                "당신이 \x1b[33m시험몹\x1b[37m의 시체속에서 \x1b[0;36m구슬\x1b[37m을 뒤져서 가집니다.",
+                "당신이 \x1b[33m시험몹\x1b[37m의 시체속에서 \x1b[35m부적\x1b[0;37m을 뒤져서 가집니다."
+            ]
+        );
+        assert_eq!(
+            result.0[2],
+            format!(
+                "\x1b[1m{player_name}\x1b[0;37m가 \x1b[33m시험몹\x1b[37m의 시체속에서 \x1b[0;36m구슬\x1b[37m을 뒤져서 가집니다.\r\n\x1b[1m{player_name}\x1b[0;37m가 \x1b[33m시험몹\x1b[37m의 시체속에서 \x1b[35m부적\x1b[0;37m을 뒤져서 가집니다."
+            )
+        );
+        assert_eq!(body.object.objs.len(), 2);
+        assert_eq!(body.object.objs[0].lock().unwrap().getName(), "구슬");
+        assert_eq!(body.object.objs[1].lock().unwrap().getName(), "부적");
+        {
+            let world = get_world_state().read().unwrap();
+            let mobs = world.mob_cache.get_all_mobs_in_room(&zone, "1");
+            assert!(mobs[0].inventory.is_empty());
+            assert!(mobs[0].time_of_regen > 0);
+        }
+
+        let mut world = get_world_state().write().unwrap();
+        world.remove_player_position(&player_name);
+        world.mob_cache.remove_mob(&mob_key);
     }
 }

@@ -18,14 +18,18 @@ fn cmd(ob, line) {
         send_line(ob, "☞ 시체만 가능합니다. *^_^*");
         return;
     }
+    let first = true;
     for message in result["messages"] {
-        if message != "" {
-            send_line(ob, "\r\n" + message);
-            send_room(ob, "\r\n" + message);
+        send_line(ob, if first { "\r\n" + message } else { message });
+        first = false;
+        for player_name in get_room_players(ob) {
+            if player_name != get_string(ob, "이름") {
+                send_to_user(player_name, message);
+            }
         }
     }
     // Python prints this confirmation only for the all-corpses branch.
-    if line == "" { send_line(ob, "\r\n\r\n☞ 리젠되었습니다."); }
+    if line == "" { send_line(ob, "\r\n☞ 리젠되었습니다."); }
 }
 
 fn main(ob, line) { cmd(ob, line); }

@@ -2,32 +2,31 @@
 // Python: cmds/방파리스트.py
 
 fn cmd(ob, line) {
-    send_line(ob, "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━");
-    send_line(ob, "☆ 방파 리스트");
-    send_line(ob, "───────────────────────────────────────");
-
+    let msg = "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━\r\n"
+        + "☆ 방파 리스트\r\n"
+        + "───────────────────────────────────────\r\n";
     let ids = guild_list();
-    let admin_level = get_attr(ob, "관리자등급");
-    let is_admin = to_int(admin_level) >= 1000;
-
+    let is_admin = get_int(ob, "관리자등급") >= 1000;
     for i in 0..len(ids) {
         let gid = ids[i];
         let n = guild_get(gid, "이름");
-        let leader = guild_get(gid, "방주");
-
+        let leader = guild_get(gid, "방주이름");
+        if leader == "" { leader = guild_get(gid, "방주리스트"); }
         let guild_name = if length(n) > 0 { n } else { gid };
         let buf = "[" + guild_name + "]";
-
+        let buf_pad = buf + repeat(" ", if length(buf) < 12 { 12 - length(buf) } else { 0 });
+        let leader_pad = leader + repeat(" ", if length(leader) < 30 { 30 - length(leader) } else { 0 });
+        let count = guild_get(gid, "방파원수");
+        let count_pad = repeat(" ", if length(count) < 3 { 3 - length(count) } else { 0 }) + count;
         if is_admin {
             let map = guild_get(gid, "방파맵");
-            let map_info = if length(map) > 0 { " " + map } else { "" };
-            send_line(ob, "  " + buf + " : " + leader + map_info);
+            msg += buf_pad + " : " + leader_pad + "   " + count_pad + " 명 " + map + "\r\n";
         } else {
-            send_line(ob, "  " + buf + " : " + leader);
+            msg += buf_pad + " : " + leader_pad + "   " + count_pad + " 명\r\n";
         }
     }
-
-    send_line(ob, "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━");
+    msg += "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━";
+    send_line(ob, msg);
 }
 
 fn main(ob, line) {

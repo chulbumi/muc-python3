@@ -16,6 +16,9 @@ fn cmd(ob, line) {
     let cnt = 0;
     let arr = get_all_online_players();
     for c in arr {
+        if c["투명상태"] == 1 {
+            continue;
+        }
         if mode && c["소속"] != so {
             continue;
         }
@@ -59,7 +62,6 @@ fn cmd(ob, line) {
     } else {
         send_line(ob, " ★ 총 " + cnt_s + "명의 무림인이 활동하고 있습니다.");
     }
-    send_line(ob, "");
 }
 
 fn main(ob, line) {

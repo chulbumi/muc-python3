@@ -41,7 +41,7 @@ use crate::script::{
     set_precomputed_room_inventories, set_precomputed_room_mugong_targets,
     set_precomputed_room_view_players, set_precomputed_tell_players, take_adult_channel_requests,
     take_auto_move_request, take_box_deliveries, take_change_player_request,
-    take_force_command_request,
+    take_force_command_request, take_guild_accept_request,
     take_guild_kick_request, take_guild_nickname_request, take_guild_position_request,
     take_guild_transfer_request,
     take_party_requests,
@@ -2678,18 +2678,37 @@ pub(crate) fn broadcast_shout(broadcaster: &crate::network::Broadcaster, msg: &s
 }
 
 /// 공지(notice): 게임 접속 전체에 전송. 외침거부와 무관하게 Active 클라이언트 전원에게.
-pub(crate) fn broadcast_notice(broadcaster: &crate::network::Broadcaster, msg: &str) {
+pub(crate) fn broadcast_notice(
+    broadcaster: &crate::network::Broadcaster,
+    sender_addr: SocketAddr,
+    msg: &str,
+) {
     use crate::network::ClientState;
     let clients = broadcaster.clients.lock();
-    let line = format!("\r\n{}\r\n", msg);
     let mut dead_addrs = Vec::new();
 
     for (&addr, client) in clients.iter() {
         if client.state != ClientState::Active {
             continue;
         }
-        if client.player.is_some() {
-            if let Err(_e) = client.sender.send(line.clone()) {
+        if let Some(player) = client.player.as_ref() {
+            // Python: 발신자는 sendLine(buf), 다른 사용자는
+            // sendLine("\r\n" + buf) 후 lpPrompt()를 받는다.
+            let mut line = if addr == sender_addr {
+                format!("{}\r\n", msg)
+            } else {
+                format!("\r\n{}\r\n", msg)
+            };
+            if addr != sender_addr && !player.check_config("엘피출력") {
+                line.push_str(&format!(
+                    "\r\n\x1b[0;37;40m[ {}/{}, {}/{} ] ",
+                    player.body.get_hp(),
+                    player.body.get_max_hp(),
+                    player.body.get_mp(),
+                    player.body.get_max_mp()
+                ));
+            }
+            if let Err(_e) = client.sender.send(line) {
                 tracing::debug!("Failed to send to {} (connection dead)", addr);
                 dead_addrs.push(addr);
             }
@@ -2704,6 +2723,24 @@ pub(crate) fn broadcast_notice(broadcaster: &crate::network::Broadcaster, msg: &
             addr
         );
         broadcaster.remove_client(addr);
+    }
+}
+
+fn save_all_active_players(broadcaster: &crate::network::Broadcaster) {
+    let ordered = broadcaster.client_addresses_in_order();
+    let mut clients = broadcaster.clients.lock();
+    for client_addr in ordered {
+        let Some(player) = clients
+            .get_mut(&client_addr)
+            .and_then(|client| client.player.as_mut())
+        else {
+            continue;
+        };
+        if player.state != STATE_ACTIVE {
+            continue;
+        }
+        let path = format!("data/user/{}.json", player.body.get_name());
+        let _ = save_body_to_json(&mut player.body, &path);
     }
 }
 
@@ -3554,8 +3591,9 @@ async fn handle_single_game_command(
     let mut guild_transfer_pending: Option<String> = None;
     let mut guild_position_pending: Option<(String, String)> = None;
     let mut guild_nickname_pending: Option<(String, String)> = None;
+    let mut guild_accept_pending: Option<(String, String)> = None;
     let mut summon_player_pending: Vec<(String, String, String)> = Vec::new();
-    let mut force_command_pending: Option<(String, String)> = None;
+    let mut force_command_pending: Vec<(String, String)> = Vec::new();
     let mut change_player_pending: Option<String> = None;
     let mut set_player_attr_pending: Option<(String, String, i64)> = None;
     let mut movement_follower_candidates: Vec<(SocketAddr, String)> = Vec::new();
@@ -3691,7 +3729,8 @@ async fn handle_single_game_command(
             || connected_names_requested
             || tell_players_requested
         {
-            for (&client_addr, client) in clients.iter() {
+            for client_addr in broadcaster.client_addresses_in_order() {
+                let Some(client) = clients.get(&client_addr) else { continue };
                 let p = match &client.player {
                     Some(player) => player,
                     None => continue,
@@ -4221,6 +4260,7 @@ async fn handle_single_game_command(
                 guild_transfer_pending = take_guild_transfer_request(&mut player.body);
                 guild_position_pending = take_guild_position_request(&mut player.body);
                 guild_nickname_pending = take_guild_nickname_request(&mut player.body);
+                guild_accept_pending = take_guild_accept_request(&mut player.body);
                 summon_player_pending = take_summon_player_request(&mut player.body);
                 force_command_pending = take_force_command_request(&mut player.body);
                 change_player_pending = take_change_player_request(&mut player.body);
@@ -4620,13 +4660,7 @@ async fn handle_single_game_command(
     }
 
     if save_all_pending {
-        let mut clients = broadcaster.clients.lock();
-        for client in clients.values_mut() {
-            if let Some(other) = client.player.as_mut() {
-                let path = format!("data/user/{}.json", other.body.get_name());
-                let _ = save_body_to_json(&mut other.body, &path);
-            }
-        }
+        save_all_active_players(broadcaster);
     }
 
     if let Some((target_name, skill_name, level)) = set_skill_pending {
@@ -4701,6 +4735,21 @@ async fn handle_single_game_command(
                 .filter(|player| player.body.get_name() == target_name)
         }) {
             target.body.set("방파별호", nickname);
+            let path = format!("data/user/{}.json", target.body.get_name());
+            let _ = save_body_to_json(&mut target.body, &path);
+        }
+    }
+
+    if let Some((target_name, guild)) = guild_accept_pending {
+        let mut clients = broadcaster.clients.lock();
+        if let Some(target) = clients.values_mut().find_map(|client| {
+            client
+                .player
+                .as_mut()
+                .filter(|player| player.body.get_name() == target_name)
+        }) {
+            target.body.set("소속", guild);
+            target.body.set("직위", "방파인".to_string());
             let path = format!("data/user/{}.json", target.body.get_name());
             let _ = save_body_to_json(&mut target.body, &path);
         }
@@ -5251,7 +5300,7 @@ async fn handle_single_game_command(
         broadcast_shout(broadcaster, msg);
     }
     if let Some(ref msg) = notice_to_broadcast {
-        broadcast_notice(broadcaster, msg);
+        broadcast_notice(broadcaster, addr, msg);
     }
     if let Some(list) = send_to_users.take() {
         for (name, msg) in list {
@@ -5330,7 +5379,7 @@ async fn handle_single_game_command(
         }
     }
 
-    if let Some((target_name, forced_command)) = force_command_pending {
+    for (target_name, forced_command) in force_command_pending {
         let target_addr = broadcaster.clients.lock().iter().find_map(|(candidate, client)| {
             client
                 .player
@@ -5426,6 +5475,85 @@ async fn handle_single_game_command(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn save_all_matches_python_player_active_filter() {
+        let suffix = std::process::id();
+        let first_name = format!("모두저장첫째-{suffix}");
+        let second_name = format!("모두저장둘째-{suffix}");
+        let inactive_name = format!("모두저장비활성-{suffix}");
+        let broadcaster = crate::network::Broadcaster::new();
+        for (port, name, active, marker) in [
+            (18201, first_name.as_str(), true, 11_i64),
+            (18202, inactive_name.as_str(), false, 22_i64),
+            (18203, second_name.as_str(), true, 33_i64),
+        ] {
+            let addr: SocketAddr = format!("127.0.0.1:{port}").parse().unwrap();
+            let (tx, _) = mpsc::unbounded_channel();
+            let mut client = Client::new(addr, tx);
+            let mut player = Player::new();
+            player.state = if active { STATE_ACTIVE } else { 0 };
+            player.body.set("이름", name);
+            player.body.set("저장표식", marker);
+            client.player = Some(player);
+            broadcaster.add_client(client);
+        }
+
+        save_all_active_players(&broadcaster);
+        for (name, marker) in [(&first_name, 11_i64), (&second_name, 33_i64)] {
+            let path = format!("data/user/{name}.json");
+            let json: serde_json::Value =
+                serde_json::from_str(&std::fs::read_to_string(&path).unwrap()).unwrap();
+            assert_eq!(json["사용자오브젝트"]["저장표식"], marker);
+            assert!(json["사용자오브젝트"]["마지막저장시간"]
+                .as_i64()
+                .is_some_and(|value| value > 0));
+            let _ = std::fs::remove_file(path);
+        }
+        let inactive_path = format!("data/user/{inactive_name}.json");
+        assert!(!std::path::Path::new(&inactive_path).exists());
+    }
+
+    #[test]
+    fn notice_delivery_matches_python_sender_recipient_prompt_and_active_filter() {
+        let broadcaster = crate::network::Broadcaster::new();
+        let sender_addr: SocketAddr = "127.0.0.1:18055".parse().unwrap();
+        let recipient_addr: SocketAddr = "127.0.0.1:18056".parse().unwrap();
+        let inactive_addr: SocketAddr = "127.0.0.1:18057".parse().unwrap();
+        let (sender_tx, mut sender_rx) = mpsc::unbounded_channel();
+        let (recipient_tx, mut recipient_rx) = mpsc::unbounded_channel();
+        let (inactive_tx, mut inactive_rx) = mpsc::unbounded_channel();
+
+        let mut sender = Client::new(sender_addr, sender_tx);
+        sender.complete_login();
+        sender.player = Some(Player::new());
+        broadcaster.add_client(sender);
+
+        let mut recipient = Client::new(recipient_addr, recipient_tx);
+        recipient.complete_login();
+        let mut recipient_player = Player::new();
+        recipient_player.body.set("체력", 11);
+        recipient_player.body.set("최고체력", 22);
+        recipient_player.body.set("내공", 3);
+        recipient_player.body.set("최고내공", 44);
+        recipient_player.body.set("설정상태", "엘피출력 0");
+        recipient.player = Some(recipient_player);
+        broadcaster.add_client(recipient);
+
+        let mut inactive = Client::new(inactive_addr, inactive_tx);
+        inactive.player = Some(Player::new());
+        broadcaster.add_client(inactive);
+
+        let message = "──\r\n\x1b[7m☞ 공지 : 점검\x1b[0m\r\n──";
+        broadcast_notice(&broadcaster, sender_addr, message);
+
+        assert_eq!(sender_rx.try_recv().unwrap(), format!("{message}\r\n"));
+        assert_eq!(
+            recipient_rx.try_recv().unwrap(),
+            format!("\r\n{message}\r\n\r\n\x1b[0;37;40m[ 11/22, 3/44 ] ")
+        );
+        assert!(inactive_rx.try_recv().is_err());
+    }
 
     #[test]
     fn box_delivery_routes_rhai_authored_send_room_and_prompt_bytes_unchanged() {

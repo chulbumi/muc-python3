@@ -425,6 +425,83 @@ mod tests {
     }
 
     #[test]
+    fn regen_command_emits_each_python_respawn_description_once_and_confirms_only_all() {
+        let suffix = std::process::id();
+        let player = format!("리젠검사{suffix}");
+        let zone = format!("리젠존{suffix}");
+        let room = "1";
+        let dead_key = format!("{zone}:죽은몹");
+        let live_key = format!("{zone}:산몹");
+        let mut dead_data = crate::world::RawMobData::new();
+        dead_data.name = "죽은몹".into();
+        dead_data.desc3 = "죽은몹이 다시 나타납니다.".into();
+        dead_data.max_hp = 321;
+        let mut dead = crate::world::MobInstance::new(
+            dead_key.clone(),
+            zone.clone(),
+            room,
+            &dead_data,
+        );
+        dead.kill();
+        let mut live_data = crate::world::RawMobData::new();
+        live_data.name = "산몹".into();
+        let live = crate::world::MobInstance::new(
+            live_key.clone(),
+            zone.clone(),
+            room,
+            &live_data,
+        );
+        {
+            let mut world = get_world_state().write().unwrap();
+            world.mob_cache.insert_mob_data(dead_key.clone(), dead_data);
+            world.mob_cache.insert_mob_data(live_key.clone(), live_data);
+            world.mob_cache.add_mob_instance(dead);
+            world.mob_cache.add_mob_instance(live);
+            world.set_player_position(
+                &player,
+                crate::world::PlayerPosition::new(zone.clone(), room.into()),
+            );
+        }
+        let storage = ScriptStorage::default();
+        let mut body = Body::new();
+        body.set("이름", player.as_str());
+        body.set("관리자등급", 1000_i64);
+
+        let all = storage
+            .execute("리젠", &mut body, "", None, None, None)
+            .unwrap();
+        assert_eq!(
+            all.0,
+            vec![
+                "\r\n죽은몹이 다시 나타납니다.",
+                "\r\n☞ 리젠되었습니다."
+            ],
+            "Python doRegen/writeRoom description must not be duplicated for the actor"
+        );
+        {
+            let world = get_world_state().read().unwrap();
+            let mobs = world.mob_cache.get_all_mobs_in_room(&zone, room);
+            let revived = mobs.iter().find(|mob| mob.mob_key == dead_key).unwrap();
+            assert!(revived.alive);
+            assert_eq!(revived.act, 0);
+            assert_eq!(revived.hp, 321);
+        }
+        let no_corpses = storage
+            .execute("리젠", &mut body, "", None, None, None)
+            .unwrap();
+        assert_eq!(no_corpses.0, vec!["☞ 리젠될 몹이 없어요!!"]);
+        let live_target = storage
+            .execute("리젠", &mut body, "산몹", None, None, None)
+            .unwrap();
+        assert_eq!(live_target.0, vec!["☞ 시체만 가능합니다. *^_^*"]);
+
+        let mut world = get_world_state().write().unwrap();
+        world.remove_player_position(&player);
+        world.mob_cache.remove_mob(&dead_key);
+        world.mob_cache.remove_mob(&live_key);
+    }
+
+    #[test]
     fn item_generation_keeps_python_zero_and_large_count_semantics() {
         let mut body = Body::new();
         let zero = create_items(&mut body, "사강시", 0);
@@ -438,6 +515,78 @@ mod tests {
             item.lock()
                 .is_ok_and(|item| item.getString("종류") == "호위" && item.getInt("체력") == 1400)
         }));
+    }
+
+    #[test]
+    fn mob_generation_clones_template_into_every_python_location_not_admin_room() {
+        let suffix = std::process::id();
+        let zone = format!("몹생성존{suffix}");
+        let key = format!("{zone}:생성대상");
+        let room_dir = std::path::Path::new("data/map").join(&zone);
+        std::fs::create_dir_all(&room_dir).unwrap();
+        for room in ["1", "2"] {
+            std::fs::write(
+                room_dir.join(format!("{room}.json")),
+                format!(r#"{{"맵정보":{{"이름":"시험방{room}","존이름":"{zone}","설명":[],"출구":[]}}}}"#),
+            )
+            .unwrap();
+        }
+        let mut data = crate::world::RawMobData::new();
+        data.name = "두방몹".into();
+        data.zone = zone.clone();
+        data.locations = vec![1, 2];
+        get_world_state()
+            .write()
+            .unwrap()
+            .mob_cache
+            .insert_mob_data(key.clone(), data);
+
+        let storage = ScriptStorage::default();
+        let mut body = Body::new();
+        let admin = format!("몹생성관리자{suffix}");
+        body.set("이름", admin.as_str());
+        body.set("관리자등급", 2000_i64);
+        get_world_state().write().unwrap().set_player_position(
+            &admin,
+            crate::world::PlayerPosition::new(zone.clone(), "1".into()),
+        );
+        let usage = storage
+            .execute("몹생성", &mut body, "", None, None, None)
+            .unwrap();
+        assert_eq!(usage.0, vec!["사용법: [몹 이름] 생성"]);
+        let created = storage
+            .execute("몹생성", &mut body, &key, None, None, None)
+            .unwrap();
+        assert_eq!(
+            created.0,
+            vec!["\x1b[1;32m* [두방몹] 생성 되었습니다.\x1b[0;37m"]
+        );
+        {
+            let world = get_world_state().read().unwrap();
+            assert_eq!(world.mob_cache.get_all_mobs_in_room(&zone, "1").len(), 1);
+            assert_eq!(world.mob_cache.get_all_mobs_in_room(&zone, "2").len(), 1);
+        }
+        let removed = storage
+            .execute("몹제거", &mut body, "두방몹", None, None, None)
+            .unwrap();
+        assert_eq!(removed.0, vec!["몹이 제거되었습니다."]);
+        {
+            let world = get_world_state().read().unwrap();
+            assert!(world.mob_cache.get_all_mobs_in_room(&zone, "1").is_empty());
+            assert_eq!(world.mob_cache.get_all_mobs_in_room(&zone, "2").len(), 1);
+        }
+        let failed = storage
+            .execute("몹생성", &mut body, "없는존:없는몹", None, None, None)
+            .unwrap();
+        assert_eq!(failed.0, vec!["* 생성 실패!!!"]);
+
+        let mut world = get_world_state().write().unwrap();
+        world.remove_player_position(&admin);
+        world.mob_cache.remove_instance(&zone, "1", &key);
+        world.mob_cache.remove_instance(&zone, "2", &key);
+        world.mob_cache.remove_mob(&key);
+        drop(world);
+        let _ = std::fs::remove_dir_all(room_dir);
     }
 
     #[test]

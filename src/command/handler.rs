@@ -123,7 +123,7 @@ pub enum CommandResult {
     SayToRoom(String, String),
     /// 외쳐(shout): 게임 접속 전체에 broadcast. 이름 없이 (외침타입) : 메시지. 외침거부 체크는 broadcast 쪽에서.
     Shout(String),
-    /// 공지(notice): 게임 접속 전체에 전송. 외침거부와 무관하게 전원에게. [공지] 이름 : 메시지.
+    /// 공지(notice): Rhai가 완성한 문구/ANSI를 ACTIVE 접속 전체에 전송.
     Notice(String),
     /// `전음.py`/`반전음.py`가 만든 전달 자료.
     ///

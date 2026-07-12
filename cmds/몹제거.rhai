@@ -28,10 +28,8 @@ fn cmd(ob, line) {
     }
 
     // 몹 제거 시도
-    if remove_user_mob(ob, line) {
+    if remove_room_mob(ob, line) {
         send_line(ob, "몹이 제거되었습니다.");
-    } else {
-        send_line(ob, "몹 제거에 실패했습니다.");
     }
 }
 

@@ -24,22 +24,29 @@ const INDEX_PATH: &str = "data/config/oneitem_index.json";
 pub struct OneitemState {
     /// index -> "owner" or "owner 보관" or "owner 떨굼" (로드 시 "버림" 제외)
     pub attr: HashMap<String, String>,
+    /// Python dict insertion order for the current process.
+    attr_order: Vec<String>,
     /// name -> index (oneitem_index의 단일아이템인덱스)
     pub index: HashMap<String, String>,
+    index_order: Vec<String>,
 }
 
 impl OneitemState {
     pub fn new() -> Self {
         Self {
             attr: HashMap::new(),
+            attr_order: Vec::new(),
             index: HashMap::new(),
+            index_order: Vec::new(),
         }
     }
 
     /// oneitem.json, oneitem_index.json 로드. 버림은 attr에 넣지 않음.
     pub fn load(&mut self) -> Result<(), Box<dyn std::error::Error>> {
         self.attr.clear();
+        self.attr_order.clear();
         self.index.clear();
+        self.index_order.clear();
 
         if Path::new(ATTR_PATH).exists() {
             let s = fs::read_to_string(ATTR_PATH)?;
@@ -52,6 +59,7 @@ impl OneitemState {
                         continue;
                     }
                     self.attr.insert(k.clone(), vs.to_string());
+                    self.attr_order.push(k.clone());
                 }
             }
         }
@@ -69,6 +77,7 @@ impl OneitemState {
                         idx.to_string()
                     };
                     self.index.insert(name.clone(), idx_s);
+                    self.index_order.push(name.clone());
                 }
             }
         }
@@ -92,10 +101,10 @@ impl OneitemState {
 
     /// index에 해당하는 이름. index는 name->index 이므로 값이 index인 name 반환.
     pub fn get_name(&self, index: &str) -> String {
-        self.index
+        self.index_order
             .iter()
-            .find(|(_, v)| v.as_str() == index)
-            .map(|(k, _)| k.clone())
+            .find(|name| self.index.get(*name).is_some_and(|value| value == index))
+            .cloned()
             .unwrap_or_default()
     }
 
@@ -106,12 +115,18 @@ impl OneitemState {
 
     /// 소유 이전: attr[index]=name, save.
     pub fn have(&mut self, index: &str, name: &str) -> Result<(), Box<dyn std::error::Error>> {
+        if !self.attr.contains_key(index) {
+            self.attr_order.push(index.to_string());
+        }
         self.attr.insert(index.to_string(), name.to_string());
         self.save()
     }
 
     /// 버림: attr[index]= "name 버림", save. (이름 충돌 회피로 do_drop)
     pub fn do_drop(&mut self, index: &str, name: &str) -> Result<(), Box<dyn std::error::Error>> {
+        if !self.attr.contains_key(index) {
+            self.attr_order.push(index.to_string());
+        }
         self.attr
             .insert(index.to_string(), format!("{} 버림", name));
         self.save()
@@ -119,6 +134,9 @@ impl OneitemState {
 
     /// 떨굼: attr[index]= "name 떨굼", save.
     pub fn drop2(&mut self, index: &str, name: &str) -> Result<(), Box<dyn std::error::Error>> {
+        if !self.attr.contains_key(index) {
+            self.attr_order.push(index.to_string());
+        }
         self.attr
             .insert(index.to_string(), format!("{} 떨굼", name));
         self.save()
@@ -126,6 +144,9 @@ impl OneitemState {
 
     /// 보관: attr[index]= "name 보관", save.
     pub fn keep(&mut self, index: &str, name: &str) -> Result<(), Box<dyn std::error::Error>> {
+        if !self.attr.contains_key(index) {
+            self.attr_order.push(index.to_string());
+        }
         self.attr
             .insert(index.to_string(), format!("{} 보관", name));
         self.save()
@@ -134,6 +155,7 @@ impl OneitemState {
     /// 삭제: attr에서 제거, save.
     pub fn destroy(&mut self, index: &str) -> Result<(), Box<dyn std::error::Error>> {
         self.attr.remove(index);
+        self.attr_order.retain(|saved| saved != index);
         self.save()
     }
 
@@ -164,7 +186,8 @@ impl OneitemState {
     /// 기연 형식: "%-16s (%-16s) : %s\r\n" for (name, index, owner). 파이썬 ONEITEM.attr 순회.
     pub fn list(&self) -> String {
         let mut out = String::new();
-        for (index, owner) in &self.attr {
+        for index in &self.attr_order {
+            let Some(owner) = self.attr.get(index) else { continue };
             let name = self.get_name(index);
             out.push_str(&format!("{:<16} ({:<16}) : {}\r\n", name, index, owner));
         }
@@ -174,12 +197,13 @@ impl OneitemState {
     /// attr 비우고 save.
     pub fn clear(&mut self) -> Result<(), Box<dyn std::error::Error>> {
         self.attr.clear();
+        self.attr_order.clear();
         self.save()
     }
 
     /// attr 키 목록 (스크립트용).
     pub fn attr_keys(&self) -> Vec<String> {
-        self.attr.keys().cloned().collect()
+        self.attr_order.clone()
     }
 }
 
@@ -380,7 +404,8 @@ pub fn oneitem_list_index_entries() -> rhai::Array {
     // Keep legacy-index-only entries, which Python can materialize lazily via
     // getItem even when their JSON file is absent.
     if arr.is_empty() {
-        for (name, index) in &guard.index {
+        for name in &guard.index_order {
+            let Some(index) = guard.index.get(name) else { continue };
             let mut m = rhai::Map::new();
             m.insert("name".into(), rhai::Dynamic::from(name.clone()));
             m.insert("index".into(), rhai::Dynamic::from(index.clone()));
@@ -388,4 +413,32 @@ pub fn oneitem_list_index_entries() -> rhai::Array {
         }
     }
     arr
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn list_and_name_lookup_follow_python_dict_insertion_order() {
+        let mut state = OneitemState::new();
+        state.index.insert("둘째기연".into(), "200".into());
+        state.index_order.push("둘째기연".into());
+        state.index.insert("첫기연".into(), "100".into());
+        state.index_order.push("첫기연".into());
+        state.attr.insert("100".into(), "첫소유자".into());
+        state.attr_order.push("100".into());
+        state.attr.insert("200".into(), "둘소유자 보관".into());
+        state.attr_order.push("200".into());
+
+        assert_eq!(state.get_name("100"), "첫기연");
+        assert_eq!(
+            state.list(),
+            format!(
+                "{:<16} ({:<16}) : 첫소유자\r\n{:<16} ({:<16}) : 둘소유자 보관\r\n",
+                "첫기연", "100", "둘째기연", "200"
+            )
+        );
+        assert_eq!(state.attr_keys(), vec!["100", "200"]);
+    }
 }

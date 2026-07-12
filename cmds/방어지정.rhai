@@ -35,7 +35,8 @@ fn cmd(ob, line) {
     if fighter.is_unit() { send_line(ob, "☞ 전투중인 무리원이 없어요. ^^"); return; }
     party_request_set_group_combat_targets(ob, [tanker["id"]], fighter["combat_target_ids"], tanker["id"]);
 
-    let message = tanker["name"] + han_iga(tanker["name"]) + " 무리의 방어로 지정 되었습니다.";
+    let message = "\x1b[1m" + tanker["name"] + "\x1b[0;37m"
+        + han_iga(tanker["name"]) + " 무리의 방어로 지정 되었습니다.";
     if leader["id"] != tanker["id"] { send_line(ob, message); }
     for member in ctx["party_members"] {
         if member["id"] == tanker["id"] { continue; }

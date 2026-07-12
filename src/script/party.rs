@@ -754,6 +754,41 @@ mod tests {
     }
 
     #[test]
+    fn defense_assignment_copies_fighter_targets_and_keeps_python_bold_tanker_notice() {
+        let mut leader = body("방어대장", "", "정파", 45, 90);
+        leader.act = crate::player::ActState::Fight;
+        leader.temp_mut().insert(
+            "_combat_target_ids".to_string(),
+            Value::String("몹:첫째\n몹:둘째".to_string()),
+        );
+        let tanker = body("방어담당", "", "정파", 60, 100);
+        let leader_person = person("leader", &leader, None, Some("leader"));
+        let tanker_person = person("tanker", &tanker, Some("leader"), Some("leader"));
+        let ctx = context(
+            leader_person.clone(),
+            None,
+            vec![],
+            Some(leader_person),
+            vec![tanker_person],
+            vec![],
+        );
+        assert_eq!(
+            run("방어지정", &mut leader, "방어담당", ctx),
+            vec!["\x1b[1m방어담당\x1b[0;37m이 무리의 방어로 지정 되었습니다."]
+        );
+        let (action, _) = take_party_requests(&mut leader);
+        assert!(matches!(
+            action,
+            Some(SocialAction::SetPartyCombatTargets { assignments, tanker: Some(tanker) })
+                if tanker == "tanker"
+                    && assignments == vec![(
+                        "tanker".to_string(),
+                        vec!["몹:첫째".to_string(), "몹:둘째".to_string()]
+                    )]
+        ));
+    }
+
+    #[test]
     fn follow_script_uses_room_snapshot_and_python_body_messages() {
         let mut actor = body("철수", "", "정파", 45, 90);
         let target = body("영희", "", "정파", 31, 45);

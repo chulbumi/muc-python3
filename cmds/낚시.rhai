@@ -8,9 +8,11 @@ fn cmd(ob, line) {
     call_out(get_string(ob, "이름"), "fishing_3", 6);
 }
 fn fishing_2(ob) {
+    set_value(ob, "cooltime", 0);
     send_line(ob, "낚시줄에 엄청난것이 걸린것 같다...");
 }
 fn fishing_3(ob) {
+    set_value(ob, "cooltime", 0);
     send_line(ob, "젠장! 낚시줄이 끊어졌다.");
 }
 

@@ -79,6 +79,8 @@ fn split_room_id(room_id: &str) -> Option<(&str, &str)> {
 pub struct Broadcaster {
     /// Map of connected clients by their socket address
     pub clients: Arc<Mutex<HashMap<SocketAddr, Client>>>,
+    /// Python `Client.players`/channel player iteration order.
+    client_order: Arc<Mutex<Vec<SocketAddr>>>,
     /// Connected player identity lookup.
     ///
     /// Room-local paths first obtain the insertion-ordered player names from
@@ -105,6 +107,7 @@ impl Broadcaster {
     pub fn new() -> Self {
         Self {
             clients: Arc::new(Mutex::new(HashMap::new())),
+            client_order: Arc::new(Mutex::new(Vec::new())),
             player_clients: Arc::new(Mutex::new(HashMap::new())),
             connection_clients: Arc::new(Mutex::new(HashMap::new())),
             social: Arc::new(Mutex::new(SocialState::default())),
@@ -118,6 +121,7 @@ impl Broadcaster {
     pub fn with_capacity(capacity: usize) -> Self {
         Self {
             clients: Arc::new(Mutex::new(HashMap::with_capacity(capacity))),
+            client_order: Arc::new(Mutex::new(Vec::with_capacity(capacity))),
             player_clients: Arc::new(Mutex::new(HashMap::with_capacity(capacity))),
             connection_clients: Arc::new(Mutex::new(HashMap::with_capacity(capacity))),
             social: Arc::new(Mutex::new(SocialState::default())),
@@ -179,6 +183,9 @@ impl Broadcaster {
             .map(|player| player.body.get_name())
             .filter(|name| !name.is_empty());
         let replaced = self.clients.lock().insert(addr, client);
+        if replaced.is_none() {
+            self.client_order.lock().push(addr);
+        }
         let old_token = replaced.as_ref().map(|old| old.connection_token.clone());
         let old_name = replaced
             .and_then(|old| old.player.map(|player| player.body.get_name()))
@@ -202,6 +209,9 @@ impl Broadcaster {
     /// Remove a client from the broadcaster
     pub fn remove_client(&self, addr: SocketAddr) -> Option<Client> {
         let removed = self.clients.lock().remove(&addr);
+        if removed.is_some() {
+            self.client_order.lock().retain(|saved| *saved != addr);
+        }
         if let Some(token) = removed
             .as_ref()
             .map(|client| client.connection_token.clone())
@@ -221,6 +231,10 @@ impl Broadcaster {
         }
         self.leave_adult_channel(addr);
         removed
+    }
+
+    pub(crate) fn client_addresses_in_order(&self) -> Vec<SocketAddr> {
+        self.client_order.lock().clone()
     }
 
     fn unbind_connection_token_if_matches(&self, token: &str, addr: SocketAddr) -> bool {
@@ -630,6 +644,7 @@ impl Clone for Broadcaster {
     fn clone(&self) -> Self {
         Self {
             clients: self.clients.clone(),
+            client_order: self.client_order.clone(),
             player_clients: self.player_clients.clone(),
             connection_clients: self.connection_clients.clone(),
             social: self.social.clone(),
@@ -673,6 +688,24 @@ impl Broadcast {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn client_order_matches_python_append_remove_and_same_address_replace() {
+        let broadcaster = Broadcaster::new();
+        let first: SocketAddr = "127.0.0.1:18101".parse().unwrap();
+        let second: SocketAddr = "127.0.0.1:18102".parse().unwrap();
+        let (first_tx, _) = tokio::sync::mpsc::unbounded_channel();
+        let (second_tx, _) = tokio::sync::mpsc::unbounded_channel();
+        broadcaster.add_client(Client::new(first, first_tx));
+        broadcaster.add_client(Client::new(second, second_tx));
+        assert_eq!(broadcaster.client_addresses_in_order(), vec![first, second]);
+
+        let (replacement_tx, _) = tokio::sync::mpsc::unbounded_channel();
+        broadcaster.add_client(Client::new(first, replacement_tx));
+        assert_eq!(broadcaster.client_addresses_in_order(), vec![first, second]);
+        broadcaster.remove_client(first);
+        assert_eq!(broadcaster.client_addresses_in_order(), vec![second]);
+    }
 
     fn named_client(addr: SocketAddr, name: &str) -> Client {
         let (sender, _receiver) = tokio::sync::mpsc::unbounded_channel();
