@@ -26,8 +26,27 @@ pub(crate) const GUILD_KICK_REQUEST: &str = "_guild_kick_request";
 pub(crate) const SAVE_ALL_REQUEST: &str = "_save_all_request";
 pub(crate) const SET_SKILL_REQUEST: &str = "_set_skill_request";
 pub(crate) const GUILD_TRANSFER_REQUEST: &str = "_guild_transfer_request";
+pub(crate) const GUILD_POSITION_REQUEST: &str = "_guild_position_request";
+pub(crate) const GUILD_NICKNAME_REQUEST: &str = "_guild_nickname_request";
 pub(crate) const SET_PLAYER_ATTR_REQUEST: &str = "_set_player_attr_request";
 pub(crate) const CHANGE_PLAYER_REQUEST: &str = "_change_player_request";
+pub(crate) const SUMMON_PLAYER_REQUEST: &str = "_summon_player_request";
+pub(crate) const FORCE_COMMAND_REQUEST: &str = "_force_command_request";
+
+pub(crate) fn take_summon_player_request(body: &mut Body) -> Vec<(String, String, String)> {
+    body.temp_mut()
+        .remove(SUMMON_PLAYER_REQUEST)
+        .and_then(|value| value.as_str().map(str::to_string))
+        .and_then(|json| serde_json::from_str(&json).ok())
+        .unwrap_or_default()
+}
+
+pub(crate) fn take_force_command_request(body: &mut Body) -> Option<(String, String)> {
+    body.temp_mut()
+        .remove(FORCE_COMMAND_REQUEST)
+        .and_then(|value| value.as_str().map(str::to_string))
+        .and_then(|json| serde_json::from_str(&json).ok())
+}
 
 pub(crate) fn take_change_player_request(body: &mut Body) -> Option<String> {
     body.temp_mut()
@@ -76,6 +95,20 @@ pub(crate) fn take_guild_transfer_request(body: &mut Body) -> Option<String> {
     body.temp_mut()
         .remove(GUILD_TRANSFER_REQUEST)
         .and_then(|value| value.as_str().map(str::to_string))
+}
+
+pub(crate) fn take_guild_position_request(body: &mut Body) -> Option<(String, String)> {
+    body.temp_mut()
+        .remove(GUILD_POSITION_REQUEST)
+        .and_then(|value| value.as_str().map(str::to_string))
+        .and_then(|json| serde_json::from_str(&json).ok())
+}
+
+pub(crate) fn take_guild_nickname_request(body: &mut Body) -> Option<(String, String)> {
+    body.temp_mut()
+        .remove(GUILD_NICKNAME_REQUEST)
+        .and_then(|value| value.as_str().map(str::to_string))
+        .and_then(|json| serde_json::from_str(&json).ok())
 }
 
 pub(crate) fn take_set_player_attr_request(body: &mut Body) -> Option<(String, String, i64)> {
@@ -3701,6 +3734,75 @@ fn mob_view(mob: &MobInstance, data: &RawMobData) -> Vec<String> {
     lines
 }
 
+fn admin_mob_view(viewer: &Body, mob: &MobInstance, data: &RawMobData) -> Vec<String> {
+    let mut lines = mob_view(mob, data);
+    if viewer.get_int("관리자등급") < 1000 {
+        return lines;
+    }
+    let index = mob
+        .mob_key
+        .split_once(':')
+        .map(|(_, index)| index)
+        .unwrap_or(mob.mob_key.as_str());
+    lines.insert(0, format!("Index : {index}"));
+    lines.push(format!(
+        "│ [레  벨] {:>15}  │ [상  태] {:>15}  │",
+        mob.level, mob.act
+    ));
+    lines.push(format!(
+        "│ [체  력] {:>15}  │ [내  공] {:>15}  │ ",
+        format!("{}/{}", mob.hp, mob.max_hp),
+        format!("{}/{}", mob.mp, mob.max_mp)
+    ));
+    lines.push(format!(
+        "│ [맷  집] {:>15}  │ [민  첩] {:>15}  │",
+        mob.arm, mob.agility
+    ));
+    let skill = mob
+        .active_attack_skill
+        .as_ref()
+        .map(|skill| skill.name.as_str())
+        .unwrap_or("----------");
+    lines.push(format!(
+        "│ [  힘  ] {:>15}  │ [스  킬] {:>15}  │",
+        mob.strength, skill
+    ));
+    if mob.difficulty >= 1 {
+        lines.push(format!(
+            "│ [命  中] {:>15}  │ [回  避] {:>15}  │",
+            data.hit, data.miss
+        ));
+        lines.push(format!(
+            "│ [必  殺] {:>15}  │ [  運  ] {:>15}  │",
+            data.critical, data.luck
+        ));
+    }
+    if !mob.targets.is_empty() {
+        lines.push("━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━".to_string());
+        lines.push("★ 목표 대상".to_string());
+        let entries = mob
+            .targets
+            .iter()
+            .enumerate()
+            .map(|(index, target)| format!(" [{:02}] {:<10}    ", index + 1, target))
+            .collect::<Vec<_>>();
+        lines.push(entries.chunks(3).map(|row| row.concat()).collect::<Vec<_>>().join("\r\n"));
+    }
+    if !data.skills.is_empty() {
+        lines.push("━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━".to_string());
+        lines.push("★ 공격 스킬 목록".to_string());
+        let entries = data
+            .skills
+            .iter()
+            .enumerate()
+            .map(|(index, (name, _, _))| format!(" [{:02}] {:<10} ", index + 1, name))
+            .collect::<Vec<_>>();
+        lines.push(entries.chunks(3).map(|row| row.concat()).collect::<Vec<_>>().join("\r\n"));
+    }
+    lines.push("━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━".to_string());
+    lines
+}
+
 /// 아이템 상세 보기. 파이썬 objs/item.view(ob). find_target/look_at_target에서 사용.
 fn item_view(obj: &Arc<Mutex<Object>>) -> Vec<String> {
     let o = obj.lock().unwrap();
@@ -3744,7 +3846,7 @@ fn look_at_target(
     other_player_descs: &HashMap<String, String>,
 ) -> (Vec<String>, Option<(String, String)>) {
     let not_found = (
-        vec!["\x1b[1;31m☞ 당신의 안광으로는 그런것을 볼수 없다네\x1b[0;37m".to_string()],
+        vec!["☞ 당신의 안광으로는 그런것을 볼수 없다네".to_string()],
         None,
     );
 
@@ -3787,7 +3889,7 @@ fn look_at_target(
                 }
                 c += 1;
                 if c == order {
-                    return (mob_view(mob, data), None);
+                    return (admin_mob_view(body, mob, data), None);
                 }
             }
         }
@@ -3800,7 +3902,7 @@ fn look_at_target(
                 c += 1;
                 if c == order {
                     if let Some(data) = world.mob_cache.get_mob(&mob.mob_key) {
-                        return (mob_view(mob, data), None);
+                        return (admin_mob_view(body, mob, data), None);
                     }
                 }
             }
@@ -3860,7 +3962,7 @@ fn look_at_target(
                     if matches {
                         ordered_count += 1;
                         if ordered_count == order {
-                            return (mob_view(mob, data), None);
+                            return (admin_mob_view(body, mob, data), None);
                         }
                     }
                 }
@@ -3873,6 +3975,22 @@ fn look_at_target(
                         if ordered_count == order {
                             let msg = format!("{} 당신을 살펴봅니다.", body.han_iga());
                             return (vec![desc.clone()], Some((player_name, msg)));
+                        }
+                    }
+                }
+                RoomObjectRef::SummonedUser(id) => {
+                    let Some(user) = world
+                        .summoned_users()
+                        .iter()
+                        .find(|user| user.id == id)
+                    else {
+                        continue;
+                    };
+                    let player_name = user.body.get_name();
+                    if player_name == name || player_name.starts_with(name.as_str()) {
+                        ordered_count += 1;
+                        if ordered_count == order {
+                            return (vec![user.body.get_desc_for_look(false)], None);
                         }
                     }
                 }
@@ -3937,7 +4055,7 @@ fn look_at_target(
             if ok {
                 c += 1;
                 if c == order {
-                    return (mob_view(mob, data), None);
+                    return (admin_mob_view(body, mob, data), None);
                 }
             }
         }
@@ -4462,29 +4580,42 @@ pub fn create_engine_with_output(output_collector: Arc<Mutex<Vec<String>>>) -> E
         }
     });
 
-    // find_mobs(search_term): 몹 검색. 관리자 명령어용.
-    // Returns Array of [zone, room, mob_name, display_name, hp, max_hp]
+    // Python 몹찾기: live instance가 아니라 Mob.Mobs 템플릿을 등록 순서로 검색한다.
     engine.register_fn("find_mobs", |search_term: &str| -> rhai::Array {
-        use crate::world::get_world_state;
-        let w = match get_world_state().read() {
+        let world = match crate::world::get_world_state().read() {
             Ok(g) => g,
             Err(_) => return rhai::Array::new(),
         };
-
-        let results = w.search_mobs_by_name(search_term);
+        let numeric_type = search_term.trim().parse::<i64>().unwrap_or(0);
         let mut arr = rhai::Array::new();
-
-        for (zone, room, mob_name, display_name, hp, max_hp) in results {
+        for (key, data) in world.mob_cache.ordered_mob_templates() {
+            let matched = if numeric_type != 0 {
+                data.mob_type == numeric_type
+            } else {
+                data.name.contains(search_term)
+            };
+            if !matched {
+                continue;
+            }
+            let index = key.split_once(':').map(|(_, index)| index).unwrap_or(key);
+            let location = data
+                .attributes
+                .get("위치")
+                .map(python_json_repr)
+                .unwrap_or_else(|| {
+                    let values = data
+                        .locations
+                        .iter()
+                        .map(|room| format!("'{}'", room))
+                        .collect::<Vec<_>>();
+                    format!("[{}]", values.join(", "))
+                });
             let mut m = rhai::Map::new();
-            m.insert("zone".into(), Dynamic::from(zone));
-            m.insert("room".into(), Dynamic::from(room));
-            m.insert("mob_name".into(), Dynamic::from(mob_name));
-            m.insert("display_name".into(), Dynamic::from(display_name));
-            m.insert("hp".into(), Dynamic::from(hp));
-            m.insert("max_hp".into(), Dynamic::from(max_hp));
+            m.insert("name".into(), Dynamic::from(data.name.clone()));
+            m.insert("index".into(), Dynamic::from(index.to_string()));
+            m.insert("location".into(), Dynamic::from(location));
             arr.push(Dynamic::from(m));
         }
-
         arr
     });
 
@@ -8140,6 +8271,29 @@ pub fn create_engine_with_body_and_output(
             "".to_string()
         },
     );
+    let body_ptr_guild_log = body_ptr;
+    engine.register_fn(
+        "append_guild_chat_log",
+        move |_ob: &mut rhai::Map, line: &str| -> bool {
+            use std::io::Write;
+            let body = unsafe { &*body_ptr_guild_log };
+            let guild = body.get_string("소속");
+            if guild.is_empty() || guild.contains('/') || guild.contains('\\') {
+                return false;
+            }
+            let directory = std::path::Path::new("data/log/group");
+            let _ = std::fs::create_dir_all(directory);
+            let Ok(mut file) = std::fs::OpenOptions::new()
+                .create(true)
+                .append(true)
+                .open(directory.join(&guild))
+            else {
+                return false;
+            };
+            let timestamp = chrono::Local::now().format("[%Y-%m-%d %H:%M:%S] ");
+            writeln!(file, "{}{:10}: {}", timestamp, body.get_name(), line).is_ok()
+        },
+    );
 
     // Python 전음 대상 조회. ACTIVE이면서 투명하지 않은 정확한 이름만
     // 찾는다. 반환 값은 Rhai가 조건과 모든 출력 포맷을 결정하는 데 쓰며,
@@ -8931,7 +9085,7 @@ pub fn create_engine_with_body_and_output(
                     .unwrap_or(true)
             });
             if player.object.objs.len() == before {
-                return "아무도 소지하고 있지 않습니다.!".into();
+                return "not_found".into();
             }
             if !save_body_to_json(&mut player, &path) {
                 return "저장할 수 없습니다.".into();
@@ -12722,7 +12876,7 @@ pub fn create_engine_with_body_and_output(
                 return "관리자 권한이 없습니다.".to_string();
             }
 
-            let body = unsafe { &*body_ptr_summon };
+            let body = unsafe { &mut *body_ptr_summon };
             let admin_name = body.get_name();
 
             // 빈 대상 이름 체크
@@ -12730,12 +12884,7 @@ pub fn create_engine_with_body_and_output(
                 return "대상 이름을 입력해주세요.".to_string();
             }
 
-            // 자기 자신 소환 불가
-            if target_name == admin_name {
-                return "자기 자신을 소환할 수 없습니다.".to_string();
-            }
-
-            let mut w = match get_world_state().write() {
+            let w = match get_world_state().read() {
                 Ok(g) => g,
                 Err(_) => return "월드 상태를 가져올 수 없습니다.".to_string(),
             };
@@ -12757,11 +12906,26 @@ pub fn create_engine_with_body_and_output(
                 return "이미 같은 위치에 있습니다.".to_string();
             }
 
-            // 대상을 관리자의 위치로 이동
-            w.set_player_position(target_name, admin_pos.clone());
-            w.spawn_mobs_for_room(&admin_pos.zone, &admin_pos.room);
-
-            String::new() // 성공 시 빈 문자열 반환
+            let mut requests: Vec<(String, String, String)> = body
+                .temp()
+                .get(SUMMON_PLAYER_REQUEST)
+                .and_then(Value::as_str)
+                .and_then(|json| serde_json::from_str(json).ok())
+                .unwrap_or_default();
+            requests.push((
+                target_name.to_string(),
+                admin_pos.zone,
+                admin_pos.room,
+            ));
+            if let Ok(request) = serde_json::to_string(&requests) {
+                body.temp_mut().insert(
+                    SUMMON_PLAYER_REQUEST.to_string(),
+                    Value::String(request),
+                );
+                String::new()
+            } else {
+                "공간이동에 실패하였습니다.".to_string()
+            }
         },
     );
 
@@ -13065,10 +13229,8 @@ pub fn create_engine_with_body_and_output(
         },
     );
 
-    // create_user_mob(admin_ob, mob_name) - 몹 생성 (관리자)
-    // mob_name should be "zone:filename" format (e.g., "낙양성:밍밍")
-    // Returns "" on success, error string on failure
-    // Admin level 2000 required
+    // Python 사용자몹소환: persisted Player를 socket-less ACTIVE Player로
+    // 복원해 channel.players와 현재 Room.objs에 넣는 상태 동작.
     let body_ptr_create_mob = body_ptr;
     engine.register_fn(
         "create_user_mob",
@@ -13085,9 +13247,8 @@ pub fn create_engine_with_body_and_output(
             let body = unsafe { &*body_ptr_create_mob };
             let admin_name = body.get_name();
 
-            // 빈 몹 이름 체크
             if mob_name.trim().is_empty() {
-                return "몹 이름을 입력해주세요.".to_string();
+                return "존재하지않는 사용자입니다.".to_string();
             }
 
             // 관리자 현재 위치 확인
@@ -13103,22 +13264,19 @@ pub fn create_engine_with_body_and_output(
                 (pos.zone, pos.room)
             };
 
-            // 몹 생성 (mob_name은 "zone:filename" 형식)
-            let mut w = match get_world_state().write() {
-                Ok(g) => g,
-                Err(_) => return "월드 상태를 가져올 수 없습니다.".to_string(),
-            };
-
-            match w.spawn_mob_at(mob_name, &zone, &room) {
-                Ok(()) => {
-                    println!(
-                        "[SCRIPT] create_user_mob: {} spawned at {}:{} by {}",
-                        mob_name, zone, room, admin_name
-                    );
-                    String::new() // 성공 시 빈 문자열 반환
-                }
-                Err(e) => e,
+            let mut summoned = Body::new();
+            if !load_body_from_json(
+                &mut summoned,
+                &format!("data/user/{}.json", mob_name),
+            ) {
+                return "존재하지않는 사용자입니다.".to_string();
             }
+            summoned.act = crate::player::ActState::Stand;
+            get_world_state().write().unwrap().add_summoned_user(
+                summoned,
+                crate::world::PlayerPosition::new(zone, room),
+            );
+            String::new()
         },
     );
 
@@ -13134,7 +13292,7 @@ pub fn create_engine_with_body_and_output(
                 .get("관리자등급")
                 .and_then(|v| v.as_int().ok())
                 .unwrap_or(0);
-            if admin_level < 2000 {
+            if admin_level < 1000 {
                 return false;
             }
 
@@ -13146,34 +13304,11 @@ pub fn create_engine_with_body_and_output(
                 return false;
             }
 
-            let target = get_world_state().read().ok().and_then(|world| {
-                world
-                    .mob_cache
-                    .get_all_instances()
-                    .into_iter()
-                    .find_map(|(room_key, mobs)| {
-                        let (zone, room) = room_key.split_once(':')?;
-                        mobs.into_iter().find_map(|mob| {
-                            let data = world.get_mob_data(&mob.mob_key)?;
-                            (mob.name == mob_name
-                                || data.name == mob_name
-                                || data.desc1 == mob_name)
-                                .then(|| (zone.to_string(), room.to_string(), mob.mob_key.clone()))
-                        })
-                    })
-            });
-            let Some((zone, room, key)) = target else {
-                return false;
-            };
-            let removed = get_world_state()
+            let _ = admin_name;
+            get_world_state()
                 .write()
-                .ok()
-                .map(|mut world| world.mob_cache.remove_instance(&zone, &room, &key))
-                .unwrap_or(false);
-            if removed {
-                println!("[SCRIPT] remove_user_mob: {} by {}", mob_name, admin_name);
-            }
-            removed
+                .map(|mut world| world.remove_summoned_user(mob_name))
+                .unwrap_or(false)
         },
     );
 
@@ -13271,7 +13406,7 @@ pub fn create_engine_with_body_and_output(
     // Returns "" on success, error string on failure
     // Admin level 2000 required
     // Note: This adds the command to user_sends which will be processed as if the player typed it
-    let user_sends_force = user_sends.clone();
+    let body_ptr_force = body_ptr;
     engine.register_fn(
         "admin_force_command",
         move |admin_ob: &mut rhai::Map, target_name: &str, command: &str| -> String {
@@ -13305,15 +13440,18 @@ pub fn create_engine_with_body_and_output(
                 return "대상 플레이어가 접속 중이 아닙니다.".to_string();
             }
 
-            // 명령어를 플레이어의 큐에 추가
-            // user_sends에 (target_name, command) 형태로 추가
-            // 이것은 나중에 플레이어가 입력한 것처럼 처리됨
-            if let Ok(mut sends) = user_sends_force.lock() {
-                sends.push((target_name.to_string(), command.to_string()));
-                String::new() // 성공 시 빈 문자열 반환
-            } else {
-                "명령어 큐에 추가할 수 없습니다.".to_string()
-            }
+            let body = unsafe { &mut *body_ptr_force };
+            let Ok(request) = serde_json::to_string(&(
+                target_name.to_string(),
+                command.to_string(),
+            )) else {
+                return "명령어 큐에 추가할 수 없습니다.".to_string();
+            };
+            body.temp_mut().insert(
+                FORCE_COMMAND_REQUEST.to_string(),
+                Value::String(request),
+            );
+            String::new()
         },
     );
 
@@ -14162,7 +14300,7 @@ pub fn create_engine_with_body_and_output(
     engine.register_fn(
         "guild_set_nickname",
         move |_ob: &mut rhai::Map, member: &str, nickname: &str| -> String {
-            let body = unsafe { &*body_ptr_gsn };
+            let body = unsafe { &mut *body_ptr_gsn };
             let guild = body.get_string("소속");
             if guild.is_empty() {
                 return "no_guild".into();
@@ -14174,12 +14312,19 @@ pub fn create_engine_with_body_and_output(
             let Ok(mut json) = serde_json::from_str::<serde_json::Value>(&content) else {
                 return "not_found".into();
             };
-            let Some(attrs) = json
+            let Some(user_object) = json
                 .get_mut("사용자오브젝트")
-                .and_then(|v| v.get_mut("attr"))
-                .and_then(|v| v.as_object_mut())
+                .and_then(|value| value.as_object_mut())
             else {
                 return "not_found".into();
+            };
+            let attrs = if user_object.get("attr").is_some_and(|value| value.is_object()) {
+                user_object
+                    .get_mut("attr")
+                    .and_then(|value| value.as_object_mut())
+                    .unwrap()
+            } else {
+                user_object
             };
             if attrs.get("소속").and_then(|v| v.as_str()).unwrap_or("") != guild {
                 return "wrong_guild".into();
@@ -14190,6 +14335,15 @@ pub fn create_engine_with_body_and_output(
             );
             if let Ok(saved) = serde_json::to_string_pretty(&json) {
                 if std::fs::write(path, saved).is_ok() {
+                    if let Ok(request) = serde_json::to_string(&(
+                        member.to_string(),
+                        nickname.to_string(),
+                    )) {
+                        body.temp_mut().insert(
+                            GUILD_NICKNAME_REQUEST.to_string(),
+                            Value::String(request),
+                        );
+                    }
                     return "ok".into();
                 }
             }
@@ -14214,12 +14368,19 @@ pub fn create_engine_with_body_and_output(
             let Ok(mut json) = serde_json::from_str::<serde_json::Value>(&content) else {
                 return "not_found".into();
             };
-            let Some(attrs) = json
+            let Some(user_object) = json
                 .get_mut("사용자오브젝트")
-                .and_then(|v| v.get_mut("attr"))
-                .and_then(|v| v.as_object_mut())
+                .and_then(|value| value.as_object_mut())
             else {
                 return "not_found".into();
+            };
+            let attrs = if user_object.get("attr").is_some_and(|value| value.is_object()) {
+                user_object
+                    .get_mut("attr")
+                    .and_then(|value| value.as_object_mut())
+                    .unwrap()
+            } else {
+                user_object
             };
             if attrs.get("소속").and_then(|v| v.as_str()).unwrap_or("") != guild {
                 return "wrong_guild".into();
@@ -14267,12 +14428,19 @@ pub fn create_engine_with_body_and_output(
             let Ok(mut json) = serde_json::from_str::<serde_json::Value>(&raw) else {
                 return "not_found".into();
             };
-            let Some(attrs) = json
+            let Some(user_object) = json
                 .get_mut("사용자오브젝트")
-                .and_then(|v| v.get_mut("attr"))
-                .and_then(|v| v.as_object_mut())
+                .and_then(|value| value.as_object_mut())
             else {
                 return "not_found".into();
+            };
+            let attrs = if user_object.get("attr").is_some_and(|value| value.is_object()) {
+                user_object
+                    .get_mut("attr")
+                    .and_then(|value| value.as_object_mut())
+                    .unwrap()
+            } else {
+                user_object
             };
             if attrs.get("소속").and_then(|v| v.as_str()).unwrap_or("") != guild {
                 return "wrong_guild".into();
@@ -14285,7 +14453,11 @@ pub fn create_engine_with_body_and_output(
             {
                 return "low_level".into();
             }
-            if !crate::world::guild::guild_move_member_role(&guild, "부방주", "방주", target) {
+            if !crate::world::guild::guild_transfer_leader(
+                &guild,
+                &body.get_name(),
+                target,
+            ) {
                 return "not_found".into();
             }
             attrs.insert("직위".into(), serde_json::Value::String("방주".into()));
@@ -14297,8 +14469,6 @@ pub fn create_engine_with_body_and_output(
                 GUILD_TRANSFER_REQUEST.to_string(),
                 Value::String(target.to_string()),
             );
-            crate::world::guild::guild_set(&guild, "방주", target);
-            crate::world::guild::guild_set(&guild, "방주이름", target);
             "ok".into()
         },
     );
@@ -14340,88 +14510,44 @@ pub fn create_engine_with_body_and_output(
         },
     );
 
-    // guild_promote(ob, member_name, position) - 방파 멤버 승진
-    // Returns "" on success, error string on failure
-    // Leader only
+    // Python 직위임명 상태 변경. 대상 조회/분기 문구/출력은 Rhai가 담당한다.
+    // old_position은 같은 방 온라인 snapshot에서 얻어 전달한다.
     let body_ptr_gpr = body_ptr;
     engine.register_fn(
         "guild_promote",
-        move |_ob: &mut rhai::Map, member_name: &str, position: &str| -> String {
-            let body = unsafe { &*body_ptr_gpr };
-
-            let my_name = body.get_name();
+        move |_ob: &mut rhai::Map,
+              member_name: &str,
+              old_position: &str,
+              position: &str|
+              -> String {
+            let body = unsafe { &mut *body_ptr_gpr };
             let my_guild = body.get_string("소속");
-            let my_position = body.get_string("직위");
-
-            // 빈 인자 체크
-            if member_name.trim().is_empty() || position.trim().is_empty() {
-                return "사용법: guild_promote(이름, 직위)".to_string();
-            }
-
-            // 방파 소속 확인
-            if my_guild.is_empty() {
-                return "방파에 소속되어 있지 않습니다.".to_string();
-            }
-
-            // 방주만 승진 가능
-            if my_position != "방주" {
-                return "방주만 멤버의 직위를 변경할 수 있습니다.".to_string();
-            }
-
-            // 대상 멤버의 현재 소속 확인
-            let member_guild = {
-                let path = format!("data/user/{}.json", member_name);
-                if let Ok(content) = std::fs::read_to_string(&path) {
-                    if let Ok(json) = serde_json::from_str::<serde_json::Value>(&content) {
-                        if let Some(uso) = json.get("사용자오브젝트").and_then(|v| v.as_object())
-                        {
-                            if let Some(attr) = uso.get("attr").and_then(|v| v.as_object()) {
-                                attr.get("소속")
-                                    .and_then(|v| v.as_str())
-                                    .unwrap_or("")
-                                    .to_string()
-                            } else {
-                                String::new()
-                            }
-                        } else {
-                            String::new()
-                        }
-                    } else {
-                        String::new()
-                    }
-                } else {
-                    String::new()
-                }
+            let limit = match position {
+                "방주" => Some(get_murim_config_int("방파 방주 인원").max(0) as usize),
+                "부방주" => Some(get_murim_config_int("방파 부방주 인원").max(0) as usize),
+                "장로" => Some(get_murim_config_int("방파 장로 인원").max(0) as usize),
+                "방파인" => None,
+                _ => return "invalid".to_string(),
             };
-
-            if member_guild != my_guild {
-                return "해당 플레이어가 같은 방파에 소속되어 있지 않습니다.".to_string();
+            let status = crate::world::guild::guild_reassign_position(
+                &my_guild,
+                member_name,
+                old_position,
+                position,
+                limit,
+            );
+            if status == "ok" {
+                if let Ok(request) = serde_json::to_string(&(
+                    member_name.to_string(),
+                    position.to_string(),
+                )) {
+                    body.temp_mut().insert(
+                        GUILD_POSITION_REQUEST.to_string(),
+                        Value::String(request),
+                    );
+                }
             }
-
-            // 유효한 직위인지 확인
-            let valid_positions = ["방주", "부방주", "장로", "제자"];
-            if !valid_positions.contains(&position) {
-                return format!(
-                    "유효하지 않은 직위입니다. 가능한 직위: {}",
-                    valid_positions.join(", ")
-                );
-            }
-
-            // 방주 직위는 다른 사람에게 넘길 수 없게 (선택적 제한)
-            if position == "방주" {
-                return "방주 직위는 넘길 수 없습니다. 방파 해체 후 새로 만들어주세요.".to_string();
-            }
-
-            // 직위 설정
-            if set_guild_member_position(member_name, position) {
-                println!(
-                    "[SCRIPT] guild_promote: {} promoted to {} by {}",
-                    member_name, position, my_name
-                );
-                String::new()
-            } else {
-                "직위 변경에 실패했습니다.".to_string()
-            }
+            status.to_string()
         },
     );
 
@@ -14898,6 +15024,33 @@ pub fn create_engine_with_global_data(global_data: SharedGlobalData) -> Engine {
 /// 내부적으로 data 모듈의 json_to_dynamic를 사용합니다.
 fn json_value_to_dynamic(value: serde_json::Value) -> Dynamic {
     crate::data::json_to_dynamic(&value)
+}
+
+fn python_json_repr(value: &serde_json::Value) -> String {
+    match value {
+        serde_json::Value::Null => "None".to_string(),
+        serde_json::Value::Bool(value) => {
+            if *value { "True" } else { "False" }.to_string()
+        }
+        serde_json::Value::Number(value) => value.to_string(),
+        serde_json::Value::String(value) => format!("'{}'", value.replace('\\', "\\\\").replace('\'', "\\'")),
+        serde_json::Value::Array(values) => format!(
+            "[{}]",
+            values
+                .iter()
+                .map(python_json_repr)
+                .collect::<Vec<_>>()
+                .join(", ")
+        ),
+        serde_json::Value::Object(values) => format!(
+            "{{{}}}",
+            values
+                .iter()
+                .map(|(key, value)| format!("'{}': {}", key, python_json_repr(value)))
+                .collect::<Vec<_>>()
+                .join(", ")
+        ),
+    }
 }
 
 /// Script storage - stores raw script source code
@@ -15828,6 +15981,1003 @@ mod tests {
         );
         clear_precomputed_all_online();
         let _ = std::fs::remove_file("data/user/순위조회자.json");
+    }
+
+    #[test]
+    fn expression_command_matches_python_usage_room_guard_and_delivery_text() {
+        use crate::world::{get_world_state, PlayerPosition};
+
+        let suffix = std::process::id();
+        let player = format!("표현회귀-{suffix}");
+        let zone = format!("표현회귀존-{suffix}");
+        let room_dir = std::path::Path::new("data/map").join(&zone);
+        let room_path = room_dir.join("1.json");
+        std::fs::create_dir_all(&room_dir).unwrap();
+        std::fs::write(
+            &room_path,
+            r#"{"맵정보":{"맵속성":["모든통신금지"],"이름":"표현시험방","존이름":"표현시험존","설명":[],"출구":[]}}"#,
+        )
+        .unwrap();
+        {
+            let mut world = get_world_state().write().unwrap();
+            world.room_cache.get_room(&zone, "1").unwrap();
+            world.set_player_position(
+                &player,
+                PlayerPosition::new(zone.clone(), "1".into()),
+            );
+        }
+        let storage = ScriptStorage::default();
+        let mut body = Body::new();
+        body.set("이름", player.as_str());
+
+        let usage = storage
+            .execute("표현", &mut body, "", None, None, None)
+            .unwrap();
+        assert_eq!(usage.0, vec!["☞ 사용법: [내용] 표현(')"]);
+        let forbidden = storage
+            .execute("표현", &mut body, "고개를 끄덕입니다.", None, None, None)
+            .unwrap();
+        assert_eq!(forbidden.0, vec!["☞ 이지역에서는 어떠한 통신도 불가능합니다."]);
+        assert!(forbidden.1.is_none());
+
+        get_world_state()
+            .read()
+            .unwrap()
+            .room_cache
+            .get_room_cached(&zone, "1")
+            .unwrap()
+            .write()
+            .unwrap()
+            .properties
+            .clear();
+        let delivered = storage
+            .execute("표현", &mut body, "고개를 끄덕입니다.", None, None, None)
+            .unwrap();
+        assert!(matches!(
+            delivered.1,
+            Some(CommandResult::EmotionToRoom(ref own, ref room, None))
+                if own == "당신이 고개를 끄덕입니다."
+                    && room == &format!("{}{} 고개를 끄덕입니다.", player, han_iga(&player))
+        ));
+
+        get_world_state()
+            .write()
+            .unwrap()
+            .remove_player_position(&player);
+        let _ = std::fs::remove_dir_all(&room_dir);
+    }
+
+    #[test]
+    fn guild_position_command_moves_python_role_lists_and_emits_group_layout() {
+        use crate::command::handler::CommandResult;
+        use crate::world::{get_world_state, PlayerPosition};
+
+        let suffix = std::process::id();
+        let actor = format!("직위방주-{suffix}");
+        let target = format!("직위대상-{suffix}");
+        let guild = format!("직위시험방파-{suffix}");
+        let zone = format!("직위시험존-{suffix}");
+        let guild_file_before = std::fs::read("data/config/guild.json").unwrap();
+        crate::world::guild::guild_set(&guild, "이름", &guild);
+        crate::world::guild::guild_set(&guild, "방주명칭", "시험방주");
+        crate::world::guild::guild_set(&guild, "방주리스트", &actor);
+        crate::world::guild::guild_set(&guild, "방파인리스트", &target);
+        get_world_state().write().unwrap().set_player_position(
+            &actor,
+            PlayerPosition::new(zone.clone(), "1".into()),
+        );
+        let online = [
+            (&actor, "방주", "", 900_i64, 18_i64),
+            (&target, "방파인", "", 700_i64, 12_i64),
+        ]
+        .into_iter()
+        .map(|(name, position, config, hp, mp)| {
+            let mut map = rhai::Map::new();
+            map.insert("이름".into(), Dynamic::from(name.clone()));
+            map.insert("소속".into(), Dynamic::from(guild.clone()));
+            map.insert("직위".into(), Dynamic::from(position));
+            map.insert("설정상태".into(), Dynamic::from(config));
+            map.insert("zone".into(), Dynamic::from(zone.clone()));
+            map.insert("room".into(), Dynamic::from("1"));
+            map.insert("현재체력".into(), Dynamic::from(hp));
+            map.insert("최고체력".into(), Dynamic::from(hp));
+            map.insert("현재내공".into(), Dynamic::from(mp));
+            map.insert("최고내공".into(), Dynamic::from(mp));
+            Dynamic::from(map)
+        })
+        .collect();
+        set_precomputed_all_online(online);
+        let mut body = Body::new();
+        body.set("이름", actor.as_str());
+        body.set("소속", guild.as_str());
+        body.set("직위", "방주");
+        let storage = ScriptStorage::default();
+
+        let usage = storage
+            .execute("직위임명", &mut body, "대상 제자", None, None, None)
+            .unwrap();
+        assert_eq!(
+            usage.0,
+            vec!["☞ 사용법 : [대상] [방주|부방주|장로|방파인] 직위임명"]
+        );
+        let changed = storage
+            .execute(
+                "직위임명",
+                &mut body,
+                &format!("{target} 장로"),
+                None,
+                None,
+                None,
+            )
+            .unwrap();
+        let actor_text = format!("\x1b[1m{actor}\x1b[0;37m{}", han_iga(&actor));
+        let target_text = format!("\x1b[1m{target}\x1b[0;37m{}", han_eul(&target));
+        let expected = format!(
+            "\x1b[1m《\x1b[36m시험방주\x1b[37mː\x1b[36m{actor}\x1b[37m》\x1b[0;37m {actor_text} {target_text} \x1b[1m장로\x1b[0m로 직위를 임명합니다."
+        );
+        assert_eq!(changed.0, vec![expected.clone()]);
+        let sends = match changed.1.unwrap() {
+            CommandResult::OutputAndSendToUsers(_, sends) => sends,
+            other => panic!("unexpected result: {other:?}"),
+        };
+        assert_eq!(
+            sends,
+            vec![(
+                target.clone(),
+                format!("\r\n{expected}\r\n\x1b[0;37;40m[ 700/700, 12/12 ] ")
+            )]
+        );
+        assert_eq!(
+            take_guild_position_request(&mut body),
+            Some((target.clone(), "장로".to_string()))
+        );
+        assert!(crate::world::guild::guild_kick_member(
+            &guild, "장로", &target
+        ));
+
+        clear_precomputed_all_online();
+        get_world_state()
+            .write()
+            .unwrap()
+            .remove_player_position(&actor);
+        crate::world::guild::guild_remove(&guild);
+        std::fs::write("data/config/guild.json", guild_file_before).unwrap();
+    }
+
+    #[test]
+    fn guild_chat_aliases_match_python_guard_order_layout_and_prompt() {
+        use crate::command::handler::CommandResult;
+
+        let suffix = std::process::id();
+        let sender = format!("방파말발신-{suffix}");
+        let recipient = format!("방파말수신-{suffix}");
+        let guild = format!("방파말시험-{suffix}");
+        let mut body = Body::new();
+        body.set("이름", sender.as_str());
+        let storage = ScriptStorage::default();
+
+        let no_guild = storage
+            .execute("방파말", &mut body, "", None, None, None)
+            .unwrap();
+        assert_eq!(no_guild.0, vec!["☞ 당신은 소속이 없습니다."]);
+        body.set("소속", guild.as_str());
+        body.set("직위", "장로");
+        let usage = storage
+            .execute("똥파말", &mut body, "", None, None, None)
+            .unwrap();
+        assert_eq!(usage.0, vec!["☞ 사용법 : [내용] 방파말(])"]);
+
+        let online = [(&sender, 900_i64, 18_i64), (&recipient, 700_i64, 12_i64)]
+            .into_iter()
+            .map(|(name, hp, mp)| {
+                let mut player = rhai::Map::new();
+                player.insert("이름".into(), Dynamic::from(name.clone()));
+                player.insert("소속".into(), Dynamic::from(guild.clone()));
+                player.insert("설정상태".into(), Dynamic::from(""));
+                player.insert("현재체력".into(), Dynamic::from(hp));
+                player.insert("최고체력".into(), Dynamic::from(hp));
+                player.insert("현재내공".into(), Dynamic::from(mp));
+                player.insert("최고내공".into(), Dynamic::from(mp));
+                Dynamic::from(player)
+            })
+            .collect();
+        set_precomputed_all_online(online);
+        let sent = storage
+            .execute("방파말", &mut body, "모두 안녕", None, None, None)
+            .unwrap();
+        let line = format!(
+            "\x1b[1m《\x1b[36m장로\x1b[37mː\x1b[36m{sender}\x1b[37m》\x1b[0;37m 모두 안녕"
+        );
+        assert_eq!(sent.0, vec![line.clone()]);
+        let sends = match sent.1.unwrap() {
+            CommandResult::OutputAndSendToUsers(_, sends) => sends,
+            other => panic!("unexpected guild chat result: {other:?}"),
+        };
+        assert_eq!(
+            sends,
+            vec![(
+                recipient.clone(),
+                format!("\r\n{line}\r\n\x1b[0;37;40m[ 700/700, 12/12 ] ")
+            )]
+        );
+
+        clear_precomputed_all_online();
+        let _ = std::fs::remove_file(format!("data/log/group/{guild}"));
+    }
+
+    #[test]
+    fn guild_nickname_updates_online_target_and_excludes_leader_from_group_echo() {
+        use crate::command::handler::CommandResult;
+        use crate::world::{get_world_state, PlayerPosition};
+
+        let suffix = std::process::id();
+        let leader = format!("별호방주-{suffix}");
+        let target = format!("별호대상-{suffix}");
+        let guild = format!("별호방파-{suffix}");
+        let zone = format!("별호존-{suffix}");
+        let target_path = format!("data/user/{target}.json");
+        let mut saved = Body::new();
+        saved.set("이름", target.as_str());
+        saved.set("소속", guild.as_str());
+        assert!(save_body_to_json(&mut saved, &target_path));
+        get_world_state().write().unwrap().set_player_position(
+            &leader,
+            PlayerPosition::new(zone.clone(), "1".into()),
+        );
+        let online = [(&leader, "방주", 900_i64), (&target, "방파인", 700_i64)]
+            .into_iter()
+            .map(|(name, position, hp)| {
+                let mut player = rhai::Map::new();
+                player.insert("이름".into(), Dynamic::from(name.clone()));
+                player.insert("소속".into(), Dynamic::from(guild.clone()));
+                player.insert("직위".into(), Dynamic::from(position));
+                player.insert("zone".into(), Dynamic::from(zone.clone()));
+                player.insert("room".into(), Dynamic::from("1"));
+                player.insert("설정상태".into(), Dynamic::from(""));
+                player.insert("현재체력".into(), Dynamic::from(hp));
+                player.insert("최고체력".into(), Dynamic::from(hp));
+                player.insert("현재내공".into(), Dynamic::from(10_i64));
+                player.insert("최고내공".into(), Dynamic::from(10_i64));
+                Dynamic::from(player)
+            })
+            .collect();
+        set_precomputed_all_online(online);
+        let mut body = Body::new();
+        body.set("이름", leader.as_str());
+        body.set("소속", guild.as_str());
+        body.set("직위", "방주");
+        let result = ScriptStorage::default()
+            .execute(
+                "방파별호",
+                &mut body,
+                &format!("{target} 푸른별"),
+                None,
+                None,
+                None,
+            )
+            .unwrap();
+        assert_eq!(result.0.len(), 1, "leader receives only the direct declaration");
+        assert!(
+            result.0[0].contains("『\x1b[1;32m푸른별\x1b[0;37m』"),
+            "{:?}",
+            result.0
+        );
+        let sends = match result.1.unwrap() {
+            CommandResult::OutputAndSendToUsers(_, sends) => sends,
+            other => panic!("unexpected result: {other:?}"),
+        };
+        assert_eq!(sends.len(), 1);
+        assert_eq!(sends[0].0, target);
+        assert!(sends[0].1.contains(&format!("\x1b[1m{leader}\x1b[0;37m")));
+        assert_eq!(
+            take_guild_nickname_request(&mut body),
+            Some((target.clone(), "푸른별".to_string()))
+        );
+
+        clear_precomputed_all_online();
+        get_world_state()
+            .write()
+            .unwrap()
+            .remove_player_position(&leader);
+        let _ = std::fs::remove_file(target_path);
+    }
+
+    #[test]
+    fn guild_expulsion_updates_current_json_roster_and_python_deliveries() {
+        use crate::command::handler::CommandResult;
+
+        let suffix = std::process::id();
+        let leader = format!("파문방주-{suffix}");
+        let target = format!("파문대상-{suffix}");
+        let guild = format!("파문방파-{suffix}");
+        let target_path = format!("data/user/{target}.json");
+        let guild_file_before = std::fs::read("data/config/guild.json").unwrap();
+        crate::world::guild::guild_set(&guild, "이름", &guild);
+        crate::world::guild::guild_set(&guild, "방주리스트", &leader);
+        crate::world::guild::guild_set(&guild, "방파인리스트", &target);
+        crate::world::guild::guild_set(&guild, "방파원수", "2");
+        let mut saved = Body::new();
+        saved.set("이름", target.as_str());
+        saved.set("소속", guild.as_str());
+        saved.set("직위", "방파인");
+        saved.set("방파별호", "옛별호");
+        assert!(save_body_to_json(&mut saved, &target_path));
+        let online = [(&leader, 900_i64), (&target, 700_i64)]
+            .into_iter()
+            .map(|(name, hp)| {
+                let mut player = rhai::Map::new();
+                player.insert("이름".into(), Dynamic::from(name.clone()));
+                player.insert("소속".into(), Dynamic::from(guild.clone()));
+                player.insert("설정상태".into(), Dynamic::from(""));
+                player.insert("현재체력".into(), Dynamic::from(hp));
+                player.insert("최고체력".into(), Dynamic::from(hp));
+                player.insert("현재내공".into(), Dynamic::from(10_i64));
+                player.insert("최고내공".into(), Dynamic::from(10_i64));
+                Dynamic::from(player)
+            })
+            .collect();
+        set_precomputed_all_online(online);
+        let mut body = Body::new();
+        body.set("이름", leader.as_str());
+        body.set("소속", guild.as_str());
+        body.set("직위", "방주");
+        let result = ScriptStorage::default()
+            .execute("방파파문", &mut body, &target, None, None, None)
+            .unwrap();
+        assert_eq!(result.0.len(), 1);
+        assert!(result.0[0].contains("방파에서 파문시킴을 선포합니다."));
+        let sends = match result.1.unwrap() {
+            CommandResult::OutputAndSendToUsers(_, sends) => sends,
+            other => panic!("unexpected expulsion result: {other:?}"),
+        };
+        assert_eq!(sends.len(), 1, "expelled target only receives its private notice");
+        assert_eq!(sends[0].0, target);
+        assert!(sends[0].1.starts_with("\r\n당신은 파문되었습니다."));
+        assert_eq!(take_guild_kick_request(&mut body), Some(target.clone()));
+        let loaded: serde_json::Value =
+            serde_json::from_str(&std::fs::read_to_string(&target_path).unwrap()).unwrap();
+        assert_eq!(loaded["사용자오브젝트"]["소속"], "");
+        assert_eq!(loaded["사용자오브젝트"]["직위"], "");
+        assert!(loaded["사용자오브젝트"].get("방파별호").is_none());
+
+        clear_precomputed_all_online();
+        crate::world::guild::guild_remove(&guild);
+        std::fs::write("data/config/guild.json", guild_file_before).unwrap();
+        let _ = std::fs::remove_file(target_path);
+    }
+
+    #[test]
+    fn guild_leader_transfer_requires_same_room_deputy_and_moves_python_roster() {
+        use crate::world::{get_world_state, PlayerPosition};
+
+        let suffix = std::process::id();
+        let leader = format!("양도방주-{suffix}");
+        let target = format!("양도부방주-{suffix}");
+        let guild = format!("양도방파-{suffix}");
+        let zone = format!("양도존-{suffix}");
+        let target_path = format!("data/user/{target}.json");
+        let guild_file_before = std::fs::read("data/config/guild.json").unwrap();
+        crate::world::guild::guild_set(&guild, "이름", &guild);
+        crate::world::guild::guild_set(&guild, "방주이름", &leader);
+        crate::world::guild::guild_set(&guild, "부방주리스트", &target);
+        let mut saved = Body::new();
+        saved.set("이름", target.as_str());
+        saved.set("소속", guild.as_str());
+        saved.set("직위", "부방주");
+        saved.set("레벨", 999_999_i64);
+        assert!(save_body_to_json(&mut saved, &target_path));
+        get_world_state().write().unwrap().set_player_position(
+            &leader,
+            PlayerPosition::new(zone.clone(), "1".into()),
+        );
+        let online = [(&leader, "방주", 900_i64), (&target, "부방주", 700_i64)]
+            .into_iter()
+            .map(|(name, position, hp)| {
+                let mut player = rhai::Map::new();
+                player.insert("이름".into(), Dynamic::from(name.clone()));
+                player.insert("소속".into(), Dynamic::from(guild.clone()));
+                player.insert("직위".into(), Dynamic::from(position));
+                player.insert("zone".into(), Dynamic::from(zone.clone()));
+                player.insert("room".into(), Dynamic::from("1"));
+                player.insert("설정상태".into(), Dynamic::from(""));
+                player.insert("현재체력".into(), Dynamic::from(hp));
+                player.insert("최고체력".into(), Dynamic::from(hp));
+                player.insert("현재내공".into(), Dynamic::from(10_i64));
+                player.insert("최고내공".into(), Dynamic::from(10_i64));
+                Dynamic::from(player)
+            })
+            .collect();
+        set_precomputed_all_online(online);
+        let mut body = Body::new();
+        body.set("이름", leader.as_str());
+        body.set("소속", guild.as_str());
+        body.set("직위", "방주");
+        let result = ScriptStorage::default()
+            .execute("방주권한양도", &mut body, &target, None, None, None)
+            .unwrap();
+        assert_eq!(body.get_string("직위"), "부방주");
+        assert_eq!(
+            take_guild_transfer_request(&mut body),
+            Some(target.clone())
+        );
+        assert_eq!(crate::world::guild::guild_get(&guild, "방주이름"), target);
+        assert!(result.0[0].contains("방주로 권한이양을 선포합니다."));
+        let loaded: serde_json::Value =
+            serde_json::from_str(&std::fs::read_to_string(&target_path).unwrap()).unwrap();
+        assert_eq!(loaded["사용자오브젝트"]["직위"], "방주");
+
+        clear_precomputed_all_online();
+        get_world_state()
+            .write()
+            .unwrap()
+            .remove_player_position(&leader);
+        crate::world::guild::guild_remove(&guild);
+        std::fs::write("data/config/guild.json", guild_file_before).unwrap();
+        let _ = std::fs::remove_file(target_path);
+    }
+
+    #[test]
+    fn guild_title_setting_persists_and_announces_with_new_sender_title() {
+        let suffix = std::process::id();
+        let leader = format!("명칭방주-{suffix}");
+        let guild = format!("명칭방파-{suffix}");
+        let guild_file_before = std::fs::read("data/config/guild.json").unwrap();
+        crate::world::guild::guild_set(&guild, "이름", &guild);
+        crate::world::guild::guild_set(&guild, "방주명칭", "옛방주");
+        let mut player = rhai::Map::new();
+        player.insert("이름".into(), Dynamic::from(leader.clone()));
+        player.insert("소속".into(), Dynamic::from(guild.clone()));
+        player.insert("설정상태".into(), Dynamic::from(""));
+        player.insert("현재체력".into(), Dynamic::from(900_i64));
+        player.insert("최고체력".into(), Dynamic::from(900_i64));
+        player.insert("현재내공".into(), Dynamic::from(10_i64));
+        player.insert("최고내공".into(), Dynamic::from(10_i64));
+        set_precomputed_all_online(vec![Dynamic::from(player)]);
+        let mut body = Body::new();
+        body.set("이름", leader.as_str());
+        body.set("소속", guild.as_str());
+        body.set("직위", "방주");
+        let result = ScriptStorage::default()
+            .execute("명칭설정", &mut body, "방주 대종사", None, None, None)
+            .unwrap();
+        assert_eq!(crate::world::guild::guild_get(&guild, "방주명칭"), "대종사");
+        assert_eq!(result.0.len(), 1);
+        assert!(result.0[0].contains("《\x1b[36m대종사\x1b[37mː"));
+        assert!(result.0[0].contains(&format!("\x1b[1m{leader}\x1b[0;37m")));
+        assert!(result.0[0].contains("방주의 명칭을 \x1b[1m대종사\x1b[0;37m"));
+
+        clear_precomputed_all_online();
+        crate::world::guild::guild_remove(&guild);
+        std::fs::write("data/config/guild.json", guild_file_before).unwrap();
+    }
+
+    #[test]
+    fn mob_find_command_searches_ordered_templates_by_name_or_nonzero_type() {
+        use crate::world::{get_world_state, RawMobData};
+
+        let suffix = std::process::id();
+        let zone = format!("몹찾기시험존-{suffix}");
+        let first_key = format!("{zone}:첫몹");
+        let second_key = format!("{zone}:둘째몹");
+        let mut first = RawMobData::new();
+        first.name = "검색산적대장".into();
+        first.mob_type = 6;
+        first.attributes.insert(
+            "위치".into(),
+            serde_json::json!(["11", "20-23"]),
+        );
+        let mut second = RawMobData::new();
+        second.name = "검색산적졸개".into();
+        second.mob_type = 6;
+        second
+            .attributes
+            .insert("위치".into(), serde_json::json!(["12"]));
+        {
+            let mut world = get_world_state().write().unwrap();
+            world.mob_cache.insert_mob_data(first_key.clone(), first);
+            world.mob_cache.insert_mob_data(second_key.clone(), second);
+        }
+        let storage = ScriptStorage::default();
+        let mut body = Body::new();
+        body.set("관리자등급", 1000_i64);
+
+        let by_name = storage
+            .execute("몹찾기", &mut body, "산적대", None, None, None)
+            .unwrap();
+        assert_eq!(
+            by_name.0,
+            vec!["\x1b[33m검색산적대장\x1b[37m(첫몹) : ['11', '20-23']"]
+        );
+        let by_type = storage
+            .execute("몹찾기", &mut body, "6", None, None, None)
+            .unwrap();
+        assert_eq!(
+            by_type.0,
+            vec![
+                "\x1b[33m검색산적대장\x1b[37m(첫몹) : ['11', '20-23']",
+                "\x1b[33m검색산적졸개\x1b[37m(둘째몹) : ['12']",
+            ]
+        );
+        let missing = storage
+            .execute("몹찾기", &mut body, "절대없는검색어", None, None, None)
+            .unwrap();
+        assert_eq!(missing.0, vec!["☞ 찾으시는 몹이 없습니다."]);
+
+        let mut world = get_world_state().write().unwrap();
+        world.mob_cache.remove_mob(&first_key);
+        world.mob_cache.remove_mob(&second_key);
+    }
+
+    #[test]
+    fn item_find_command_uses_python_template_name_ansi_and_failure_text() {
+        let mut body = Body::new();
+        body.set("관리자등급", 1000_i64);
+        let storage = ScriptStorage::default();
+        let found = storage
+            .execute("아이템찾기", &mut body, "간장검", None, None, None)
+            .unwrap();
+        assert!(
+            found
+                .0
+                .iter()
+                .any(|line| line == "\x1b[33m간장검\x1b[37m : 77"),
+            "{:?}",
+            found.0
+        );
+        let missing = storage
+            .execute(
+                "아이템찾기",
+                &mut body,
+                "절대없는아이템검색어",
+                None,
+                None,
+                None,
+            )
+            .unwrap();
+        assert_eq!(missing.0, vec!["☞ 찾으시는 아이템이 없습니다."]);
+    }
+
+    #[test]
+    fn admin_front_variants_keep_summon_and_silent_direct_move_distinct() {
+        use crate::world::{get_world_state, PlayerPosition};
+
+        let suffix = std::process::id();
+        let admin = format!("앞관리자-{suffix}");
+        let target = format!("앞대상-{suffix}");
+        let zone = format!("앞시험존-{suffix}");
+        let directory = std::path::Path::new("data/map").join(&zone);
+        std::fs::create_dir_all(&directory).unwrap();
+        for (room, name) in [("1", "출발방"), ("2", "도착방")] {
+            std::fs::write(
+                directory.join(format!("{room}.json")),
+                serde_json::json!({"맵정보":{"이름":name,"존이름":zone,"설명":[],"출구":[]}})
+                    .to_string(),
+            )
+            .unwrap();
+        }
+        {
+            let mut world = get_world_state().write().unwrap();
+            world.room_cache.get_room(&zone, "1").unwrap();
+            world.room_cache.get_room(&zone, "2").unwrap();
+            world.set_player_position(
+                &admin,
+                PlayerPosition::new(zone.clone(), "1".into()),
+            );
+            world.set_player_position(
+                &target,
+                PlayerPosition::new(zone.clone(), "2".into()),
+            );
+        }
+        let mut body = Body::new();
+        body.set("이름", admin.as_str());
+        body.set("관리자등급", 2000_i64);
+        let storage = ScriptStorage::default();
+        let direct = storage
+            .execute("앞앞", &mut body, &target, None, None, None)
+            .unwrap();
+        assert!(direct.0.is_empty(), "Python 앞앞 directly inserts with no room output");
+        assert_eq!(
+            get_world_state()
+                .read()
+                .unwrap()
+                .get_player_position(&admin)
+                .unwrap()
+                .room,
+            "2"
+        );
+
+        get_world_state().write().unwrap().set_player_position(
+            &admin,
+            PlayerPosition::new(zone.clone(), "1".into()),
+        );
+        let summoned = storage
+            .execute("앞", &mut body, &target, None, None, None)
+            .unwrap();
+        assert!(summoned.0[0].contains("알수 없는 기운에 휘말려 사라집니다."));
+        assert!(summoned.0.iter().any(|line| line.contains("도착방")));
+
+        let mut world = get_world_state().write().unwrap();
+        world.remove_player_position(&admin);
+        world.remove_player_position(&target);
+        drop(world);
+        let _ = std::fs::remove_dir_all(directory);
+    }
+
+    #[test]
+    fn summon_command_queues_target_side_move_without_invented_admin_success_text() {
+        use crate::world::{get_world_state, PlayerPosition};
+
+        let suffix = std::process::id();
+        let admin = format!("소환관리자-{suffix}");
+        let target = format!("소환대상-{suffix}");
+        let zone = format!("소환요청존-{suffix}");
+        {
+            let mut world = get_world_state().write().unwrap();
+            world.set_player_position(
+                &admin,
+                PlayerPosition::new(zone.clone(), "1".into()),
+            );
+            world.set_player_position(
+                &target,
+                PlayerPosition::new(zone.clone(), "2".into()),
+            );
+        }
+        let mut body = Body::new();
+        body.set("이름", admin.as_str());
+        body.set("관리자등급", 2000_i64);
+        let result = ScriptStorage::default()
+            .execute("소환", &mut body, &target, None, None, None)
+            .unwrap();
+        assert!(result.0.is_empty());
+        assert_eq!(
+            take_summon_player_request(&mut body),
+            vec![(target.clone(), zone.clone(), "1".to_string())]
+        );
+        let world = get_world_state().read().unwrap();
+        assert_eq!(
+            world.get_player_position(&target).unwrap().room,
+            "2",
+            "admin-side script must not move the target before target-side Rhai runs"
+        );
+        drop(world);
+        let mut world = get_world_state().write().unwrap();
+        world.remove_player_position(&admin);
+        world.remove_player_position(&target);
+    }
+
+    #[test]
+    fn summon_all_reports_each_same_room_player_and_queues_each_remote_player() {
+        use crate::world::{get_world_state, PlayerPosition};
+
+        let suffix = std::process::id();
+        let admin = format!("모두소환관리자-{suffix}");
+        let same = format!("모두소환동실-{suffix}");
+        let remote = format!("모두소환원격-{suffix}");
+        let zone = format!("모두소환존-{suffix}");
+        {
+            let mut world = get_world_state().write().unwrap();
+            for name in [&admin, &same] {
+                world.set_player_position(
+                    name,
+                    PlayerPosition::new(zone.clone(), "1".into()),
+                );
+            }
+            world.set_player_position(
+                &remote,
+                PlayerPosition::new(zone.clone(), "2".into()),
+            );
+        }
+        let online = [&admin, &same, &remote]
+            .into_iter()
+            .map(|name| {
+                let mut player = rhai::Map::new();
+                player.insert("이름".into(), Dynamic::from(name.clone()));
+                Dynamic::from(player)
+            })
+            .collect();
+        set_precomputed_all_online(online);
+        let mut body = Body::new();
+        body.set("이름", admin.as_str());
+        body.set("관리자등급", 2000_i64);
+        let result = ScriptStorage::default()
+            .execute("모두소환", &mut body, "", None, None, None)
+            .unwrap();
+        assert_eq!(
+            result.0,
+            vec!["☞ 같은 곳이에요. ^^", "☞ 같은 곳이에요. ^^"]
+        );
+        assert_eq!(
+            take_summon_player_request(&mut body),
+            vec![(remote.clone(), zone.clone(), "1".to_string())]
+        );
+
+        clear_precomputed_all_online();
+        let mut world = get_world_state().write().unwrap();
+        for name in [&admin, &same, &remote] {
+            world.remove_player_position(name);
+        }
+    }
+
+    #[test]
+    fn force_command_queues_real_target_reentry_and_has_no_admin_success_text() {
+        use crate::world::{get_world_state, PlayerPosition};
+
+        let suffix = std::process::id();
+        let admin = format!("명령관리자-{suffix}");
+        let target = format!("명령대상-{suffix}");
+        let zone = format!("명령시험존-{suffix}");
+        {
+            let mut world = get_world_state().write().unwrap();
+            world.set_player_position(
+                &admin,
+                PlayerPosition::new(zone.clone(), "1".into()),
+            );
+            world.set_player_position(
+                &target,
+                PlayerPosition::new(zone.clone(), "1".into()),
+            );
+        }
+        let mut body = Body::new();
+        body.set("이름", admin.as_str());
+        body.set("관리자등급", 2000_i64);
+        let result = ScriptStorage::default()
+            .execute("명령", &mut body, &format!("{target} 점수"), None, None, None)
+            .unwrap();
+        assert!(result.0.is_empty());
+        assert_eq!(
+            take_force_command_request(&mut body),
+            Some((target.clone(), "점수".to_string()))
+        );
+        let mut world = get_world_state().write().unwrap();
+        world.remove_player_position(&admin);
+        world.remove_player_position(&target);
+    }
+
+    #[test]
+    fn oneitem_cleanup_variants_preserve_python_storage_delete_difference() {
+        let attr_before = std::fs::read("data/config/oneitem.json").unwrap();
+        assert!(crate::oneitem::oneitem_have(
+            "77",
+            "기연소유자 보관 추가"
+        ));
+        let storage = ScriptStorage::default();
+        let mut body = Body::new();
+        body.set("관리자등급", 2000_i64);
+
+        set_precomputed_connected_names(vec![Dynamic::from("기연소유자")]);
+        let online = storage
+            .execute("기연정리", &mut body, "간장검", None, None, None)
+            .unwrap();
+        assert_eq!(online.0, vec!["사용자가 접속중입니다.!"]);
+        assert_eq!(crate::oneitem::oneitem_get("77"), "기연소유자 보관 추가");
+
+        set_precomputed_connected_names(Vec::new());
+        let retained = storage
+            .execute("기연정리", &mut body, "간장검", None, None, None)
+            .unwrap();
+        assert_eq!(retained.0, vec!["기연소유자 보관"]);
+        assert_eq!(crate::oneitem::oneitem_get("77"), "기연소유자 보관 추가");
+
+        let removed = storage
+            .execute("기연정리리", &mut body, "간장검", None, None, None)
+            .unwrap();
+        assert_eq!(removed.0, vec!["기연소유자 보관"]);
+        assert_eq!(crate::oneitem::oneitem_get("77"), "");
+
+        clear_precomputed_all_online();
+        std::fs::write("data/config/oneitem.json", attr_before).unwrap();
+    }
+
+    #[test]
+    fn user_mob_commands_create_and_remove_socketless_player_objects() {
+        use crate::world::{get_world_state, PlayerPosition, RoomObjectRef};
+
+        let suffix = std::process::id();
+        let admin_name = format!("사용자몹관리자-{suffix}");
+        let summoned_name = format!("사용자몹대상-{suffix}");
+        let zone = format!("사용자몹시험존-{suffix}");
+        let user_path = format!("data/user/{summoned_name}.json");
+        let mut saved = Body::new();
+        saved.set("이름", summoned_name.as_str());
+        saved.set("설명1", "소환된 사용자가 서 있습니다.");
+        assert!(save_body_to_json(&mut saved, &user_path));
+        get_world_state().write().unwrap().set_player_position(
+            &admin_name,
+            PlayerPosition::new(zone.clone(), "1".into()),
+        );
+        let mut admin = Body::new();
+        admin.set("이름", admin_name.as_str());
+        admin.set("관리자등급", 1000_i64);
+        let storage = ScriptStorage::default();
+
+        let usage = storage
+            .execute("사용자몹소환", &mut admin, "", None, None, None)
+            .unwrap();
+        assert_eq!(usage.0, vec!["☞ 사용법: [대상] 사용자몹소환"]);
+        let summoned = storage
+            .execute(
+                "사용자몹소환",
+                &mut admin,
+                &summoned_name,
+                None,
+                None,
+                None,
+            )
+            .unwrap();
+        assert_eq!(
+            summoned.0,
+            vec![format!(
+                "\x1b[1m{summoned_name}\x1b[0;37m{} 소환하였습니다.",
+                han_eul(&summoned_name)
+            )]
+        );
+        {
+            let world = get_world_state().read().unwrap();
+            assert_eq!(world.summoned_users().len(), 1);
+            assert_eq!(world.summoned_users()[0].body.get_name(), summoned_name);
+            assert!(matches!(
+                world.get_room_object_order(&zone, "1").first(),
+                Some(RoomObjectRef::SummonedUser(_))
+            ));
+        }
+        let absent = storage
+            .execute("사용자몹제거1", &mut admin, "없는사용자", None, None, None)
+            .unwrap();
+        assert!(absent.0.is_empty(), "Python silently returns when no name matches");
+        let removed = storage
+            .execute(
+                "사용자몹제거1",
+                &mut admin,
+                &summoned_name,
+                None,
+                None,
+                None,
+            )
+            .unwrap();
+        assert_eq!(removed.0, vec!["사용자몹이 제거되었습니다."]);
+        assert!(get_world_state().read().unwrap().summoned_users().is_empty());
+
+        get_world_state()
+            .write()
+            .unwrap()
+            .remove_player_position(&admin_name);
+        let _ = std::fs::remove_file(user_path);
+    }
+
+    #[test]
+    fn look_command_uses_plain_python_failure_and_silences_missing_environment() {
+        use crate::world::{get_world_state, PlayerPosition};
+
+        let suffix = std::process::id();
+        let name = format!("봐실패회귀-{suffix}");
+        let mut body = Body::new();
+        body.set("이름", name.as_str());
+        let storage = ScriptStorage::default();
+        let no_environment = storage
+            .execute("봐", &mut body, "없는것", None, None, None)
+            .unwrap();
+        assert!(no_environment.0.is_empty());
+
+        get_world_state().write().unwrap().set_player_position(
+            &name,
+            PlayerPosition::new(format!("봐실패존-{suffix}"), "1".into()),
+        );
+        let missing = storage
+            .execute("봐", &mut body, "없는것", None, None, None)
+            .unwrap();
+        assert_eq!(missing.0, vec!["☞ 당신의 안광으로는 그런것을 볼수 없다네"]);
+        get_world_state()
+            .write()
+            .unwrap()
+            .remove_player_position(&name);
+    }
+
+    #[test]
+    fn look_command_renders_python_detailed_box_layout() {
+        use crate::world::{get_world_state, PlayerPosition};
+
+        let suffix = std::process::id();
+        let player = format!("봐상자회귀-{suffix}");
+        let zone = format!("봐상자존-{suffix}");
+        let mut box_object = Object::new();
+        box_object.set("이름", "무기고");
+        box_object.set("주인", player.as_str());
+        box_object.set("보관수량", 3_i64);
+        box_object.set("보관최대수량", 5_i64);
+        box_object.set("보관증가은전", 100_i64);
+        box_object.set("은전", 40_i64);
+        let mut sword = Object::new();
+        sword.set("이름", "청룡검");
+        sword.set("옵션", "힘 +3");
+        let mut unique = Object::new();
+        unique.set("이름", "간장검");
+        unique.set("아이템속성", "단일아이템");
+        assert!(box_commands::prepare_installed_box(
+            &mut box_object,
+            &player,
+            "무기고"
+        ));
+        box_object.objs.push(Arc::new(Mutex::new(sword)));
+        box_object.objs.push(Arc::new(Mutex::new(unique)));
+        box_commands::register_installed_box(
+            &zone,
+            "1",
+            Arc::new(Mutex::new(box_object)),
+        );
+        get_world_state().write().unwrap().set_player_position(
+            &player,
+            PlayerPosition::new(zone.clone(), "1".into()),
+        );
+        let mut body = Body::new();
+        body.set("이름", player.as_str());
+        let output = ScriptStorage::default()
+            .execute("봐", &mut body, "무기고", None, None, None)
+            .unwrap()
+            .0;
+        assert_eq!(output[0], "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━");
+        assert!(output[1].starts_with(&format!(
+            "\x1b[1m\x1b[44m\x1b[37m◁ {player}의 무기고 ▷"
+        )));
+        assert!(output[3].contains("[   1] 청룡검 힘 +3"));
+        assert!(output[3].contains("[   2] \x1b[1;36m간장검\x1b[0;37m"));
+        assert_eq!(output[4], "───────────────────────────────────────");
+        assert!(output[5].contains("◆ 수량 (2/3)  ◆ 최대수량 (5)  ◆ 확장에 필요한 은전 (40/100)"));
+        assert_eq!(output[6], "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━");
+
+        get_world_state()
+            .write()
+            .unwrap()
+            .remove_player_position(&player);
+        let _ = std::fs::remove_file(format!("data/box/{player}_무기고.json"));
+    }
+
+    #[test]
+    fn admin_look_at_mob_adds_python_index_and_runtime_table() {
+        use crate::world::{get_world_state, MobInstance, PlayerPosition, RawMobData};
+
+        let suffix = std::process::id();
+        let player = format!("봐관리자-{suffix}");
+        let zone = format!("봐관리자존-{suffix}");
+        let key = format!("{zone}:시험몹파일");
+        let mut data = RawMobData::new();
+        data.name = "관리자조회몹".into();
+        data.zone = zone.clone();
+        data.level = 25;
+        data.max_hp = 500;
+        data.inner_power = 80;
+        data.strength = 31;
+        data.arm = 12;
+        data.agility = 17;
+        {
+            let mut world = get_world_state().write().unwrap();
+            world.mob_cache.insert_mob_data(key.clone(), data.clone());
+            world.mob_cache.add_mob_instance(MobInstance::new(
+                key.clone(),
+                zone.clone(),
+                "1",
+                &data,
+            ));
+            world.set_player_position(
+                &player,
+                PlayerPosition::new(zone.clone(), "1".into()),
+            );
+        }
+        let mut body = Body::new();
+        body.set("이름", player.as_str());
+        body.set("관리자등급", 1000_i64);
+        let output = ScriptStorage::default()
+            .execute("봐", &mut body, "관리자조회몹", None, None, None)
+            .unwrap()
+            .0;
+        assert_eq!(output[0], "Index : 시험몹파일");
+        assert!(output.iter().any(|line| line.contains("│ [레  벨]              25")));
+        assert!(output.iter().any(|line| line.contains("500/500")));
+        assert!(output.iter().any(|line| line.contains("│ [맷  집]              12")));
+        assert_eq!(output.last().unwrap(), "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━");
+
+        let mut world = get_world_state().write().unwrap();
+        world.remove_player_position(&player);
+        world.mob_cache.remove_mob(&key);
     }
 
     #[test]

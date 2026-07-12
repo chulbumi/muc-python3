@@ -8,12 +8,12 @@ fn cmd(ob, line) {
         return;
     }
     if line == "" || is_empty(line) {
-        send_line(ob, "☞ 운영자 명령: 사용자몹소환 [몹이름]");
+        send_line(ob, "☞ 사용법: [대상] 사용자몹소환");
         return;
     }
     let result = create_user_mob(ob, line);
     if result == "" {
-        send_line(ob, line + " 소환하였습니다.");
+        send_line(ob, "\x1b[1m" + line + "\x1b[0;37m" + han_eul(line) + " 소환하였습니다.");
     } else {
         send_line(ob, result);
     }

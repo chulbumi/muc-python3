@@ -17,3 +17,39 @@ fn chat_user_ansi(text, enabled) {
     }
     value
 }
+
+// Python Player.sendGroup(line, prompt=True). The command owns all visible
+// bytes; Rust only supplies online state and routes send_to_user requests.
+fn send_python_guild_group_except(ob, line, excluded) {
+    let guild = get_string(ob, "소속");
+    let own_name = get_string(ob, "이름");
+    let position = get_string(ob, "직위");
+    let custom_title = guild_get(guild, position + "명칭");
+    let title = if custom_title == "" { position } else { custom_title };
+    let group_line = "\x1b[1m《\x1b[36m" + title + "\x1b[37mː\x1b[36m"
+        + own_name + "\x1b[37m》\x1b[0;37m " + line;
+    for player in get_all_online_players() {
+        if player["소속"].to_string() != guild { continue; }
+        let config = player["설정상태"].to_string();
+        if config_text_is_enabled(config, "방파말거부") { continue; }
+        let name = player["이름"].to_string();
+        if name == excluded { continue; }
+        if name == own_name {
+            send_line(ob, group_line);
+        } else {
+            let prompt = if config_text_is_enabled(config, "엘피출력") {
+                ""
+            } else {
+                "\r\n\x1b[0;37;40m[ " + player["현재체력"].to_string() + "/"
+                    + player["최고체력"].to_string() + ", "
+                    + player["현재내공"].to_string() + "/"
+                    + player["최고내공"].to_string() + " ] "
+            };
+            send_to_user(name, "\r\n" + group_line + prompt);
+        }
+    }
+}
+
+fn send_python_guild_group(ob, line) {
+    send_python_guild_group_except(ob, line, "");
+}

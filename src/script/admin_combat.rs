@@ -141,6 +141,79 @@ fn recover_mob(body: &Body, target_id: &str, room_index: i64) -> bool {
     true
 }
 
+fn recover_named_mob(body: &Body, query: &str) -> bool {
+    let Some((zone, room)) = current_body_position(body) else {
+        return false;
+    };
+    let Ok(mut world) = get_world_state().write() else {
+        return false;
+    };
+    let ordered = world.get_room_object_order(&zone, &room);
+    let metadata = world
+        .mob_cache
+        .ordered_mob_templates()
+        .map(|(key, data)| (key.to_string(), data.clone()))
+        .collect::<HashMap<_, _>>();
+    let Some(mobs) = world.mob_cache.get_all_mobs_in_room_mut(&zone, &room) else {
+        return false;
+    };
+    let first = query.split_whitespace().next().unwrap_or("");
+    if first.is_empty() {
+        return false;
+    }
+    let numeric = first.parse::<usize>().ok().filter(|number| *number != 0);
+    let mut count = 0usize;
+    let mut prefix_count = 0usize;
+    for object in ordered {
+        let crate::world::RoomObjectRef::Mob(instance_id) = object else {
+            // A matching non-mob would be a hard stop in Room.findObjName,
+            // but cross-type name data is not represented in this efun.
+            continue;
+        };
+        let Some(index) = mobs.iter().position(|mob| mob.instance_id == instance_id) else {
+            continue;
+        };
+        let mob = &mobs[index];
+        let Some(data) = metadata.get(&mob.mob_key) else { continue };
+        let matched = if let Some(wanted) = numeric {
+            if data.mob_type == 7 || mob.act == 2 || mob.act == 3 {
+                false
+            } else {
+                count += 1;
+                count == wanted
+            }
+        } else if first == "시체" {
+            if mob.act == 2 {
+                count += 1;
+                count == 1
+            } else {
+                false
+            }
+        } else {
+            if mob.act == 2 || mob.act == 3 {
+                false
+            } else if data.name == first || data.reaction_names.iter().any(|name| name == first) {
+                count += 1;
+                count == 1
+            } else if data
+                .reaction_names
+                .iter()
+                .any(|alias| alias.starts_with(first))
+            {
+                prefix_count += 1;
+                prefix_count == 1
+            } else {
+                false
+            }
+        };
+        if matched {
+            mobs[index].hp = data.hp;
+            return true;
+        }
+    }
+    false
+}
+
 fn create_items(body: &mut Body, key: &str, count: i64) -> Map {
     let mut result = Map::new();
     result.insert("status".into(), Dynamic::from("missing"));
@@ -274,6 +347,10 @@ pub(super) fn register_admin_combat_efuns(engine: &mut Engine, body_ptr: *mut Bo
         "recover_room_mob",
         move |_ob: &mut Map, id: &str, index: i64| recover_mob(unsafe { &*ptr }, id, index),
     );
+    let ptr = body_ptr;
+    engine.register_fn("recover_named_room_mob", move |_ob: &mut Map, query: &str| {
+        recover_named_mob(unsafe { &*ptr }, query)
+    });
     engine.register_fn(
         "admin_create_items",
         move |_ob: &mut Map, key: &str, count: i64| {
@@ -488,6 +565,51 @@ mod tests {
         assert!(mob.targets.is_empty());
         assert_eq!(mob.act, 0);
         world.mob_cache.remove_instance(&zone, "1", &key);
+        world.mob_cache.remove_mob(&key);
+    }
+
+    #[test]
+    fn mob_recover_accepts_python_corpse_query_and_uses_template_hp() {
+        use crate::world::{MobInstance, PlayerPosition, RawMobData};
+
+        let suffix = std::process::id();
+        let player = format!("몹회복관리자-{suffix}");
+        let zone = format!("몹회복존-{suffix}");
+        let key = format!("{zone}:회복대상");
+        let mut data = RawMobData::new();
+        data.name = "회복시험몹".into();
+        data.zone = zone.clone();
+        data.hp = 123;
+        data.max_hp = 500;
+        {
+            let mut world = get_world_state().write().unwrap();
+            world.mob_cache.insert_mob_data(key.clone(), data.clone());
+            world.set_player_position(
+                &player,
+                PlayerPosition::new(zone.clone(), "1".into()),
+            );
+            let mut instance = MobInstance::new(key.clone(), zone.clone(), "1", &data);
+            instance.hp = 0;
+            instance.act = 2;
+            instance.alive = false;
+            let id = instance.instance_id;
+            world.mob_cache.add_mob_instance(instance);
+            world.record_test_room_object(&zone, "1", crate::world::RoomObjectRef::Mob(id));
+        }
+        let mut body = Body::new();
+        body.set("이름", player.as_str());
+        body.set("관리자등급", 1000_i64);
+        let result = ScriptStorage::default()
+            .execute("몹회복", &mut body, "시체", None, None, None)
+            .unwrap();
+        assert_eq!(result.0, vec!["* 회복되었습니다."]);
+        let world = get_world_state().read().unwrap();
+        let mob = world.mob_cache.get_all_mobs_in_room(&zone, "1")[0];
+        assert_eq!(mob.hp, 123);
+        assert_eq!(mob.act, 2, "Python only assigns hp and leaves corpse state");
+        drop(world);
+        let mut world = get_world_state().write().unwrap();
+        world.remove_player_position(&player);
         world.mob_cache.remove_mob(&key);
     }
 }

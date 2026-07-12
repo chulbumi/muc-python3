@@ -41,9 +41,13 @@ use crate::script::{
     set_precomputed_room_inventories, set_precomputed_room_mugong_targets,
     set_precomputed_room_view_players, set_precomputed_tell_players, take_adult_channel_requests,
     take_auto_move_request, take_box_deliveries, take_change_player_request,
-    take_guild_kick_request, take_guild_transfer_request, take_party_requests,
+    take_force_command_request,
+    take_guild_kick_request, take_guild_nickname_request, take_guild_position_request,
+    take_guild_transfer_request,
+    take_party_requests,
     take_remove_skill_request, take_save_all_request, take_set_player_attr_request,
-    take_set_skill_request, take_teach_skill_request, AdultChannelDelivery, BoxDelivery,
+    take_set_skill_request, take_summon_player_request, take_teach_skill_request,
+    AdultChannelDelivery, BoxDelivery,
     CastRoomPlayerRef, PartyDelivery, TellPlayerSnapshot, PARTY_DISCONNECT_REQUEST,
 };
 use crate::world::event::{run_script_chunk, run_script_chunk_rhai, try_mob_event, ScriptNext};
@@ -3291,13 +3295,34 @@ fn global_player_snapshot_needs(
         resolved_command == name || resolved_first_word.is_some_and(|first| first == name)
     };
     GlobalPlayerSnapshotNeeds {
-        details: ["누구", "어디", "방파상태", "소켓", "정리"]
-            .iter()
-            .any(|name| requested(name)),
+        details: [
+            "누구",
+            "어디",
+            "방파상태",
+            "소켓",
+            "정리",
+            "순위",
+            "비교",
+            "트윗",
+            "외쳐",
+            "외쳐2",
+            "직위임명",
+            "방파말",
+            "똥파말",
+            "방파별호",
+            "방파파문",
+            "방주권한양도",
+            "명칭설정",
+            "모두소환",
+        ]
+        .iter()
+        .any(|name| requested(name)),
         online_names: ["무림별호", "외쳐", "외쳐2"]
             .iter()
             .any(|name| requested(name)),
-        connected_names: requested("쪽지"),
+        connected_names: ["쪽지", "기연정리", "기연정리리"]
+            .iter()
+            .any(|name| requested(name)),
         tell_players: ["전음", "반전음"].iter().any(|name| requested(name)),
     }
 }
@@ -3527,6 +3552,10 @@ async fn handle_single_game_command(
     let mut save_all_pending = false;
     let mut set_skill_pending: Option<(String, String, i64)> = None;
     let mut guild_transfer_pending: Option<String> = None;
+    let mut guild_position_pending: Option<(String, String)> = None;
+    let mut guild_nickname_pending: Option<(String, String)> = None;
+    let mut summon_player_pending: Vec<(String, String, String)> = Vec::new();
+    let mut force_command_pending: Option<(String, String)> = None;
     let mut change_player_pending: Option<String> = None;
     let mut set_player_attr_pending: Option<(String, String, i64)> = None;
     let mut movement_follower_candidates: Vec<(SocketAddr, String)> = Vec::new();
@@ -3581,8 +3610,17 @@ async fn handle_single_game_command(
                 movement_follower_candidates.push((follower_addr, follower_name));
             }
         }
-        let (other_descs, other_map) =
+        let (mut other_descs, mut other_map) =
             collect_other_players_from_map(&player_name, &room_player_bindings, &clients);
+        for summoned in world.summoned_users_in_room(&zone, &room) {
+            if summoned.body.get_int("투명상태") == 1 {
+                continue;
+            }
+            let name = summoned.body.get_name();
+            let desc = summoned.body.get_desc_for_look(false);
+            other_descs.push(desc.clone());
+            other_map.entry(name).or_insert(desc);
+        }
         PRE_COMPUTED_OTHER_DESCS.with(|c| *c.borrow_mut() = Some(other_descs));
         PRE_COMPUTED_OTHER_MAP.with(|c| *c.borrow_mut() = Some(other_map));
 
@@ -3614,6 +3652,12 @@ async fn handle_single_game_command(
                     (player.body.get_string("이름") == *indexed_name)
                         .then(|| build_room_view_player_snapshot(&player.body))
                 })
+                .chain(
+                    world
+                        .summoned_users_in_room(&view_zone, &view_room)
+                        .into_iter()
+                        .map(|user| build_room_view_player_snapshot(&user.body)),
+                )
                 .collect::<Array>();
             room_view_players.insert(room_key, snapshots);
         }
@@ -3680,7 +3724,10 @@ async fn handle_single_game_command(
                 if online_names_requested {
                     online_names.push(Dynamic::from(name.clone()));
                 }
-                if !all_online_details_requested || p.body.get_int("투명상태") == 1 {
+                if !all_online_details_requested
+                    || (p.body.get_int("투명상태") == 1
+                        && !command_requested("모두소환"))
+                {
                     continue;
                 }
                 let mut details = Map::new();
@@ -3720,6 +3767,9 @@ async fn handle_single_game_command(
                     "설정상태".into(),
                     Dynamic::from(p.body.get_string("설정상태")),
                 );
+                details.insert("현재체력".into(), Dynamic::from(p.body.get_hp()));
+                details.insert("현재내공".into(), Dynamic::from(p.body.get_mp()));
+                details.insert("직위".into(), Dynamic::from(p.body.get_string("직위")));
                 if let Some(pos) = world.get_player_position(&name) {
                     details.insert("zone".into(), Dynamic::from(pos.zone.clone()));
                     details.insert("room".into(), Dynamic::from(pos.room.clone()));
@@ -3727,6 +3777,35 @@ async fn handle_single_game_command(
                     details.insert("zone".into(), Dynamic::from(""));
                     details.insert("room".into(), Dynamic::from("0"));
                 }
+                all_online.push(Dynamic::from(details));
+            }
+            for summoned in world.summoned_users() {
+                let body = &summoned.body;
+                let name = body.get_name();
+                if connected_names_requested {
+                    connected_names.push(Dynamic::from(name.clone()));
+                }
+                if online_names_requested {
+                    online_names.push(Dynamic::from(name.clone()));
+                }
+                if !all_online_details_requested || body.get_int("투명상태") == 1 {
+                    continue;
+                }
+                let mut details = Map::new();
+                for key in ["이름", "무림별호", "성격", "레벨초기화", "소속", "설정상태", "직위"] {
+                    details.insert(key.into(), Dynamic::from(body.get_string(key)));
+                }
+                for key in [
+                    "힘", "은전", "레벨", "최고체력", "최고내공", "민첩성", "맷집",
+                    "명중", "회피", "필살", "운", "나이", "투명상태", "관리자등급",
+                ] {
+                    details.insert(key.into(), Dynamic::from(body.get_int(key)));
+                }
+                details.insert("현재체력".into(), Dynamic::from(body.get_hp()));
+                details.insert("현재내공".into(), Dynamic::from(body.get_mp()));
+                details.insert("zone".into(), Dynamic::from(summoned.position.zone.clone()));
+                details.insert("room".into(), Dynamic::from(summoned.position.room.clone()));
+                details.insert("host".into(), Dynamic::from(""));
                 all_online.push(Dynamic::from(details));
             }
         }
@@ -3923,6 +4002,9 @@ async fn handle_single_game_command(
                             "mp_script": crate::script::mp_status_script(player.body.get_mp()),
                             "nickname": player.body.get_string("방파별호"),
                             "anger": player.body.get_int("분노"),
+                            "targets": player.body.targets.iter().filter_map(|target| {
+                                target.upgrade().and_then(|target| target.lock().ok().map(|object| object.getName()))
+                            }).collect::<Vec<_>>(),
                             "guards": guards
                         })
                     })
@@ -4137,6 +4219,10 @@ async fn handle_single_game_command(
                 set_skill_pending = take_set_skill_request(&mut player.body);
                 set_player_attr_pending = take_set_player_attr_request(&mut player.body);
                 guild_transfer_pending = take_guild_transfer_request(&mut player.body);
+                guild_position_pending = take_guild_position_request(&mut player.body);
+                guild_nickname_pending = take_guild_nickname_request(&mut player.body);
+                summon_player_pending = take_summon_player_request(&mut player.body);
+                force_command_pending = take_force_command_request(&mut player.body);
                 change_player_pending = take_change_player_request(&mut player.body);
                 if let Some(route) = take_auto_move_request(&mut player.body) {
                     player.auto_move_list = route
@@ -4589,6 +4675,108 @@ async fn handle_single_game_command(
             target.body.sync_skill_state_to_attrs();
             let path = format!("data/user/{}.json", target.body.get_name());
             let _ = save_body_to_json(&mut target.body, &path);
+        }
+    }
+
+    if let Some((target_name, position)) = guild_position_pending {
+        let mut clients = broadcaster.clients.lock();
+        if let Some(target) = clients.values_mut().find_map(|client| {
+            client
+                .player
+                .as_mut()
+                .filter(|player| player.body.get_name() == target_name)
+        }) {
+            target.body.set("직위", position);
+            let path = format!("data/user/{}.json", target.body.get_name());
+            let _ = save_body_to_json(&mut target.body, &path);
+        }
+    }
+
+    if let Some((target_name, nickname)) = guild_nickname_pending {
+        let mut clients = broadcaster.clients.lock();
+        if let Some(target) = clients.values_mut().find_map(|client| {
+            client
+                .player
+                .as_mut()
+                .filter(|player| player.body.get_name() == target_name)
+        }) {
+            target.body.set("방파별호", nickname);
+            let path = format!("data/user/{}.json", target.body.get_name());
+            let _ = save_body_to_json(&mut target.body, &path);
+        }
+    }
+
+    for (target_name, destination_zone, destination_room) in summon_player_pending {
+        let target_addr = broadcaster.clients.lock().iter().find_map(|(candidate, client)| {
+            client
+                .player
+                .as_ref()
+                .is_some_and(|player| player.body.get_name() == target_name)
+                .then_some(*candidate)
+        });
+        if let (Some(target_addr), Some(handler)) = (
+            target_addr,
+            command_registry.get_internal("summon_move").cloned(),
+        ) {
+            let mut target_client = broadcaster.clients.lock().remove(&target_addr);
+            if let Some(mut client) = target_client.take() {
+                let mut target_output = String::new();
+                let mut target_deliveries = Vec::new();
+                if let Some(player) = client.player.as_mut() {
+                    let result = (handler)(
+                        &mut player.body,
+                        &[destination_zone.as_str(), destination_room.as_str()],
+                    );
+                    match result {
+                        CommandResult::OutputAndSendToUsers(output, deliveries) => {
+                            target_output = output;
+                            target_deliveries = deliveries;
+                        }
+                        CommandResult::SendToUsers(deliveries) => {
+                            target_deliveries = deliveries;
+                        }
+                        CommandResult::Output(output) => target_output = output,
+                        _ => {}
+                    }
+                    if player.interactive == 1
+                        && !player
+                            .body
+                            .get_string("설정상태")
+                            .split(['\n', '|'])
+                            .any(|entry| entry.trim() == "엘피출력 1")
+                    {
+                        target_output.push_str(&format!(
+                            "\r\n\x1b[0;37;40m[ {}/{}, {}/{} ] ",
+                            player.body.get_hp(),
+                            player.body.get_max_hp(),
+                            player.body.get_mp(),
+                            player.body.get_max_mp()
+                        ));
+                    }
+                }
+                broadcaster.clients.lock().insert(target_addr, client);
+                if !target_output.is_empty() {
+                    if let Some(client) = broadcaster.clients.lock().get(&target_addr) {
+                        let _ = client.send(target_output);
+                    }
+                }
+                for (recipient, text) in target_deliveries {
+                    let recipient_addr = broadcaster.clients.lock().iter().find_map(
+                        |(candidate, client)| {
+                            client
+                                .player
+                                .as_ref()
+                                .is_some_and(|player| player.body.get_name() == recipient)
+                                .then_some(*candidate)
+                        },
+                    );
+                    if let Some(recipient_addr) = recipient_addr {
+                        if let Some(client) = broadcaster.clients.lock().get(&recipient_addr) {
+                            let _ = client.send(text);
+                        }
+                    }
+                }
+            }
         }
     }
 
@@ -5139,6 +5327,29 @@ async fn handle_single_game_command(
             // `reactor.stop()` takes effect after the current Twisted input
             // callback, so let this command's normal prompt finish first.
             notify.notify_one();
+        }
+    }
+
+    if let Some((target_name, forced_command)) = force_command_pending {
+        let target_addr = broadcaster.clients.lock().iter().find_map(|(candidate, client)| {
+            client
+                .player
+                .as_ref()
+                .is_some_and(|player| player.body.get_name() == target_name)
+                .then_some(*candidate)
+        });
+        if let Some(target_addr) = target_addr {
+            // Python obj.sendLine('') precedes obj.do_command(...).
+            broadcaster.send_to(target_addr, "\r\n")?;
+            Box::pin(handle_game_command(
+                broadcaster,
+                target_addr,
+                &forced_command,
+                command_registry.clone(),
+                room_cache.clone(),
+                shutdown_notify.clone(),
+            ))
+            .await?;
         }
     }
 
@@ -5870,6 +6081,12 @@ mod tests {
         }
 
         assert!(global_player_snapshot_needs("누구", None).details);
+        for command in ["순위", "비교", "트윗", "외쳐", "외쳐2"] {
+            assert!(
+                global_player_snapshot_needs(command, None).details,
+                "{command}"
+            );
+        }
         assert!(global_player_snapshot_needs("외쳐", None).online_names);
         assert!(global_player_snapshot_needs("쪽지", None).connected_names);
         for command in ["전음", "반전음"] {

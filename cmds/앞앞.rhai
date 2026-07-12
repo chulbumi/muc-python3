@@ -12,18 +12,18 @@ fn cmd(ob, line) {
     }
     let t = get_position_of(trim(line));
     let zs = t["zone"].to_string();
-    let rs = t["room"].to_int();
+    let rs = t["room"].to_string();
     if zs == "" {
         send_line(ob, "☞ 활동중인 그런 무림인이 없어요. ^^");
         return;
     }
-    let ret = set_my_position(ob, zs, rs);
-    if ret == "fail" { send_line(ob, "* 이동 실패!!!"); return; }
-    if ret == "same_place" { send_line(ob, "☞ 같은 자리에요. ^^"); return; }
-    if ret != "" { return; }
-    let r = view_map_data(ob);
-    if r["ok"] { for row in split(r["text"], "\r\n") { send_line(ob, row); } }
-    else { if r["err"] == "no_position" { send_line(ob, "\x1b[1;31m위치 정보가 없습니다.\x1b[0;37m"); } else if r["err"] == "room_error" { send_line(ob, "\x1b[1;31m방 정보를 읽을 수 없습니다.\x1b[0;37m"); } else if r["err"] == "unknown_room" { send_line(ob, "\x1b[1;37m[" + r["zone"] + ":" + int_to_str(r["room"]) + "]\x1b[0;37m\r\n알 수 없는 곳입니다.\r\n"); } }
+    let my = get_my_position(ob);
+    if my["zone"] == zs && my["room"].to_string() == rs {
+        send_line(ob, "☞ 같은 자리에요.");
+        return;
+    }
+    clear_summon_combat(ob);
+    set_my_position(ob, zs, rs);
 }
 
 fn main(ob, line) {

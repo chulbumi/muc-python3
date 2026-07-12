@@ -8,13 +8,11 @@ fn cmd(ob, line) {
         return;
     }
     if line == "" || is_empty(line) {
-        send_line(ob, "☞ 운영자 명령: 사용자몹제거1 [대상]");
+        send_line(ob, "사용법: [사용자 이름] 사용자몹제거");
         return;
     }
     if remove_user_mob(ob, line) {
         send_line(ob, "사용자몹이 제거되었습니다.");
-    } else {
-        send_line(ob, "그런 몹이 없어요!");
     }
 }
 

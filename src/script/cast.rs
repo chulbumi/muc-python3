@@ -387,6 +387,27 @@ pub(super) fn find_cast_target(caster: &Body, query: &str) -> Dynamic {
                         ));
                     }
                 }
+                RoomObjectRef::SummonedUser(id) => {
+                    let Some(user) = world
+                        .summoned_users()
+                        .iter()
+                        .find(|user| user.id == id)
+                    else {
+                        continue;
+                    };
+                    if user.body.get_int("투명상태") == 1 {
+                        continue;
+                    }
+                    let (exact, prefix_count) = player_matches(&user.body, &name);
+                    let corpse_match = name == "시체" && user.body.act == ActState::Death;
+                    if corpse_match || exact || prefix_count > 0 {
+                        return Dynamic::from(body_target_map(
+                            &user.body,
+                            &user.body.get_name(),
+                            &current_ids,
+                        ));
+                    }
+                }
                 RoomObjectRef::InstalledBox(ordinal) => {
                     let Some(boxes) = super::box_commands::installed_boxes_for_room(&zone, &room)
                     else {

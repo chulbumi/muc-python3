@@ -13,7 +13,7 @@ fn cmd(ob, line) {
     let found = 0;
     for item in get_item_catalog() {
         if item["name"].contains(line) {
-            send_line(ob, item["name"] + " : " + item["index"]);
+            send_line(ob, "\x1b[33m" + item["name"] + "\x1b[37m : " + item["index"]);
             found += 1;
         }
     }

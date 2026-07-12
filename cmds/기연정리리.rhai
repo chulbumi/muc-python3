@@ -17,25 +17,33 @@ fn cmd(ob, line) {
     }
     let owner = oneitem_get(idx);
     let words = split(owner, " ");
+    let who = "";
+    let where = "";
     if len(words) == 1 {
-        for online in get_online_names() {
-            if online == words[0] { send_line(ob, "사용자가 접속중입니다.!" ); return; }
-        }
-        let result = cleanup_offline_oneitem(ob, words[0], idx);
+        who = words[0];
+    } else if len(words) == 3 {
+        who = words[0];
+        where = words[1];
+    } else {
+        send_line(ob, "아무도 소지하고 있지 않습니다.!");
+        return;
+    }
+    for online in get_connected_player_names() {
+        if online == who { send_line(ob, "사용자가 접속중입니다.!" ); return; }
+    }
+    if where == "" {
+        let result = cleanup_offline_oneitem(ob, who, idx);
         if result == "ok" {
-            send_line(ob, words[0] + "의 " + trim(line) + "을(를) 정리하였습니다.");
+            send_line(ob, who + "의 " + trim(line) + han_eul(trim(line)) + " 정리하였습니다.");
             oneitem_destroy(idx);
-        } else { send_line(ob, result); }
-        return;
+            return;
+        } else if result != "not_found" {
+            send_line(ob, result);
+            return;
+        }
     }
-    if len(words) == 3 {
-        let who = words[0];
-        let where = words[1];
-        send_line(ob, who + " " + where);
-        oneitem_destroy(idx);
-        return;
-    }
-    send_line(ob, "아무도 소지하고 있지 않습니다.!");
+    send_line(ob, who + " " + where);
+    oneitem_destroy(idx);
 }
 
 fn main(ob, line) {

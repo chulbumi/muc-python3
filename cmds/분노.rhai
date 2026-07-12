@@ -26,6 +26,7 @@ fn cmd(ob, line) {
 
     let target = if line == "" { anger_primary_target(ob) } else { find_attack_target(ob, line) };
     if target.is_unit() || (target.contains("found") && !target["found"]) {
+        if line == "" { set_anger(ob, get_int(ob, "분노") - 100); }
         send_line(ob, "☞ 공격할 그런 대상이 없습니다.");
         return;
     }
@@ -66,7 +67,7 @@ fn cmd(ob, line) {
         }
         room_lines.push(room_text + "\r\n");
     }
-    if len(room_lines) > 0 { send_room(ob, join(room_lines, "")); }
+    // Python builds `msg` for the room but never calls sendRoom here.
 }
 
 fn main(ob, line) { cmd(ob, line); }

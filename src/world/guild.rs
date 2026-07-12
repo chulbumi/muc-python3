@@ -254,6 +254,62 @@ pub fn guild_save() -> bool {
     get_guild().read().unwrap().save()
 }
 
+fn role_members(value: Option<&Value>) -> Vec<String> {
+    match value {
+        Some(Value::Array(values)) => values
+            .iter()
+            .filter_map(Value::as_str)
+            .map(str::to_string)
+            .collect(),
+        Some(Value::String(raw)) => raw
+            .split(['\r', '\n', ','])
+            .filter(|entry| !entry.is_empty())
+            .map(str::to_string)
+            .collect(),
+        _ => Vec::new(),
+    }
+}
+
+/// Move one member between Python `GUILD` role lists and persist the guild.
+/// `None` means the destination role is unlimited (`방파인`).
+pub fn guild_reassign_position(
+    id: &str,
+    member: &str,
+    old_position: &str,
+    new_position: &str,
+    limit: Option<usize>,
+) -> &'static str {
+    let mut guild = get_guild().write().unwrap();
+    let Some(attrs) = guild.attr.get_mut(id) else {
+        return "missing_guild";
+    };
+    let old_key = format!("{old_position}리스트");
+    let new_key = format!("{new_position}리스트");
+    let mut destination = role_members(attrs.get(&new_key));
+    if limit.is_some_and(|maximum| destination.len() >= maximum) {
+        return "full";
+    }
+    let mut source = role_members(attrs.get(&old_key));
+    let Some(index) = source.iter().position(|name| name == member) else {
+        return "missing_member";
+    };
+    source.remove(index);
+    destination.push(member.to_string());
+    attrs.insert(
+        old_key,
+        Value::Array(source.into_iter().map(Value::String).collect()),
+    );
+    attrs.insert(
+        new_key,
+        Value::Array(destination.into_iter().map(Value::String).collect()),
+    );
+    if guild.save() {
+        "ok"
+    } else {
+        "save_failed"
+    }
+}
+
 /// Remove a member from the role list used by Python's GUILD object and update
 /// the persisted member count. Both legacy CRLF strings and JSON arrays are
 /// accepted because old character data uses both representations.
@@ -352,6 +408,28 @@ pub fn guild_move_member_role(id: &str, from: &str, to: &str, member: &str) -> b
     }
     let _ = guild.save();
     true
+}
+
+/// Python 방주권한양도 list mutation: the target leaves 부방주리스트,
+/// the former leader is appended there, and 방주이름 changes. Python does
+/// not maintain a separate 방주리스트 in this command.
+pub fn guild_transfer_leader(id: &str, former: &str, target: &str) -> bool {
+    let mut guild = get_guild().write().unwrap();
+    let Some(attrs) = guild.attr.get_mut(id) else {
+        return false;
+    };
+    let mut deputies = role_members(attrs.get("부방주리스트"));
+    let Some(index) = deputies.iter().position(|member| member == target) else {
+        return false;
+    };
+    deputies.remove(index);
+    deputies.push(former.to_string());
+    attrs.insert(
+        "부방주리스트".to_string(),
+        Value::Array(deputies.into_iter().map(Value::String).collect()),
+    );
+    attrs.insert("방주이름".to_string(), Value::String(target.to_string()));
+    guild.save()
 }
 
 /// Add a member to a guild role list, preserving the legacy list encoding.

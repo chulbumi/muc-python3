@@ -1729,6 +1729,67 @@ fn execute_sort(body: &mut Body, line: &str) -> &'static str {
 }
 
 pub(super) fn register_box_command_efuns(engine: &mut Engine, body_ptr: *mut Body) {
+    let view_body_ptr = body_ptr;
+    engine.register_fn("find_view_box", move |_ob: &mut rhai::Map, line: &str| -> Dynamic {
+        let body = unsafe { &*view_body_ptr };
+        let (name, order) = python_name_order(line);
+        let mut candidates = body.object.objs.clone();
+        if let Some(position) = get_world_state()
+            .read()
+            .ok()
+            .and_then(|world| world.get_player_position(&body.get_name()).cloned())
+        {
+            candidates.extend(installed_boxes_for_room(&position.zone, &position.room).unwrap_or_default());
+        }
+        let mut count = 0_i64;
+        for candidate in candidates {
+            let Ok(value) = candidate.lock() else { continue };
+            if !is_box(&value) {
+                continue;
+            }
+            let aliases = value.getString("반응이름");
+            if value.getName() != name
+                && !aliases
+                    .split_whitespace()
+                    .any(|alias| alias == name || alias.starts_with(name.as_str()))
+            {
+                continue;
+            }
+            count += 1;
+            if count != order {
+                continue;
+            }
+            let mut result = rhai::Map::new();
+            result.insert("found".into(), Dynamic::from(true));
+            for key in ["이름", "주인"] {
+                result.insert(key.into(), Dynamic::from(value.getString(key)));
+            }
+            for key in ["보관수량", "보관최대수량", "보관증가은전", "은전"] {
+                result.insert(key.into(), Dynamic::from(value.getInt(key)));
+            }
+            let items = value
+                .objs
+                .iter()
+                .filter_map(|item| {
+                    let item = item.lock().ok()?;
+                    let mut data = rhai::Map::new();
+                    data.insert("name".into(), Dynamic::from(item.getName()));
+                    data.insert("option".into(), Dynamic::from(item.getString("옵션")));
+                    data.insert(
+                        "oneitem".into(),
+                        Dynamic::from(item.checkAttr("아이템속성", "단일아이템")),
+                    );
+                    Some(Dynamic::from(data))
+                })
+                .collect::<rhai::Array>();
+            result.insert("items".into(), Dynamic::from(items));
+            return Dynamic::from(result);
+        }
+        let mut missing = rhai::Map::new();
+        missing.insert("found".into(), Dynamic::from(false));
+        Dynamic::from(missing)
+    });
+
     engine.register_fn("get_box_room_context", || -> Dynamic {
         Dynamic::from(
             PRECOMPUTED_BOX_CONTEXT

@@ -110,6 +110,7 @@ fn run_anger(body: &mut Body, target_id: &str, room_index: i64) -> Map {
         );
         let chance =
             100 + guard.getInt("명중력") - (mob.level - body.get_int("레벨") + 90).div_euclid(3);
+        let mut stop_after_event = false;
         if guard.getInt("체력") < 1 || rng.gen_range(0..=99) > chance {
             event.insert("hit".into(), Dynamic::from(false));
             event.insert("damage".into(), Dynamic::from(0_i64));
@@ -129,14 +130,16 @@ fn run_anger(body: &mut Body, target_id: &str, room_index: i64) -> Map {
                 damage = 0;
             }
             mob.hp -= damage;
-            if mob.hp < 0 {
+            let below_zero = mob.hp < 0;
+            if below_zero {
                 mob.hp = 1;
+                stop_after_event = true;
             }
             event.insert("hit".into(), Dynamic::from(true));
             event.insert("damage".into(), Dynamic::from(damage));
         }
         events.push(Dynamic::from(event));
-        if mob.hp <= 1 {
+        if stop_after_event {
             break;
         }
     }
@@ -163,6 +166,7 @@ pub(super) fn register_anger_efuns(engine: &mut Engine, body_ptr: *mut Body) {
 mod tests {
     use super::*;
     use crate::script::ScriptStorage;
+    use std::sync::{Arc, Mutex};
 
     #[test]
     fn rhai_anger_rejects_noncombat_with_python_text() {
@@ -186,5 +190,25 @@ mod tests {
         let result = run_anger(&mut body, "", 0);
         assert_eq!(result["status"].clone().into_string().unwrap(), "no_guards");
         assert_eq!(body.get_int("분노"), 35);
+    }
+
+    #[test]
+    fn implicit_target_missing_after_combat_entry_still_consumes_anger() {
+        let storage = ScriptStorage::default();
+        let mut body = Body::new();
+        body.act = ActState::Fight;
+        body.set("분노", 135_i64);
+        let mut guard = crate::object::Object::new();
+        guard.set("종류", "호위");
+        body.object.objs.push(Arc::new(Mutex::new(guard)));
+        let dummy_target = Arc::new(Mutex::new(crate::object::Object::new()));
+        body.targets.push(Arc::downgrade(&dummy_target));
+
+        let (output, special) = storage
+            .execute("분노", &mut body, "", None, None, None)
+            .unwrap();
+        assert_eq!(output, vec!["☞ 공격할 그런 대상이 없습니다."]);
+        assert_eq!(body.get_int("분노"), 35);
+        assert!(special.is_none(), "Python never sends its accumulated room msg");
     }
 }

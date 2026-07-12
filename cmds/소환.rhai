@@ -15,13 +15,13 @@ fn cmd(ob, line) {
 
     let result = summon_player(ob, line);
     if result == "" {
-        send_line(ob, "☞ '" + line + "'님을 소환했습니다.");
+        return;
     } else if result == "대상을 찾을 수 없습니다." {
         send_line(ob, "☞ 활동중인 그런 무림인이 없어요. ^^");
     } else if result == "이미 같은 위치에 있습니다." {
         send_line(ob, "☞ 같은 곳이에요. ^^");
     } else {
-        send_line(ob, "☞ " + result);
+        send_line(ob, "☞ 공간이동에 실패하였습니다.");
     }
 }
 

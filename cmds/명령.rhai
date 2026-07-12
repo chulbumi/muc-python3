@@ -11,17 +11,20 @@ fn cmd(ob, line) {
     }
 
     // 명령어 파싱: [대상] [내용]
-    let words = split(line, " ");
+    let words = parse_note_header(line);
     if len(words) < 2 {
         send_line(ob, "☞ 운영자 명령: [대상] [내용] 명령");
         return;
     }
 
     let target_name = words[0];
-    let command = join(words[1..], " ");
+    let command = words[1];
 
-    // 플레이어가 접속 중인지 확인
-    if !find_player_online(target_name) {
+    let found_player = false;
+    for player in get_room_players(ob) {
+        if player == target_name { found_player = true; break; }
+    }
+    if !found_player {
         // 몹인지 확인
         let mob_info = find_mob_in_room(ob, target_name);
         if mob_info == () {
@@ -34,11 +37,8 @@ fn cmd(ob, line) {
 
     // 대상에게 명령 실행
     // Python: obj.do_command(words[1])
-    send_line(ob, "");
     let result = admin_force_command(ob, target_name, command);
-    if result == "" {
-        send_line(ob, `☞ [${target_name}]에게 [${command}] 명령을 실행했습니다.`);
-    } else {
+    if result != "" {
         send_line(ob, result);
     }
 }

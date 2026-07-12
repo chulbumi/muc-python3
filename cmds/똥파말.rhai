@@ -1,15 +1,18 @@
-// 똥파말.rhai - 똥파말 명령어 (같은 소속/방파에게, 방파말과 동일)
-// Python: cmds/똥파말.py
-
+// Python cmds/똥파말.py is byte-for-byte the same command as 방파말.py.
 fn cmd(ob, line) {
-    if is_empty(line) {
-        send_line(ob, "☞ 사용법: [내용] 똥파말");
+    if get_string(ob, "소속") == "" {
+        send_line(ob, "☞ 당신은 소속이 없습니다.");
         return;
     }
-    let r = send_broadcast_to_guild(ob, line);
-    if r == "no_guild" { send_line(ob, "☞ 소속된 방파가 없어요."); }
+    if line == "" {
+        send_line(ob, "☞ 사용법 : [내용] 방파말(])");
+        return;
+    }
+    if get_user_config(ob, "방파말거부") == "1" {
+        send_line(ob, "☞ 방파말 거부중 이에요. *^^*");
+        return;
+    }
+    append_guild_chat_log(ob, line);
+    send_python_guild_group(ob, line);
 }
-
-fn main(ob, line) {
-    cmd(ob, line);
-}
+fn main(ob, line) { cmd(ob, line); }

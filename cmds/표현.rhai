@@ -4,7 +4,12 @@
 fn cmd(ob, line) {
     let action = trim(line);
     if length(action) == 0 {
-        send_line(ob, "☞ 사용법: 표현 [동작] 또는 ' [동작]");
+        send_line(ob, "☞ 사용법: [내용] 표현(')");
+        return;
+    }
+    let position = get_my_position(ob);
+    if has_room_property(position["zone"], position["room"], "모든통신금지") {
+        send_line(ob, "☞ 이지역에서는 어떠한 통신도 불가능합니다.");
         return;
     }
     send_emotion(ob, action);

@@ -691,6 +691,16 @@ impl MobCache {
         self.mobs.get(&key)
     }
 
+    /// Python `Mob.Mobs` iteration order: successful template registration
+    /// order, independent of whether an instance is currently spawned/alive.
+    pub fn ordered_mob_templates(&self) -> impl Iterator<Item = (&str, &RawMobData)> {
+        self.mob_order.iter().filter_map(|key| {
+            self.mobs
+                .get(key)
+                .map(|data| (key.as_str(), data))
+        })
+    }
+
     /// Get mutable mob data by key (zone:filename)
     pub fn get_mob_mut(&mut self, key: &str) -> Option<&mut RawMobData> {
         self.mobs.get_mut(key)

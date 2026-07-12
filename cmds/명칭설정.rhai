@@ -17,8 +17,11 @@ fn cmd(ob, line) {
         return;
     }
     guild_set(guild, words[0] + "명칭", words[1]);
-    let msg = han_iga(get_attr(ob, "이름")) + " " + words[0] + "의 명칭을 \x1b[1m" + words[1] + "\x1b[0;37m" + han_uro(words[1]) + " 변경하여 선포합니다.";
-    send_broadcast_to_guild(ob, msg);
+    let own_name = get_string(ob, "이름");
+    let msg = "\x1b[1m" + own_name + "\x1b[0;37m" + han_iga(own_name)
+        + " " + words[0] + "의 명칭을 \x1b[1m" + words[1] + "\x1b[0;37m"
+        + han_uro(words[1]) + " 변경하여 선포합니다.";
+    send_python_guild_group(ob, msg);
 }
 
 fn main(ob, line) {

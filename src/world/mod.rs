@@ -66,6 +66,7 @@ pub struct PlayerPosition {
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum RoomObjectRef {
     Player(String),
+    SummonedUser(u64),
     /// Stable runtime identity, allowing multiple clones of one template.
     Mob(u64),
     FloorItem(usize),
@@ -127,6 +128,9 @@ pub struct WorldState {
     /// Same-room player index. Values retain room insertion order so Rhai
     /// room-local commands do not have to scan every online position.
     room_players: HashMap<String, Vec<String>>,
+    /// Socket-less Player objects created by Python `사용자몹소환`.
+    summoned_users: Vec<SummonedUser>,
+    next_summoned_user_id: u64,
     /// Room cache
     pub room_cache: RoomCache,
     /// Mob cache
@@ -141,6 +145,13 @@ pub struct WorldState {
     room_object_order: HashMap<String, Vec<RoomObjectRef>>,
     /// 방별 임의 속성 (값설정 "방" 키 값). key = "zone:room", value = attr map.
     pub room_attrs: HashMap<String, HashMap<String, String>>,
+}
+
+#[derive(Debug)]
+pub struct SummonedUser {
+    pub id: u64,
+    pub body: crate::player::Body,
+    pub position: PlayerPosition,
 }
 
 /// A Python `Room.writeRoom` payload produced by a periodic mob update.
@@ -249,6 +260,8 @@ impl WorldState {
         Self {
             player_positions: HashMap::new(),
             room_players: HashMap::new(),
+            summoned_users: Vec::new(),
+            next_summoned_user_id: 1,
             room_cache: RoomCache::new(),
             mob_cache: MobCache::new(),
             item_cache: ItemCache::new(),
@@ -257,6 +270,48 @@ impl WorldState {
             room_object_order: HashMap::new(),
             room_attrs: HashMap::new(),
         }
+    }
+
+    pub fn add_summoned_user(&mut self, body: crate::player::Body, position: PlayerPosition) -> u64 {
+        let id = self.next_summoned_user_id;
+        self.next_summoned_user_id = self.next_summoned_user_id.saturating_add(1);
+        self.record_room_object(
+            &position.zone,
+            &position.room,
+            RoomObjectRef::SummonedUser(id),
+        );
+        self.summoned_users.push(SummonedUser { id, body, position });
+        id
+    }
+
+    pub fn summoned_users(&self) -> &[SummonedUser] {
+        &self.summoned_users
+    }
+
+    pub fn summoned_users_in_room(&self, zone: &str, room: &str) -> Vec<&SummonedUser> {
+        self.summoned_users
+            .iter()
+            .filter(|user| user.position.zone == zone && user.position.room == room)
+            .collect()
+    }
+
+    /// Python 제거 명령 scans channel.players and deletes the first matching
+    /// socket-less Player regardless of the administrator's current room.
+    pub fn remove_summoned_user(&mut self, name: &str) -> bool {
+        let Some(index) = self
+            .summoned_users
+            .iter()
+            .position(|user| user.body.get_name() == name)
+        else {
+            return false;
+        };
+        let user = self.summoned_users.remove(index);
+        self.remove_room_object(
+            &user.position.zone,
+            &user.position.room,
+            &RoomObjectRef::SummonedUser(user.id),
+        );
+        true
     }
 
     /// 방 속성 (값설정 "방"용). key = "zone:room". room은 "1" 또는 사용자맵 "이름" 등.
@@ -293,6 +348,16 @@ impl WorldState {
             .or_default();
         objects.retain(|existing| existing != &object);
         objects.insert(0, object);
+    }
+
+    #[cfg(test)]
+    pub(crate) fn record_test_room_object(
+        &mut self,
+        zone: &str,
+        room: &str,
+        object: RoomObjectRef,
+    ) {
+        self.record_room_object(zone, room, object);
     }
 
     /// Record a non-stackable floor object after Python `Room.insert(obj)`.

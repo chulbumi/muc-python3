@@ -28,6 +28,7 @@ const NON_COMMAND_SCRIPTS: &[&str] = &[
     // implementation is registered through CommandRegistry's private hook,
     // never as a player-visible command.
     "__movement",
+    "__summon_move",
     "__death",
     "__combat_tick",
     "attack",
@@ -320,6 +321,18 @@ pub async fn register_script_commands(
             create_script_command(
                 script_storage.clone(),
                 "__combat_tick".to_string(),
+                get_other_players_desc.clone(),
+                get_other_players_map.clone(),
+                call_out_scheduler.clone(),
+            ),
+        );
+    }
+    if script_names.iter().any(|name| name == "__summon_move") {
+        registry.register_internal(
+            "summon_move",
+            create_script_command(
+                script_storage.clone(),
+                "__summon_move".to_string(),
                 get_other_players_desc.clone(),
                 get_other_players_map.clone(),
                 call_out_scheduler.clone(),

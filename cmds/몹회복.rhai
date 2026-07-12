@@ -9,9 +9,7 @@ fn cmd(ob, line) {
         send_line(ob, "☞ 운영자 명령: [대상] 몹회복");
         return;
     }
-    let target = find_attack_target(ob, line);
-    if target.is_unit() || target["kind"] != "mob"
-        || !recover_room_mob(ob, target["id"], target["room_index"]) {
+    if !recover_named_room_mob(ob, line) {
         send_line(ob, "☞ 무슨 말인지 모르겠어요. *^_^*");
         return;
     }

@@ -41,7 +41,24 @@ fn only_python_global_list_commands_scan_all_online_players() {
     // Python scans the whole connected-player list for global list commands.
     // Adult-channel commands use the separate channel-membership index, while
     // room-local commands must use get_room_players(ob).
-    let global_commands = HashSet::from(["누구", "어디", "방파상태", "모두끝", "정리", "모두소환"]);
+    let global_commands = HashSet::from([
+        "누구",
+        "어디",
+        "방파상태",
+        "모두끝",
+        "정리",
+        "모두소환",
+        "트윗",
+        "외쳐",
+        "외쳐2",
+        "직위임명",
+        "방파말",
+        "똥파말",
+        "방파별호",
+        "방파파문",
+        "방주권한양도",
+        "명칭설정",
+    ]);
 
     for entry in std::fs::read_dir("cmds").expect("cmds directory") {
         let entry = entry.expect("cmds entry");
