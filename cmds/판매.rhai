@@ -16,8 +16,11 @@ fn cmd(ob, line) {
         return;
     }
 
-    if trim(line) == "모두" {
-        let sold = item_sell_all(ob, percent);
+    let batch_mode = trim(line);
+    if batch_mode == "속성0" || batch_mode == "속성1" || batch_mode == "속성2"
+            || batch_mode == "속성3" || batch_mode == "일반"
+            || batch_mode == "장비" || batch_mode == "모두" {
+        let sold = item_sell_all(ob, batch_mode, percent);
         if sold.len() == 0 {
             send_line(ob, "☞ 그런 아이템이 소지품에 없어요.");
             return;

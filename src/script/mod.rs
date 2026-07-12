@@ -4667,10 +4667,17 @@ pub fn create_engine_with_body_and_output(
     // Python `분해.py`: merchant-gated decomposition of optioned weapons/armor.
     // The script owns all messages; this efun performs only the ordered state change.
     let body_ptr_decompose = body_ptr;
-    engine.register_fn("decompose_all_items", move |_ob: &mut rhai::Map| -> i64 {
+    engine.register_fn("decompose_all_items", move |_ob: &mut rhai::Map| -> Dynamic {
         let body = unsafe { &mut *body_ptr_decompose };
+        let result = |status: &str, items: rhai::Array, shards: i64| {
+            let mut result = rhai::Map::new();
+            result.insert("status".into(), Dynamic::from(status.to_string()));
+            result.insert("items".into(), Dynamic::from(items));
+            result.insert("shards".into(), Dynamic::from(shards));
+            Dynamic::from(result)
+        };
         let Some((zone, room)) = current_body_position(body) else {
-            return -1;
+            return result("no_merchant", rhai::Array::new(), 0);
         };
         let merchant = get_world_state()
             .read()
@@ -4679,16 +4686,17 @@ pub fn create_engine_with_body_and_output(
                 world.get_mobs_in_room(&zone, &room).into_iter().any(|mob| {
                     world
                         .get_mob_data(&mob.mob_key)
-                        .map(|data| data.buy_percent > 0)
+                        .map(|data| data.buy_percent > 0 || !data.items_for_sale.is_empty())
                         .unwrap_or(false)
                 })
             })
             .unwrap_or(false);
         if !merchant {
-            return -1;
+            return result("no_merchant", rhai::Array::new(), 0);
         }
         let mut shards = 0i64;
         let mut remove = Vec::new();
+        let mut names = rhai::Array::new();
         for arc in &body.object.objs {
             let Ok(item) = arc.lock() else {
                 continue;
@@ -4714,6 +4722,7 @@ pub fn create_engine_with_body_and_output(
             }
             shards += 1;
             remove.push(arc.clone());
+            names.push(Dynamic::from(item.getName()));
         }
         for arc in remove {
             body.object.remove(&arc);
@@ -4726,7 +4735,11 @@ pub fn create_engine_with_body_and_output(
         if shards > 0 {
             let _ = save_body_to_json(body, &format!("data/user/{}.json", body.get_name()));
         }
-        shards
+        if names.is_empty() {
+            result("empty", names, 0)
+        } else {
+            result("ok", names, shards)
+        }
     });
 
     // item_destroy_busha: like item_destroy but skips 부수지못함. Returns -1 if first candidate has it.
@@ -5212,6 +5225,106 @@ pub fn create_engine_with_body_and_output(
         },
     );
 
+    // Python 수령.py: withdraw a daily donation from the same-room 표두.
+    // User-visible messages remain in Rhai; this efun owns only validation,
+    // mutable mob silver and player state.
+    let body_ptr_receive = body_ptr;
+    engine.register_fn(
+        "receive_from_guard",
+        move |_ob: &mut rhai::Map, amount: i64| -> Dynamic {
+            let body = unsafe { &mut *body_ptr_receive };
+            let mut result = rhai::Map::new();
+            let mut status = "ok";
+            let mut total = body.get_int("수령액");
+            let Some((zone, room)) = current_body_position(body) else {
+                result.insert("status".into(), Dynamic::from("no_guard"));
+                result.insert("total".into(), Dynamic::from(total));
+                return Dynamic::from(result);
+            };
+            let mut world = get_world_state().write().unwrap();
+            let guard_id = world
+                .mob_cache
+                .get_mobs_in_room(&zone, &room)
+                .into_iter()
+                .find(|mob| {
+                    mob.name == "표두"
+                        || world
+                            .mob_cache
+                            .get_mob(&mob.mob_key)
+                            .is_some_and(|data| data.reaction_names.iter().any(|name| name == "표두"))
+                })
+                .map(|mob| mob.instance_id);
+            let Some(guard_id) = guard_id else {
+                result.insert("status".into(), Dynamic::from("no_guard"));
+                result.insert("total".into(), Dynamic::from(total));
+                return Dynamic::from(result);
+            };
+            let Some(mobs) = world.mob_cache.get_all_mobs_in_room_mut(&zone, &room) else {
+                result.insert("status".into(), Dynamic::from("no_guard"));
+                result.insert("total".into(), Dynamic::from(total));
+                return Dynamic::from(result);
+            };
+            let guard = mobs.iter_mut().find(|mob| mob.instance_id == guard_id).unwrap();
+            let guard_key = guard.mob_key.clone();
+            let mut remaining_guard_gold = guard.gold;
+            if amount <= 0 {
+                status = "invalid_amount";
+            } else if body.get_int("레벨") > 500 {
+                status = "high_level";
+            } else if amount > 10_000_000 {
+                status = "too_greedy";
+            } else if amount > guard.gold {
+                status = "fund_short";
+            } else if total >= 1_000_000_000 {
+                status = "total_limit";
+            } else if total.saturating_add(amount) >= 1_000_000_000 {
+                status = "over_limit";
+            } else {
+                let now = chrono::Utc::now().timestamp();
+                if body.get_int("마지막수령").saturating_add(86_400) > now {
+                    status = "too_soon";
+                } else {
+                    body.set("마지막수령", now);
+                    body.set("은전", body.get_int("은전").saturating_add(amount));
+                    total = total.saturating_add(amount);
+                    body.set("수령액", total);
+                    guard.gold = guard.gold.saturating_sub(amount);
+                    remaining_guard_gold = guard.gold;
+                }
+            }
+            drop(world);
+            if status == "ok" {
+                let _ = save_body_to_json(body, &format!("data/user/{}.json", body.get_name()));
+                if let Some((mob_zone, mob_id)) = guard_key.split_once(':') {
+                    let path = std::path::Path::new("data/mob")
+                        .join(mob_zone)
+                        .join(format!("{mob_id}.json"));
+                    if let Ok(raw) = std::fs::read_to_string(&path) {
+                        if let Ok(mut root) =
+                            serde_json::from_str::<serde_json::Value>(&raw)
+                        {
+                            if let Some(info) = root
+                                .get_mut("몹정보")
+                                .and_then(serde_json::Value::as_object_mut)
+                            {
+                                info.insert(
+                                    "은전".to_string(),
+                                    serde_json::Value::Number(remaining_guard_gold.into()),
+                                );
+                                if let Ok(serialized) = serde_json::to_string_pretty(&root) {
+                                    let _ = std::fs::write(path, format!("{serialized}\n"));
+                                }
+                            }
+                        }
+                    }
+                }
+            }
+            result.insert("status".into(), Dynamic::from(status.to_string()));
+            result.insert("total".into(), Dynamic::from(total));
+            Dynamic::from(result)
+        },
+    );
+
     // merchant_buy(ob, name, count): 기능만. {err: ""|"usage"|"no_merchant"|"not_for_sale"|"inv_full"|"too_heavy"|"no_money", bought, display_name, total_cost}. 오류 메시지는 Rhai에서.
     let body_ptr_mbuy = body_ptr;
     engine.register_fn(
@@ -5277,23 +5390,19 @@ pub fn create_engine_with_body_and_output(
                 return Dynamic::from(m);
             }
             let cnt = count.clamp(1, 50);
-            const MAX_ITEMS: usize = 50;
-            let is_admin = body.get_int("관리자등급") >= 1000;
+            let max_items = get_murim_config_int("사용자아이템갯수").max(0) as usize;
             for _ in 0..cnt {
-                // 관리자는 무게/수량 제한 없음
-                if !is_admin {
-                    if body.get_item_count() >= MAX_ITEMS {
-                        if bought == 0 {
-                            err = "inv_full".to_string();
-                        }
-                        break;
+                if body.get_item_count() >= max_items {
+                    if bought == 0 {
+                        err = "inv_full".to_string();
                     }
-                    if body.get_item_weight() + weight > body.get_str() * 10 {
-                        if bought == 0 {
-                            err = "too_heavy".to_string();
-                        }
-                        break;
+                    break;
+                }
+                if body.get_item_weight() + weight > body.get_str() * 10 {
+                    if bought == 0 {
+                        err = "too_heavy".to_string();
                     }
+                    break;
                 }
                 if body.get_int("은전") < unit_price {
                     if bought == 0 {
@@ -5400,7 +5509,10 @@ pub fn create_engine_with_body_and_output(
                             Dynamic::from("cant_sell".to_string()),
                         ];
                     }
-                    let price = (o.getInt("판매가격") * percent) / 100;
+                    let mut price = (o.getInt("판매가격") * percent) / 100;
+                    if let Some(options) = o.get_option() {
+                        price = (price as f64 * (options.len() as f64 * 1.3)) as i64;
+                    }
                     total += price;
                     if display_name.is_empty() {
                         display_name = o.getName();
@@ -5436,7 +5548,7 @@ pub fn create_engine_with_body_and_output(
     let body_ptr_sell_all = body_ptr;
     engine.register_fn(
         "item_sell_all",
-        move |_ob: &mut rhai::Map, percent: i64| -> rhai::Array {
+        move |_ob: &mut rhai::Map, mode: &str, percent: i64| -> rhai::Array {
             let body = unsafe { &mut *body_ptr_sell_all };
             let percent = percent.max(0);
             let inventory = body.object.objs.clone();
@@ -5451,6 +5563,22 @@ pub fn create_engine_with_body_and_output(
                         || item.checkAttr("아이템속성", "출력안함")
                         || item.checkAttr("아이템속성", "팔지못함")
                     {
+                        continue;
+                    }
+                    let kind = item.getString("종류");
+                    let equipment = kind == "방어구" || kind == "무기";
+                    let option_count = item.get_option().map(|value| value.len()).unwrap_or(0);
+                    let selected = match mode {
+                        "속성0" => equipment && item.getString("옵션").is_empty(),
+                        "속성1" => equipment && option_count <= 2,
+                        "속성2" => equipment && option_count <= 3,
+                        "속성3" => equipment && option_count <= 4,
+                        "일반" => equipment && option_count == 0,
+                        "장비" => equipment,
+                        "모두" => true,
+                        _ => false,
+                    };
+                    if !selected {
                         continue;
                     }
                     let mut price = (item.getInt("판매가격") * percent) / 100;
@@ -7249,6 +7377,32 @@ pub fn create_engine_with_body_and_output(
 
     // item_equip(ob, name, order): 기능만. ""=성공, "usage"|"no_item"|"not_equippable"|"slot_used". 오류 메시지는 Rhai에서.
     // 아이템 착용 시 모든 속성 보너스가 플레이어에게 적용됨
+    let body_ptr_equip_view = body_ptr;
+    engine.register_fn(
+        "item_equip_presentation",
+        move |_ob: &mut rhai::Map, name: &str, order: i64| -> Dynamic {
+            let body = unsafe { &*body_ptr_equip_view };
+            let mut result = rhai::Map::new();
+            result.insert("name".into(), Dynamic::from(String::new()));
+            result.insert("script".into(), Dynamic::from(String::new()));
+            let Some(item) = body.object.findObjInven(name, order.max(1) as usize) else {
+                return Dynamic::from(result);
+            };
+            let Ok(item) = item.lock() else {
+                return Dynamic::from(result);
+            };
+            let item_name = item.getName();
+            result.insert("name".into(), Dynamic::from(item_name.clone()));
+            result.insert(
+                "script".into(),
+                Dynamic::from(
+                    item.getString("사용스크립")
+                        .replace("$아이템$", &item_name),
+                ),
+            );
+            Dynamic::from(result)
+        },
+    );
     let body_ptr_equip = body_ptr;
     engine.register_fn(
         "item_equip",
@@ -10414,10 +10568,10 @@ pub fn create_engine_with_body_and_output(
                 return "☞ 그런 아이템이 소지품에 없어요.".into();
             };
             let Ok(source) = item.lock() else {
-                return "설치할 수 있는 것이 아닙니다. ^^".into();
+                return "☞ 설치할 수 있는 것이 아닙니다. ^^".into();
             };
             if source.getString("종류") != "설치아이템" {
-                return "설치할 수 있는 것이 아닙니다. ^^".into();
+                return "☞ 설치할 수 있는 것이 아닙니다. ^^".into();
             }
             let name = source.getName();
             let path = format!("data/map/{zone}/{room}.json");
@@ -10471,10 +10625,8 @@ pub fn create_engine_with_body_and_output(
                 boxed.attr.insert(k.clone(), v.clone());
             }
             boxed.set("주인", owner_name.clone());
-            boxed.set("인덱스", format!("{}_{}", owner_name, name));
-            boxed.set("경로", format!("data/box/{}_{}.json", owner_name, name));
             drop(source);
-            if !box_commands::save_installed_box(&boxed) {
+            if !box_commands::prepare_installed_box(&mut boxed, &owner_name, &name) {
                 return "☞ 이곳에 설치할 허가권이 없습니다.".into();
             }
             box_commands::register_installed_box(
@@ -15198,6 +15350,206 @@ mod tests {
             .objs
             .iter()
             .all(|item| item.lock().is_ok_and(|item| !item.getBool("inUse"))));
+
+        let _ = storage.execute("입어", &mut body, "철퇴", None, None, None);
+        let remembered = storage
+            .execute("세트기억", &mut body, "", None, None, None)
+            .unwrap();
+        assert_eq!(remembered.0.join("\r\n"), "☞ 기억 되었습니다.");
+        let _ = storage.execute("벗어", &mut body, "모두", None, None, None);
+        let set_equipped = storage
+            .execute("세트착용", &mut body, "", None, None, None)
+            .unwrap();
+        assert!(!set_equipped.0.is_empty());
+        assert!(body
+            .object
+            .objs
+            .iter()
+            .any(|item| item.lock().is_ok_and(|item| item.getBool("inUse"))));
+    }
+
+    #[test]
+    fn shop_commands_match_python_valid_quantity_and_item_name_format() {
+        use crate::world::{get_world_state, PlayerPosition};
+
+        let player_name = format!("상점회귀-{}", std::process::id());
+        let mut body = Body::new();
+        body.set("이름", player_name.as_str());
+        body.set("힘", 100_i64);
+        body.set("은전", 100_i64);
+        {
+            let mut world = get_world_state().write().unwrap();
+            world.room_cache.get_room("낙양성", "6").unwrap();
+            world.set_player_position(
+                &player_name,
+                PlayerPosition::new("낙양성".to_string(), "6".to_string()),
+            );
+            world.spawn_mobs_for_room("낙양성", "6");
+        }
+
+        let storage = ScriptStorage::default();
+        let bought = storage
+            .execute("구입", &mut body, "수박모자 0", None, None, None)
+            .unwrap();
+        assert_eq!(body.object.objs.len(), 1);
+        assert_eq!(body.get_int("은전"), 91);
+        assert_eq!(
+            bought.0.join("\r\n"),
+            "당신이 \x1b[36m수박모자\x1b[0;37m 1개를 은전 9개에 구입합니다."
+        );
+        assert!(!bought.0.join("\r\n").contains("수박모자를 1개를"));
+
+        {
+            let mut world = get_world_state().write().unwrap();
+            world.room_cache.get_room("낙양성", "43").unwrap();
+            world.set_player_position(
+                &player_name,
+                PlayerPosition::new("낙양성".to_string(), "43".to_string()),
+            );
+            world.spawn_mobs_for_room("낙양성", "43");
+        }
+        let sold = storage
+            .execute("판매", &mut body, "모두", None, None, None)
+            .unwrap();
+        assert!(body.object.objs.is_empty());
+        assert!(sold.0.join("\r\n").contains("수박모자 1개를 은전 3개에 판매합니다."));
+
+        let _ = std::fs::remove_file(format!("data/user/{player_name}.json"));
+        get_world_state()
+            .write()
+            .unwrap()
+            .remove_player_position(&player_name);
+    }
+
+    #[test]
+    fn receive_command_runs_python_guard_funds_daily_limit_and_success_state() {
+        use crate::world::{get_world_state, MobInstance, PlayerPosition, RawMobData};
+
+        let player_name = format!("수령회귀-{}", std::process::id());
+        let zone = format!("수령회귀존-{}", std::process::id());
+        let room = "1";
+        let mob_key = format!("{zone}:표두");
+        let mut guard_data = RawMobData::new();
+        guard_data.name = "표두".to_string();
+        guard_data.zone = zone.clone();
+        guard_data.gold = 50_000;
+        guard_data.reaction_names = vec!["표두".to_string(), "무사".to_string()];
+        {
+            let mut world = get_world_state().write().unwrap();
+            world
+                .mob_cache
+                .insert_mob_data(mob_key.clone(), guard_data.clone());
+            world.mob_cache.add_mob_instance(MobInstance::new(
+                mob_key,
+                zone.clone(),
+                room,
+                &guard_data,
+            ));
+            world.set_player_position(
+                &player_name,
+                PlayerPosition::new(zone.clone(), room.to_string()),
+            );
+        }
+        let mut body = Body::new();
+        body.set("이름", player_name.as_str());
+        body.set("레벨", 100_i64);
+        body.set("은전", 10_i64);
+        body.set("수령액", 0_i64);
+        body.set("마지막수령", 0_i64);
+        let storage = ScriptStorage::default();
+
+        let success = storage
+            .execute("수령", &mut body, "1000", None, None, None)
+            .unwrap();
+        assert_eq!(body.get_int("은전"), 1010);
+        assert_eq!(body.get_int("수령액"), 1000);
+        assert!(success.0.join("\r\n").contains("은전 1000개를 표국무사에게 수령합니다."));
+        let guard_gold = get_world_state()
+            .read()
+            .unwrap()
+            .mob_cache
+            .get_all_mobs_in_room(&zone, room)[0]
+            .gold;
+        assert_eq!(guard_gold, 49_000);
+
+        let repeated = storage
+            .execute("수령", &mut body, "1", None, None, None)
+            .unwrap();
+        assert_eq!(repeated.0.join("\r\n"), "☞ 또 오셨어요???");
+
+        let _ = std::fs::remove_file(format!("data/user/{player_name}.json"));
+        get_world_state()
+            .write()
+            .unwrap()
+            .remove_player_position(&player_name);
+    }
+
+    #[test]
+    fn install_command_creates_reloadable_box_and_python_success_text() {
+        use crate::object::Object;
+        use crate::world::{get_world_state, PlayerPosition};
+
+        let suffix = std::process::id();
+        let player_name = format!("설치회귀-{suffix}");
+        let zone = format!("설치회귀존-{suffix}");
+        let room_dir = std::path::Path::new("data/map").join(&zone);
+        let room_path = room_dir.join("1.json");
+        std::fs::create_dir_all(&room_dir).unwrap();
+        std::fs::write(
+            &room_path,
+            serde_json::to_string_pretty(&serde_json::json!({
+                "맵정보": {
+                    "이름": "설치 시험방", "존이름": zone,
+                    "주인": player_name, "설치리스트": [],
+                    "설명": [], "출구": []
+                }
+            }))
+            .unwrap(),
+        )
+        .unwrap();
+
+        let mut body = Body::new();
+        body.set("이름", player_name.as_str());
+        let mut item = Object::new();
+        item.set("이름", "시험보관함");
+        item.set("반응이름", "시험보관함\r\n보관함");
+        item.set("종류", "설치아이템");
+        item.set("보관수량", 10_i64);
+        item.set("보관최대수량", 20_i64);
+        item.set("보관증가은전", 100_i64);
+        body.object.append(Arc::new(Mutex::new(item)));
+        {
+            let mut world = get_world_state().write().unwrap();
+            world.room_cache.get_room(&zone, "1").unwrap();
+            world.set_player_position(
+                &player_name,
+                PlayerPosition::new(zone.clone(), "1".to_string()),
+            );
+        }
+
+        let storage = ScriptStorage::default();
+        let installed = storage
+            .execute("설치", &mut body, "시험보관함", None, None, None)
+            .unwrap();
+        assert_eq!(
+            installed.0.join("\r\n"),
+            "당신이 \x1b[36m시험보관함을\x1b[37m 설치합니다."
+        );
+        assert!(body.object.objs.is_empty());
+        let box_path =
+            std::path::Path::new("data/box").join(format!("{player_name}_시험보관함.json"));
+        assert!(box_path.exists(), "설치 상자는 loader가 읽는 단일 .json 경로에 저장");
+        let saved: serde_json::Value =
+            serde_json::from_str(&std::fs::read_to_string(&box_path).unwrap()).unwrap();
+        assert_eq!(saved["상자정보"]["이름"], "시험보관함");
+
+        let _ = std::fs::remove_file(box_path);
+        let _ = std::fs::remove_file(format!("data/user/{player_name}.json"));
+        let _ = std::fs::remove_dir_all(room_dir);
+        get_world_state()
+            .write()
+            .unwrap()
+            .remove_player_position(&player_name);
     }
 
     fn adult_channel_test_body(name: &str, nickname: &str, config: &str) -> Body {

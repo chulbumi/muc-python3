@@ -200,6 +200,9 @@ pub struct MobInstance {
     pub damage_map: HashMap<String, i64>,
     /// Runtime inventory objects received through Python's `줘` command.
     pub inventory: Vec<Arc<Mutex<Object>>>,
+    /// Mutable carried silver. Donation/withdrawal commands change the mob
+    /// instance just as Python mutates `mob['은전']`.
+    pub gold: i64,
     /// Current action state (ACT_STAND, ACT_FIGHT, ACT_REST, etc.)
     pub act: i32,
     /// Active skills (for 방어상태머리말 display)
@@ -304,6 +307,7 @@ impl MobInstance {
             targets: Vec::new(),
             damage_map: HashMap::new(),
             inventory: Vec::new(),
+            gold: data.gold,
             act: 0, // ACT_STAND
             // Python `Mob.reset()` starts `skills` as the active-defense list;
             // learned attack/defense candidates remain in template `data.skills`.

@@ -1,5 +1,5 @@
 // 지도.rhai - 지도 명령어 (현재 방 출구 나침반)
-// Python: cmds/지도.py (간소화: 그리드 대신 출구 문자열)
+// Python: cmds/지도.py (11x12 recursive room grid)
 
 fn cmd(ob, line) {
     let pos = get_my_position(ob);
@@ -13,7 +13,6 @@ fn cmd(ob, line) {
         return;
     }
     send_line(ob, map_text);
-    send_line(ob, "");
 }
 
 fn main(ob, line) {

@@ -621,9 +621,10 @@ fn save_box(box_object: &Object) -> bool {
     let Some(path) = box_path(box_object) else {
         return false;
     };
-    // Preserve objs/box.py exactly: create() already stores a `.json` path,
-    // and save() appends another `.json` suffix.
-    let output_path = PathBuf::from(format!("{}.json", path.to_string_lossy()));
+    // Python appends another `.json` to an already suffixed path, making a
+    // newly installed box impossible to reload. Rust intentionally repairs
+    // that source bug and writes the path that the loader actually reads.
+    let output_path = path;
     let Some(items) = box_records(box_object) else {
         // Never turn an unrepresentable child into silent persistent loss.
         return false;
@@ -636,7 +637,16 @@ fn save_box(box_object: &Object) -> bool {
         .is_some_and(|serialized| std::fs::write(output_path, serialized).is_ok())
 }
 
-pub(crate) fn save_installed_box(box_object: &Object) -> bool {
+pub(crate) fn prepare_installed_box(
+    box_object: &mut Object,
+    owner: &str,
+    name: &str,
+) -> bool {
+    let index = format!("{owner}_{name}");
+    let path = Path::new("data/box").join(format!("{index}.json"));
+    mark_box(box_object, &index, &path);
+    box_object.set("인덱스", index);
+    box_object.set("경로", path.to_string_lossy().to_string());
     save_box(box_object)
 }
 
@@ -1899,7 +1909,7 @@ mod tests {
     }
 
     #[test]
-    fn authoritative_sources_lock_buggy_counts_and_double_json_suffix() {
+    fn authoritative_sources_lock_python_transfer_quirks() {
         let put = include_str!("../../cmds/넣어.py");
         let take = include_str!("../../cmds/꺼내.py");
         let box_source = include_str!("../../objs/box.py");
@@ -2007,10 +2017,9 @@ mod tests {
     }
 
     #[test]
-    fn box_save_writes_double_suffix_in_current_vec_order_without_dropping_children() {
+    fn box_save_repairs_python_double_suffix_and_preserves_vec_order() {
         let directory = test_directory("save");
         let source_path = directory.join("주인_함.json");
-        std::fs::write(&source_path, "original").unwrap();
         let mut box_object = make_box(&directory, "함", "주인", 10, 20, &["무기"], &[]);
         let first = make_item("1", "첫째", "무기", &["첫"], &[], 1);
         let second = make_item("2", "둘째", "무기", &["둘"], &[], 1);
@@ -2018,21 +2027,18 @@ mod tests {
         box_object.objs = vec![first, second];
 
         assert!(save_box(&box_object));
-        assert_eq!(std::fs::read_to_string(&source_path).unwrap(), "original");
-        let double = PathBuf::from(format!("{}.json", source_path.to_string_lossy()));
         let saved: JsonValue =
-            serde_json::from_str(&std::fs::read_to_string(double).unwrap()).unwrap();
+            serde_json::from_str(&std::fs::read_to_string(&source_path).unwrap()).unwrap();
         assert_eq!(saved["아이템"][0]["이름"], "첫째");
         assert_eq!(saved["아이템"][1]["이름"], "둘째");
         assert_eq!(saved["아이템"][0]["시간"], serde_json::json!(12.5));
 
         let malformed = Arc::new(Mutex::new(Object::new()));
         box_object.objs.push(malformed);
-        let before =
-            std::fs::read_to_string(format!("{}.json", source_path.to_string_lossy())).unwrap();
+        let before = std::fs::read_to_string(&source_path).unwrap();
         assert!(!save_box(&box_object));
         assert_eq!(
-            std::fs::read_to_string(format!("{}.json", source_path.to_string_lossy())).unwrap(),
+            std::fs::read_to_string(&source_path).unwrap(),
             before
         );
         let _ = std::fs::remove_dir_all(directory);

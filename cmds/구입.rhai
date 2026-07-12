@@ -6,7 +6,7 @@ fn cmd(ob, line) {
     let args = line_args(line);
     let name = args[0];
     let cnt = if len(args) >= 2 { to_int(args[1]) } else { 1 };
-    if cnt < 1 { return; }
+    let cnt = if cnt <= 0 { 1 } else { if cnt > 50 { 50 } else { cnt } };
     let r = merchant_buy(ob, name, cnt);
     let e = r["err"];
     if e == "usage" { send_line(ob, "☞ 사용법: [물품이름] [수량] 구입"); return; }
@@ -20,7 +20,8 @@ fn cmd(ob, line) {
     if c == 0 { return; }
     let dn = r["display_name"];
     let cost = r["total_cost"];
-    send_line(ob, "당신이 \x1b[36m" + dn + han_eul(dn) + "\x1b[37m " + c + "개를 은전 " + cost + "개에 구입합니다.");
+    send_line(ob, "당신이 \x1b[36m" + dn + "\x1b[0;37m " + c
+        + "개를 은전 " + cost + "개에 구입합니다.");
 }
 
 fn main(ob, line) {
