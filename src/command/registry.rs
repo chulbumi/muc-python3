@@ -13,6 +13,123 @@ use std::sync::Arc;
 /// Commands take a mutable reference to a player and a slice of argument strings
 pub type CommandFn = Arc<dyn Fn(&mut Body, &[&str]) -> CommandResult + Send + Sync>;
 
+/// Global command aliases used by the Python runtime.
+///
+/// `Player.parse_command()` imports only `objs.alias.alias` before looking up
+/// `Player.cmdList`; `data/config/cmd.json` is not part of that execution
+/// path. Keep this table identical to `objs/alias.py` and let exact command
+/// filenames register under their own names.
+pub(crate) const PYTHON_RUNTIME_ALIASES: &[(&str, &str)] = &[
+    ("e", "동"),
+    ("w", "서"),
+    ("s", "남"),
+    ("n", "북"),
+    ("u", "위"),
+    ("d", "아래"),
+    ("ne", "북동"),
+    ("nw", "북서"),
+    ("se", "남동"),
+    ("sw", "남서"),
+    ("ㄷ", "동"),
+    ("ㅅ", "서"),
+    ("ㄴ", "남"),
+    ("ㅂ", "북"),
+    ("ㅇ", "위"),
+    ("ㅁ", "아래"),
+    ("해", "벗어"),
+    ("벗", "벗어"),
+    ("어", "어디"),
+    ("해제", "벗어"),
+    ("입", "입어"),
+    ("착", "입어"),
+    ("착용", "입어"),
+    ("무장", "입어"),
+    ("점", "점수"),
+    ("소", "소지품"),
+    ("누", "누구"),
+    ("뒤", "뒤져"),
+    ("소지", "소지품"),
+    ("주워", "가져"),
+    ("장", "장비"),
+    ("업", "업데이트"),
+    ("보", "봐"),
+    ("귀", "귀환"),
+    ("일", "일어나"),
+    ("일어", "일어나"),
+    ("일어서", "일어나"),
+    ("일어난다", "일어나"),
+    ("쉬", "쉬어"),
+    ("쉰다", "쉬어"),
+    ("자무", "자동무공"),
+    ("시", "시전"),
+    ("공지", "공지사항"),
+    ("자무삭제", "자동무공삭제"),
+    ("도움", "도움말"),
+    ("표", "표현"),
+    ("'", "표현"),
+    ("설", "설정"),
+    ("외", "외쳐"),
+    ("잡", "외쳐"),
+    ("잡담", "외쳐"),
+    (",", "외쳐"),
+    ("외침", "외쳐"),
+    ("전", "전음"),
+    ("/", "전음"),
+    ("줄", "줄임말"),
+    ("줄임", "줄임말"),
+    ("품", "품목표"),
+    ("품목", "품목표"),
+    ("구", "구입"),
+    ("구매", "구입"),
+    ("사", "구입"),
+    ("산다", "구입"),
+    ("판다", "판매"),
+    ("판", "판매"),
+    ("팔", "판매"),
+    ("팔다", "판매"),
+    ("먹", "먹어"),
+    ("먹는다", "먹어"),
+    ("숙", "숙련도"),
+    ("숙련", "숙련도"),
+    ("기술", "무공"),
+    ("무상", "무공상태"),
+    ("값", "값설정"),
+    ("도", "도망"),
+    ("비", "비교"),
+    ("상보", "상태보기"),
+    ("꺼", "꺼내"),
+    ("넣", "넣어"),
+    ("상", "점수"),
+    ("상태", "점수"),
+    ("기상", "무공상태"),
+    ("몹", "몹찾기"),
+    ("아이템", "아이템찾기"),
+    (":", "반전음"),
+    ("방리", "방파리스트"),
+    ("방상", "방파상태"),
+    ("]", "방파말"),
+    ("방", "방파말"),
+    ("너", "넣어"),
+    ("따", "따라"),
+    ("집", "가져"),
+    ("집어", "가져"),
+    ("부숴", "부셔"),
+    ("부수", "부셔"),
+    ("부수다", "부셔"),
+    ("귀가", "귀환"),
+    ("정", "점수"),
+    ("정보", "점수"),
+    ("능력치", "점수"),
+    ("반전", "반전음"),
+    ("반", "반전음"),
+    ("공", "쳐"),
+    ("때", "쳐"),
+    ("공격", "쳐"),
+    ("때려", "쳐"),
+    ("버", "버려"),
+    ("[", "채널잡담"),
+];
+
 /// Information about a registered command
 #[derive(Clone)]
 pub struct CommandInfo {
@@ -75,6 +192,10 @@ impl CommandInfo {
 pub struct CommandRegistry {
     /// Map of command names to CommandInfo
     commands: HashMap<String, CommandInfo>,
+    /// Engine-only handlers.  These are intentionally absent from command
+    /// lookup, aliases and command listings; Python invokes the corresponding
+    /// parse-command branches without adding player commands.
+    internal_handlers: HashMap<String, CommandFn>,
     /// Built-in aliases (like movement directions)
     aliases: HashMap<String, String>,
 }
@@ -90,144 +211,17 @@ impl CommandRegistry {
     pub fn new() -> Self {
         CommandRegistry {
             commands: HashMap::new(),
+            internal_handlers: HashMap::new(),
             aliases: Self::built_in_aliases(),
         }
     }
 
     /// Returns the built-in alias mappings
     fn built_in_aliases() -> HashMap<String, String> {
-        let mut aliases = HashMap::new();
-
-        // Direction aliases
-        aliases.insert("e".to_string(), "동".to_string());
-        aliases.insert("w".to_string(), "서".to_string());
-        aliases.insert("s".to_string(), "남".to_string());
-        aliases.insert("n".to_string(), "북".to_string());
-        aliases.insert("u".to_string(), "위".to_string());
-        aliases.insert("d".to_string(), "아래".to_string());
-
-        // Korean keyboard shortcuts for directions
-        aliases.insert("ㄷ".to_string(), "동".to_string());
-        aliases.insert("ㅅ".to_string(), "서".to_string());
-        aliases.insert("ㄴ".to_string(), "남".to_string());
-        aliases.insert("ㅂ".to_string(), "북".to_string());
-        aliases.insert("ㅇ".to_string(), "위".to_string());
-        aliases.insert("ㅁ".to_string(), "아래".to_string());
-
-        // Command aliases (from objs/alias.py)
-        // 소지품 관련 alias는 Rhai 스크립트에서 처리 (cmds/소지품.rhai)
-        aliases.insert("보".to_string(), "봐".to_string());
-        aliases.insert("look".to_string(), "봐".to_string());
-        aliases.insert("바라보기".to_string(), "봐".to_string());
-        aliases.insert("도".to_string(), "도망".to_string());
-        aliases.insert("도움".to_string(), "도움말".to_string());
-        aliases.insert("help".to_string(), "도움말".to_string());
-        aliases.insert("?".to_string(), "도움말".to_string());
-        aliases.insert("/h".to_string(), "도움말".to_string());
-        aliases.insert("능력치".to_string(), "점수".to_string());
-        aliases.insert("점".to_string(), "점수".to_string());
-        aliases.insert("상태".to_string(), "점수".to_string());
-        aliases.insert("상".to_string(), "점수".to_string());
-        aliases.insert("정".to_string(), "점수".to_string());
-        aliases.insert("정보".to_string(), "점수".to_string());
-        aliases.insert("score".to_string(), "점수".to_string());
-        aliases.insert("stat".to_string(), "점수".to_string());
-        aliases.insert("외".to_string(), "외쳐".to_string());
-        aliases.insert("외침".to_string(), "외쳐".to_string());
-        aliases.insert("잡".to_string(), "외쳐".to_string());
-        aliases.insert("잡담".to_string(), "외쳐".to_string());
-        aliases.insert(",".to_string(), "외쳐".to_string());
-        // 파이썬 cmd.json 잡담: 창룡후, 창룡, 창
-        aliases.insert("창".to_string(), "외쳐".to_string());
-        aliases.insert("창룡".to_string(), "외쳐".to_string());
-        aliases.insert("창룡후".to_string(), "외쳐".to_string());
-        aliases.insert("외친다".to_string(), "외쳐".to_string());
-        aliases.insert("품".to_string(), "품목표".to_string());
-        aliases.insert("품목".to_string(), "품목표".to_string());
-        aliases.insert("판다".to_string(), "판매".to_string());
-        aliases.insert("판".to_string(), "판매".to_string());
-        aliases.insert("팔".to_string(), "판매".to_string());
-        aliases.insert("팔다".to_string(), "판매".to_string());
-
-        // Equipment aliases
-        aliases.insert("장".to_string(), "장비".to_string());
-
-        // Communication aliases
-        aliases.insert("대".to_string(), "말".to_string());
-
-        // Additional aliases from objs/alias.py
-        aliases.insert("해".to_string(), "벗어".to_string());
-        aliases.insert("벗".to_string(), "벗어".to_string());
-        aliases.insert("어".to_string(), "어디".to_string());
-        aliases.insert("해제".to_string(), "벗어".to_string());
-        aliases.insert("입".to_string(), "입어".to_string());
-        aliases.insert("착".to_string(), "입어".to_string());
-        aliases.insert("착용".to_string(), "입어".to_string());
-        aliases.insert("무장".to_string(), "입어".to_string());
-        aliases.insert("소".to_string(), "소지품".to_string());
-        aliases.insert("소지".to_string(), "소지품".to_string());
-        aliases.insert("주워".to_string(), "가져".to_string());
-        aliases.insert("업".to_string(), "업데이트".to_string());
-        aliases.insert("귀".to_string(), "귀환".to_string());
-        aliases.insert("일".to_string(), "일어나".to_string());
-        aliases.insert("일어".to_string(), "일어나".to_string());
-        aliases.insert("일어서".to_string(), "일어나".to_string());
-        aliases.insert("일어난다".to_string(), "일어나".to_string());
-        aliases.insert("쉬".to_string(), "쉬어".to_string());
-        aliases.insert("쉰다".to_string(), "쉬어".to_string());
-        aliases.insert("자무".to_string(), "자동무공".to_string());
-        aliases.insert("자무삭제".to_string(), "자동무공삭제".to_string());
-        aliases.insert("시".to_string(), "시전".to_string());
-        aliases.insert("공지".to_string(), "공지사항".to_string());
-        aliases.insert("표".to_string(), "표현".to_string());
-        aliases.insert("'".to_string(), "표현".to_string());
-        aliases.insert("설".to_string(), "설정".to_string());
-        aliases.insert("줄".to_string(), "줄임말".to_string());
-        aliases.insert("줄임".to_string(), "줄임말".to_string());
-        aliases.insert("구".to_string(), "구입".to_string());
-        aliases.insert("구매".to_string(), "구입".to_string());
-        aliases.insert("사".to_string(), "구입".to_string());
-        aliases.insert("산다".to_string(), "구입".to_string());
-        aliases.insert("먹".to_string(), "먹어".to_string());
-        aliases.insert("먹는다".to_string(), "먹어".to_string());
-        aliases.insert("숙".to_string(), "숙련도".to_string());
-        aliases.insert("숙련".to_string(), "숙련도".to_string());
-        aliases.insert("기술".to_string(), "무공".to_string());
-        aliases.insert("무상".to_string(), "무공상태".to_string());
-        aliases.insert("값".to_string(), "값설정".to_string());
-        aliases.insert("비".to_string(), "비교".to_string());
-        aliases.insert("상보".to_string(), "상태보기".to_string());
-        aliases.insert("꺼".to_string(), "꺼내".to_string());
-        aliases.insert("넣".to_string(), "넣어".to_string());
-        aliases.insert("기상".to_string(), "무공상태".to_string());
-        aliases.insert("몹".to_string(), "몹찾기".to_string());
-        aliases.insert("아이템".to_string(), "아이템찾기".to_string());
-        aliases.insert(":".to_string(), "반전음".to_string());
-        aliases.insert("반전".to_string(), "반전음".to_string());
-        aliases.insert("반".to_string(), "반전음".to_string());
-        aliases.insert("공".to_string(), "쳐".to_string());
-        aliases.insert("때".to_string(), "쳐".to_string());
-        aliases.insert("공격".to_string(), "쳐".to_string());
-        aliases.insert("때려".to_string(), "쳐".to_string());
-        aliases.insert("버".to_string(), "버려".to_string());
-        aliases.insert("부수".to_string(), "부셔".to_string());
-        aliases.insert("부수다".to_string(), "부셔".to_string());
-        aliases.insert("부숴".to_string(), "부셔".to_string());
-        aliases.insert("집".to_string(), "가져".to_string());
-        aliases.insert("집어".to_string(), "가져".to_string());
-        aliases.insert("귀가".to_string(), "귀환".to_string());
-        aliases.insert("뒤".to_string(), "뒤져".to_string());
-        aliases.insert("따".to_string(), "따라".to_string());
-        aliases.insert("전".to_string(), "전음".to_string());
-        aliases.insert("방".to_string(), "방파말".to_string());
-        aliases.insert("방리".to_string(), "방파리스트".to_string());
-        aliases.insert("방상".to_string(), "방파상태".to_string());
-        aliases.insert("입".to_string(), "입어".to_string());
-        aliases.insert("벗".to_string(), "벗어".to_string());
-        aliases.insert("착".to_string(), "입어".to_string());
-        aliases.insert("착용".to_string(), "입어".to_string());
-
-        aliases
+        PYTHON_RUNTIME_ALIASES
+            .iter()
+            .map(|(alias, command)| ((*alias).to_string(), (*command).to_string()))
+            .collect()
     }
 
     /// Registers a new command
@@ -237,6 +231,17 @@ impl CommandRegistry {
     pub fn register(&mut self, info: CommandInfo) {
         let name = info.name.clone();
         self.commands.insert(name.clone(), info);
+    }
+
+    /// Register a private parse-command handler.
+    pub fn register_internal(&mut self, name: impl Into<String>, handler: CommandFn) {
+        self.internal_handlers.insert(name.into(), handler);
+    }
+
+    /// Look up a private parse-command handler without exposing it as a
+    /// player command.
+    pub fn get_internal(&self, name: &str) -> Option<&CommandFn> {
+        self.internal_handlers.get(name)
     }
 
     /// Registers a command with a simple interface
@@ -274,13 +279,7 @@ impl CommandRegistry {
         }
 
         // Also check CommandInfo.aliases for each command
-        for cmd in self.commands.values() {
-            if cmd.matches(name) {
-                return Some(cmd);
-            }
-        }
-
-        None
+        self.commands.values().find(|cmd| cmd.matches(name))
     }
 
     /// Finds and returns a mutable reference to a command
@@ -368,11 +367,39 @@ mod tests {
     use super::*;
     use crate::command::CommandResult;
 
+    fn python_single_quoted_string(value: &str) -> Option<String> {
+        let value = value.strip_prefix('\'')?.strip_suffix('\'')?;
+        let mut decoded = String::new();
+        let mut chars = value.chars();
+        while let Some(ch) = chars.next() {
+            if ch == '\\' {
+                decoded.push(chars.next()?);
+            } else {
+                decoded.push(ch);
+            }
+        }
+        Some(decoded)
+    }
+
+    fn aliases_from_python_source(source: &str) -> HashMap<String, String> {
+        source
+            .lines()
+            .filter_map(|line| {
+                let entry = line.trim().strip_suffix(',')?;
+                let (alias, command) = entry.split_once(": ")?;
+                Some((
+                    python_single_quoted_string(alias)?,
+                    python_single_quoted_string(command)?,
+                ))
+            })
+            .collect()
+    }
+
     #[test]
     fn test_registry_new() {
         let registry = CommandRegistry::new();
-        assert_eq!(registry.commands.len(), 0);
-        assert!(registry.aliases.len() > 0);
+        assert!(registry.commands.is_empty());
+        assert!(!registry.aliases.is_empty());
     }
 
     #[test]
@@ -401,6 +428,34 @@ mod tests {
         assert_eq!(registry.resolve_alias("ㅅ"), "서");
         assert_eq!(registry.resolve_alias("ㄴ"), "남");
         assert_eq!(registry.resolve_alias("ㅂ"), "북");
+    }
+
+    #[test]
+    fn runtime_aliases_exactly_match_objs_alias_py() {
+        let source = std::fs::read_to_string(
+            std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("objs/alias.py"),
+        )
+        .expect("objs/alias.py must be readable");
+        let expected = aliases_from_python_source(&source);
+        let registry = CommandRegistry::new();
+
+        assert_eq!(registry.aliases, expected);
+        assert_eq!(registry.aliases.len(), 108);
+
+        for invented in [
+            "/h",
+            "?",
+            "look",
+            "score",
+            "stat",
+            "바라보기",
+            "창",
+            "창룡",
+            "창룡후",
+            "외친다",
+        ] {
+            assert_eq!(registry.resolve_alias(invented), invented);
+        }
     }
 
     #[test]

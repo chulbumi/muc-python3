@@ -2,7 +2,21 @@
 // Python: cmds/속성.py
 
 fn cmd(ob, line) {
-    send_line(ob, "☞ 아이템 속성 확인 기능은 현재 구현 중입니다.");
+    if !require_admin(ob, 1000) {
+        send_line(ob, "☞ 무슨 말인지 모르겠어요. *^_^*");
+        return;
+    }
+    let target = line;
+    let attrs = get_obj_attrs(ob, target);
+    if attrs.len() == 0 && target != "" {
+        send_line(ob, "☞ 그런 대상이 없어요!");
+        return;
+    }
+    let msg = "";
+    for item in attrs {
+        msg += "#" + item["key"] + "\r\n" + item["value"] + "\r\n\r\n";
+    }
+    send_line(ob, msg);
 }
 
 fn main(ob, line) {

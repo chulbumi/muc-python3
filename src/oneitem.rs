@@ -1,8 +1,11 @@
 //! ONEITEM 시스템: 단일아이템(기연) 소유/상태 추적
 //!
 //! Python objs/oneitem.py, ONEITEM 전역과 동일.
+//!
+//! Files:
 //! - data/config/oneitem.json: { "단일아이템": { "index": "owner [버림|보관|떨굼]" } }
 //! - data/config/oneitem_index.json: { "단일아이템인덱스": { "이름": "index" } }
+//!
 //! 로드 시 "버림" 상태는 attr에 넣지 않음. have/drop/keep/destroy 시 save.
 
 use once_cell::sync::Lazy;
@@ -289,11 +292,100 @@ pub fn oneitem_get_index_by_name(name: &str) -> String {
 pub fn oneitem_list_index_entries() -> rhai::Array {
     let guard = ONEITEM.read().unwrap();
     let mut arr = rhai::Array::new();
-    for (name, index) in &guard.index {
+    // Python `기연리스트` iterates Item.Items, not ONEITEM.index.  Recreate
+    // that source order by scanning the same item JSON files and retaining
+    // only records whose 아이템속성 contains 단일아이템.
+    let item_files = std::fs::read_dir("data/item")
+        .ok()
+        .into_iter()
+        .flatten()
+        .filter_map(Result::ok)
+        .filter(|entry| entry.path().extension().and_then(|x| x.to_str()) == Some("json"))
+        .collect::<Vec<_>>();
+    let mut ordered_paths = Vec::new();
+    let mut seen_paths = std::collections::HashSet::new();
+    // Mob.init() calls getItem(사용아이템) before loadAllItem(), so those
+    // unique items precede the regular item-directory scan in Python.
+    if let Ok(zones) = std::fs::read_dir("data/mob") {
+        for zone in zones.flatten() {
+            let Ok(files) = std::fs::read_dir(zone.path()) else {
+                continue;
+            };
+            for file in files.flatten() {
+                if file.path().extension().and_then(|x| x.to_str()) != Some("json") {
+                    continue;
+                }
+                let Ok(source) = std::fs::read_to_string(file.path()) else {
+                    continue;
+                };
+                let Ok(root) = serde_json::from_str::<JsonValue>(&source) else {
+                    continue;
+                };
+                let Some(info) = root.get("몹정보").and_then(|v| v.as_object()) else {
+                    continue;
+                };
+                let uses = info
+                    .get("사용아이템")
+                    .and_then(|v| v.as_array())
+                    .cloned()
+                    .unwrap_or_else(|| {
+                        info.get("사용아이템")
+                            .and_then(|v| v.as_str())
+                            .map(|v| vec![JsonValue::String(v.to_string())])
+                            .unwrap_or_default()
+                    });
+                for use_item in uses {
+                    let Some(key) = use_item.as_str().and_then(|v| v.split_whitespace().next())
+                    else {
+                        continue;
+                    };
+                    let path = std::path::Path::new("data/item").join(format!("{key}.json"));
+                    if path.exists() && seen_paths.insert(path.clone()) {
+                        ordered_paths.push(path);
+                    }
+                }
+            }
+        }
+    }
+    for entry in item_files {
+        let path = entry.path();
+        if seen_paths.insert(path.clone()) {
+            ordered_paths.push(path);
+        }
+    }
+    for path in ordered_paths {
+        let index = path.file_stem().and_then(|x| x.to_str()).unwrap_or("");
+        let Ok(source) = std::fs::read_to_string(&path) else {
+            continue;
+        };
+        let Ok(root) = serde_json::from_str::<JsonValue>(&source) else {
+            continue;
+        };
+        let Some(info) = root.get("아이템정보").and_then(|v| v.as_object()) else {
+            continue;
+        };
+        let is_one = info
+            .get("아이템속성")
+            .and_then(|v| v.as_str())
+            .is_some_and(|v| v.split_whitespace().any(|x| x == "단일아이템"));
+        if !is_one {
+            continue;
+        }
+        let name = info.get("이름").and_then(|v| v.as_str()).unwrap_or(index);
         let mut m = rhai::Map::new();
-        m.insert("name".into(), rhai::Dynamic::from(name.clone()));
-        m.insert("index".into(), rhai::Dynamic::from(index.clone()));
+        m.insert("name".into(), rhai::Dynamic::from(name.to_string()));
+        m.insert("index".into(), rhai::Dynamic::from(index.to_string()));
         arr.push(rhai::Dynamic::from(m));
+    }
+    // Keep legacy-index-only entries, which Python can materialize lazily via
+    // getItem even when their JSON file is absent.
+    if arr.is_empty() {
+        for (name, index) in &guard.index {
+            let mut m = rhai::Map::new();
+            m.insert("name".into(), rhai::Dynamic::from(name.clone()));
+            m.insert("index".into(), rhai::Dynamic::from(index.clone()));
+            arr.push(rhai::Dynamic::from(m));
+        }
     }
     arr
 }

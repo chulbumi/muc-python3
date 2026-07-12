@@ -3,7 +3,12 @@
 //! This module provides mob loading and management functionality.
 //! Mobs are loaded from JSON files in the data/mob/ directory.
 
+use crate::object::Object;
 use serde_json::Value as JsonValue;
+use std::sync::atomic::{AtomicU64, Ordering};
+use std::sync::{Arc, Mutex};
+
+static NEXT_MOB_INSTANCE_ID: AtomicU64 = AtomicU64::new(1);
 
 /// 이벤트 스크립트: 배열(legacy)이거나 Rhai 파일명(문자열).
 #[derive(Debug, Clone)]
@@ -11,13 +16,15 @@ pub enum EventScript {
     Legacy(Vec<String>),
     Rhai(String),
 }
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 use std::path::{Path, PathBuf};
 use std::sync::RwLock;
 
 /// Raw mob data from JSON
 #[derive(Debug, Clone)]
 pub struct RawMobData {
+    /// Original object attributes retained for Rhai/admin compatibility.
+    pub attributes: HashMap<String, serde_json::Value>,
     /// Mob name (이름)
     pub name: String,
     /// Zone name (존이름)
@@ -30,12 +37,21 @@ pub struct RawMobData {
     pub max_hp: i64,
     /// Internal power (내공)
     pub inner_power: i64,
+    /// Carried silver added to the normal kill reward (은전)
+    pub gold: i64,
     /// Strength (힘)
     pub strength: i64,
     /// Arm/Defense (맷집 - 방어력)
     pub arm: i64,
     /// Agility (민첩성)
     pub agility: i64,
+    /// Evasion used by `Body.getAttackChance` (회피)
+    pub miss: i64,
+    /// Accuracy used by Mob.getSkillChance (명중)
+    pub hit: i64,
+    /// Critical chance source (`운`) and multiplier source (`필살`).
+    pub luck: i64,
+    pub critical: i64,
     /// Description 1 (short description for room display)
     pub desc1: String,
     /// Description 2 (long description when looking)
@@ -50,8 +66,14 @@ pub struct RawMobData {
     pub regen: i64,
     /// Talk tick (대화틱)
     pub talk_tick: i64,
+    /// Python `이동` permitted room ids, expanded from single ids and ranges.
+    pub move_rooms: Vec<String>,
+    /// Python `이동틱`; zero defaults to 30 seconds.
+    pub move_tick: i64,
     /// Mob type (몹종류)
     pub mob_type: i64,
+    /// Linked-combat behavior (`전투종류`; Python `Player.setFight`).
+    pub combat_type: i64,
     /// Personality (성격)
     pub personality: i64,
     /// Safe zone flag
@@ -67,7 +89,9 @@ pub struct RawMobData {
     /// Buy-from-player percent (물건구입 e.g. "고물상 40" -> 40)
     pub buy_percent: i64,
     /// Items mob uses (사용아이템)
-    pub use_items: Vec<(String, i64, i64)>,
+    pub use_items: Vec<(String, i64, i64, i64)>,
+    /// Corpse drop declarations (아이템): key, count, chance, roll scale.
+    pub drop_items: Vec<(String, i64, i64, i64)>,
     /// Skills mob knows (무공)
     pub skills: Vec<(String, i64, i64)>,
     /// Death script (소멸스크립)
@@ -86,23 +110,34 @@ impl RawMobData {
     /// Create empty mob data
     pub fn new() -> Self {
         Self {
+            attributes: HashMap::new(),
             name: String::new(),
             zone: String::new(),
             level: 1,
             hp: 100,
             max_hp: 100,
             inner_power: 0,
+            gold: 0,
             strength: 10,
             arm: 10,
             agility: 10,
+            miss: 0,
+            hit: 0,
+            luck: 0,
+            critical: 0,
             desc1: String::new(),
             desc2: Vec::new(),
             desc3: String::new(),
             reaction_names: Vec::new(),
             locations: Vec::new(),
             regen: 300,
-            talk_tick: 60,
+            // Python only enters the speech branch when the raw `대화틱`
+            // attribute is present and non-empty; omission is not 60.
+            talk_tick: 0,
+            move_rooms: Vec::new(),
+            move_tick: 30,
             mob_type: 0,
+            combat_type: 0,
             personality: 0,
             safe_zone: false,
             auto_scripts: Vec::new(),
@@ -111,6 +146,7 @@ impl RawMobData {
             sale_script: Vec::new(),
             buy_percent: 0,
             use_items: Vec::new(),
+            drop_items: Vec::new(),
             skills: Vec::new(),
             death_script: String::new(),
             combat_start_script: String::new(),
@@ -130,6 +166,8 @@ impl Default for RawMobData {
 /// Active mob instance in the game world
 #[derive(Debug, Clone)]
 pub struct MobInstance {
+    /// Stable identity of this cloned runtime mob, retained across respawn.
+    pub instance_id: u64,
     /// Original mob data key (zone:filename)
     pub mob_key: String,
     /// Current zone
@@ -142,18 +180,32 @@ pub struct MobInstance {
     pub hp: i64,
     /// Max HP
     pub max_hp: i64,
+    /// Current inner power. Python mob instances keep this separately from the template.
+    pub mp: i64,
+    /// Maximum inner power before temporary modifiers.
+    pub max_mp: i64,
     /// Spawn timestamp
     pub spawn_time: i64,
+    /// Python `Body.tick`, incremented by `Mob.update()` through Room.update().
+    pub tick: i64,
     /// Death timestamp (0 if alive)
     pub death_time: i64,
+    /// Python `Mob.timeofregen`, refreshed by `뒤져` for type-6 mobs/corpses.
+    pub time_of_regen: i64,
     /// Is alive flag
     pub alive: bool,
     /// Current targets
     pub targets: Vec<String>,
+    /// Python `Mob.dmgMap`: actual HP removed, accumulated by player name.
+    pub damage_map: HashMap<String, i64>,
+    /// Runtime inventory objects received through Python's `줘` command.
+    pub inventory: Vec<Arc<Mutex<Object>>>,
     /// Current action state (ACT_STAND, ACT_FIGHT, ACT_REST, etc.)
     pub act: i32,
     /// Active skills (for 방어상태머리말 display)
     pub skills: Vec<String>,
+    /// Runtime defense/buff effects. `skills` is retained as the display-name list.
+    pub skill_effects: Vec<MobSkillEffect>,
     /// Mob type (for display filtering, e.g., type 7 is hidden)
     pub mob_type: i64,
     /// Difficulty level (0 = base, 1-7 = difficulty zones)
@@ -166,6 +218,38 @@ pub struct MobInstance {
     pub arm: i64,
     /// Difficulty-adjusted agility
     pub agility: i64,
+    /// Temporary stat modifiers applied by defense/non-combat skills.
+    pub str_modifier: i64,
+    pub dex_modifier: i64,
+    pub arm_modifier: i64,
+    pub mp_modifier: i64,
+    pub max_mp_modifier: i64,
+    pub hp_modifier: i64,
+    pub max_hp_modifier: i64,
+    /// Python Mob.skill: cloned attack skill retaining pattern turn state.
+    pub active_attack_skill: Option<crate::world::skill::Skill>,
+    /// Python Body.dex accumulator used while advancing mob combat patterns.
+    pub combat_dex: i64,
+    /// Python Mob.moveTime, stored independently for each cloned mob.
+    pub last_move_millis: i64,
+}
+
+/// One temporary skill effect on a mob instance.
+///
+/// Python stores cloned `Skill` objects in `mob.skills`. Rust keeps the values
+/// needed to reproduce duplicate-category checks, expiry and stat rollback.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct MobSkillEffect {
+    pub name: String,
+    pub anti_type: String,
+    pub expires_at: i64,
+    pub str_bonus: i64,
+    pub dex_bonus: i64,
+    pub arm_bonus: i64,
+    pub mp_bonus: i64,
+    pub max_mp_bonus: i64,
+    pub hp_bonus: i64,
+    pub max_hp_bonus: i64,
 }
 
 impl MobInstance {
@@ -192,13 +276,6 @@ impl MobInstance {
     ) -> Self {
         use super::difficulty::DifficultyConfig;
 
-        // Load skill names from the skills Vec<(String, i64, i64)>
-        let skill_names: Vec<String> = data
-            .skills
-            .iter()
-            .map(|(name, _level, _prob)| name.clone())
-            .collect();
-
         // Get difficulty config
         let config = DifficultyConfig::get(difficulty);
 
@@ -210,24 +287,44 @@ impl MobInstance {
         let agility = config.apply_agi(data.agility);
 
         Self {
+            instance_id: NEXT_MOB_INSTANCE_ID.fetch_add(1, Ordering::Relaxed),
             mob_key,
             zone,
             room: room.to_string(),
             name: data.name.clone(),
             hp: max_hp, // Start at full health
             max_hp,
+            mp: data.inner_power,
+            max_mp: data.inner_power,
             spawn_time: chrono::Utc::now().timestamp(),
+            tick: 0,
             death_time: 0,
+            time_of_regen: chrono::Utc::now().timestamp(),
             alive: true,
             targets: Vec::new(),
+            damage_map: HashMap::new(),
+            inventory: Vec::new(),
             act: 0, // ACT_STAND
-            skills: skill_names,
+            // Python `Mob.reset()` starts `skills` as the active-defense list;
+            // learned attack/defense candidates remain in template `data.skills`.
+            skills: Vec::new(),
+            skill_effects: Vec::new(),
             mob_type: data.mob_type,
             difficulty,
             level,
             strength,
             arm,
             agility,
+            str_modifier: 0,
+            dex_modifier: 0,
+            arm_modifier: 0,
+            mp_modifier: 0,
+            max_mp_modifier: 0,
+            hp_modifier: 0,
+            max_hp_modifier: 0,
+            active_attack_skill: None,
+            combat_dex: 0,
+            last_move_millis: 0,
         }
     }
 
@@ -248,6 +345,8 @@ impl MobInstance {
         let config = DifficultyConfig::get(self.difficulty);
         self.max_hp = config.apply_hp(data.max_hp);
         self.hp = self.max_hp;
+        self.mp = data.inner_power;
+        self.max_mp = data.inner_power;
         self.level = config.apply_level(data.level);
         self.strength = config.apply_str(data.strength);
         self.arm = config.apply_arm(data.arm);
@@ -257,8 +356,20 @@ impl MobInstance {
         self.death_time = 0;
         self.spawn_time = chrono::Utc::now().timestamp();
         self.targets.clear();
+        self.damage_map.clear();
+        self.inventory.clear();
         self.act = 0; // Reset to ACT_STAND
         self.skills.clear();
+        self.skill_effects.clear();
+        self.str_modifier = 0;
+        self.dex_modifier = 0;
+        self.arm_modifier = 0;
+        self.mp_modifier = 0;
+        self.max_mp_modifier = 0;
+        self.hp_modifier = 0;
+        self.max_hp_modifier = 0;
+        self.active_attack_skill = None;
+        self.combat_dex = 0;
     }
 
     /// Kill the mob
@@ -266,6 +377,15 @@ impl MobInstance {
         self.alive = false;
         self.death_time = chrono::Utc::now().timestamp();
         self.hp = 0;
+        self.act = 2; // ACT_DEATH
+    }
+
+    pub fn record_player_damage(&mut self, player_name: &str, damage: i64) {
+        if damage <= 0 {
+            return;
+        }
+        let entry = self.damage_map.entry(player_name.to_string()).or_insert(0);
+        *entry = entry.saturating_add(damage);
     }
 
     /// Handle mob death and calculate rewards (Python: die() in objs/mob.py:631)
@@ -457,16 +577,73 @@ pub struct MobCache {
     mobs: HashMap<String, RawMobData>,
     /// Active mob instances indexed by zone:room
     instances: HashMap<String, Vec<MobInstance>>,
+    /// Rooms whose Python `Room.create()` mob placement has run already.
+    initialized_rooms: HashSet<String>,
     /// Data directory path
     data_dir: PathBuf,
 }
 
 impl MobCache {
+    /// Move one concrete cloned mob between room instance vectors.  The
+    /// caller supplies the selected instance key; this preserves its runtime
+    /// HP, targets and movement timestamp instead of respawning a template.
+    pub(crate) fn move_instance(
+        &mut self,
+        zone: &str,
+        room: &str,
+        mob_key: &str,
+        destination_zone: &str,
+        destination_room: &str,
+        now_millis: i64,
+    ) -> Option<u64> {
+        use super::difficulty::base_zone_name;
+        let source_keys = [
+            format!(
+                "{}:{}:{}",
+                base_zone_name(zone),
+                room,
+                super::difficulty::difficulty_from_zone(zone)
+            ),
+            format!("{}:{}", zone, room),
+        ];
+        let Some(source_key) = source_keys
+            .into_iter()
+            .find(|key| self.instances.contains_key(key))
+        else {
+            return None;
+        };
+        let Some(instances) = self.instances.get_mut(&source_key) else {
+            return None;
+        };
+        let Some(index) = instances
+            .iter()
+            .position(|mob| mob.mob_key == mob_key && mob.alive && mob.act == 0)
+        else {
+            return None;
+        };
+        let mut mob = instances.remove(index);
+        let instance_id = mob.instance_id;
+        if instances.is_empty() {
+            self.instances.remove(&source_key);
+        }
+        mob.zone = destination_zone.to_string();
+        mob.room = destination_room.to_string();
+        mob.last_move_millis = now_millis;
+        let destination_key = format!(
+            "{}:{}:{}",
+            base_zone_name(destination_zone),
+            destination_room,
+            mob.difficulty
+        );
+        self.instances.entry(destination_key).or_default().push(mob);
+        Some(instance_id)
+    }
     /// Create a new mob cache
     pub fn new() -> Self {
         Self {
             mobs: HashMap::new(),
             instances: HashMap::new(),
+            initialized_rooms: HashSet::new(),
             data_dir: PathBuf::from("data/mob"),
         }
     }
@@ -476,8 +653,17 @@ impl MobCache {
         Self {
             mobs: HashMap::new(),
             instances: HashMap::new(),
+            initialized_rooms: HashSet::new(),
             data_dir: PathBuf::from(data_dir.as_ref()),
         }
+    }
+
+    /// Insert already-parsed template data for runtime setup and isolated
+    /// scheduler tests. Normal production loading still goes through
+    /// `load_mob`.
+    #[cfg(test)]
+    pub(crate) fn insert_mob_data(&mut self, key: String, data: RawMobData) {
+        self.mobs.insert(key, data);
     }
 
     /// Get mob data by key (zone:filename)
@@ -494,6 +680,48 @@ impl MobCache {
     /// Get mutable mob data by key (zone:filename)
     pub fn get_mob_mut(&mut self, key: &str) -> Option<&mut RawMobData> {
         self.mobs.get_mut(key)
+    }
+
+    pub fn item_holders(&self, item_key: &str) -> Vec<(String, String)> {
+        self.mobs
+            .iter()
+            .filter_map(|(key, mob)| {
+                let held = mob.items_for_sale.iter().any(|(item, _)| item == item_key)
+                    || mob.use_items.iter().any(|(item, _, _, _)| item == item_key);
+                if held {
+                    Some((mob.name.clone(), key.clone()))
+                } else {
+                    None
+                }
+            })
+            .collect()
+    }
+
+    /// Remove a loaded mob template and its active instances (Python Mob.Mobs
+    /// runtime deletion; the source JSON file is intentionally preserved).
+    pub fn remove_mob(&mut self, key: &str) -> bool {
+        let removed = self.mobs.remove(key).is_some();
+        self.instances.retain(|_, mobs| {
+            mobs.retain(|mob| mob.mob_key != key);
+            !mobs.is_empty()
+        });
+        removed
+    }
+
+    /// Remove one active instance from a room without deleting its template.
+    pub fn remove_instance(&mut self, zone: &str, room: &str, mob_key: &str) -> bool {
+        let room_key = format!("{}:{}", zone, room);
+        let Some(instances) = self.instances.get_mut(&room_key) else {
+            return false;
+        };
+        let before = instances.len();
+        instances.retain(|mob| mob.mob_key != mob_key);
+        let removed = before != instances.len();
+        let empty = instances.is_empty();
+        if empty {
+            self.instances.remove(&room_key);
+        }
+        removed
     }
 
     /// Check if mob has a specific event (Python: target.checkEvent(event_key))
@@ -513,7 +741,9 @@ impl MobCache {
         if let Some(mob_data) = self.mobs.get_mut(key) {
             let full_key = format!("이벤트 {}", event_key);
             // Add event with empty legacy script (just marks it as set)
-            mob_data.events.insert(full_key, EventScript::Legacy(vec![]));
+            mob_data
+                .events
+                .insert(full_key, EventScript::Legacy(vec![]));
             true
         } else {
             false
@@ -574,6 +804,7 @@ impl MobCache {
         mob_info: &serde_json::Map<String, JsonValue>,
     ) -> Result<RawMobData, MobError> {
         let mut data = RawMobData::new();
+        data.attributes = mob_info.clone().into_iter().collect();
 
         // Name (이름)
         data.name = mob_info
@@ -602,6 +833,7 @@ impl MobCache {
 
         // Inner power (내공)
         data.inner_power = mob_info.get("내공").and_then(|v| v.as_i64()).unwrap_or(0);
+        data.gold = mob_info.get("은전").and_then(|v| v.as_i64()).unwrap_or(0);
 
         // Strength (힘)
         data.strength = mob_info.get("힘").and_then(|v| v.as_i64()).unwrap_or(10);
@@ -611,6 +843,10 @@ impl MobCache {
             .get("민첩성")
             .and_then(|v| v.as_i64())
             .unwrap_or(10);
+        data.miss = mob_info.get("회피").and_then(|v| v.as_i64()).unwrap_or(0);
+        data.hit = mob_info.get("명중").and_then(|v| v.as_i64()).unwrap_or(0);
+        data.luck = mob_info.get("운").and_then(|v| v.as_i64()).unwrap_or(0);
+        data.critical = mob_info.get("필살").and_then(|v| v.as_i64()).unwrap_or(0);
 
         // Description 1 (설명1)
         data.desc1 = mob_info
@@ -668,13 +904,47 @@ impl MobCache {
         data.regen = mob_info.get("리젠").and_then(|v| v.as_i64()).unwrap_or(300);
 
         // Talk tick (대화틱)
-        data.talk_tick = mob_info
-            .get("대화틱")
+        data.talk_tick = mob_info.get("대화틱").and_then(|v| v.as_i64()).unwrap_or(0);
+
+        // Python Mob.setMove accepts a string or list, then expands `3-6`
+        // with an exclusive upper bound and prefixes the template zone.
+        let movement_words = match mob_info.get("이동") {
+            Some(JsonValue::String(value)) => value.split_whitespace().collect::<Vec<_>>(),
+            Some(JsonValue::Array(values)) => values
+                .iter()
+                .filter_map(JsonValue::as_str)
+                .flat_map(str::split_whitespace)
+                .collect(),
+            _ => Vec::new(),
+        };
+        for word in movement_words {
+            if let Some((start, end)) = word.split_once('-') {
+                if let (Ok(start), Ok(end)) = (start.parse::<i64>(), end.parse::<i64>()) {
+                    for room in start..end {
+                        let room = room.to_string();
+                        if !data.move_rooms.contains(&room) {
+                            data.move_rooms.push(room);
+                        }
+                    }
+                }
+            } else if !data.move_rooms.iter().any(|room| room == word) {
+                data.move_rooms.push(word.to_string());
+            }
+        }
+        data.move_tick = mob_info
+            .get("이동틱")
             .and_then(|v| v.as_i64())
-            .unwrap_or(60);
+            .filter(|value| *value != 0)
+            .unwrap_or(30);
 
         // Mob type (몹종류)
         data.mob_type = mob_info.get("몹종류").and_then(|v| v.as_i64()).unwrap_or(0);
+
+        // Linked combat type (전투종류)
+        data.combat_type = mob_info
+            .get("전투종류")
+            .and_then(|v| v.as_i64())
+            .unwrap_or(0);
 
         // Personality (성격)
         data.personality = mob_info.get("성격").and_then(|v| v.as_i64()).unwrap_or(0);
@@ -772,10 +1042,32 @@ impl MobCache {
                                 .get(2)
                                 .and_then(|s| s.parse::<i64>().ok())
                                 .unwrap_or(100);
-                            data.use_items.push((item_name, count, prob));
+                            let scale = parts
+                                .get(3)
+                                .and_then(|s| s.parse::<i64>().ok())
+                                .unwrap_or(1);
+                            data.use_items.push((item_name, count, prob, scale));
                         }
                     }
                 }
+            }
+        }
+
+        if let Some(items) = mob_info.get("아이템").and_then(JsonValue::as_array) {
+            for item in items.iter().filter_map(JsonValue::as_str) {
+                let parts = item.split_whitespace().collect::<Vec<_>>();
+                if parts.len() < 3 {
+                    continue;
+                }
+                data.drop_items.push((
+                    parts[0].to_string(),
+                    parts[1].parse::<i64>().unwrap_or(0),
+                    parts[2].parse::<i64>().unwrap_or(0),
+                    parts
+                        .get(3)
+                        .and_then(|value| value.parse().ok())
+                        .unwrap_or(1),
+                ));
             }
         }
 
@@ -894,42 +1186,53 @@ impl MobCache {
         // Room key includes difficulty for separate instances
         let room_key = format!("{}:{}:{}", base_zone, room, effective_difficulty);
 
+        // Python places the map's complete mob list exactly once when the
+        // Room object is created. Re-entering a room neither recreates a mob
+        // that wandered away nor duplicates its declarations.
+        if !self.initialized_rooms.insert(room_key.clone()) {
+            return;
+        }
+
         for mob_id in mob_ids {
             // Mob key uses base zone
             let key = format!("{}:{}", base_zone, mob_id);
 
             // Load mob on demand if not cached (from base zone)
-            if !self.mobs.contains_key(&key) && self.load_mob(base_zone, mob_id).is_err() {
-                continue;
+            if !self.mobs.contains_key(&key) {
+                log::debug!("[MobCache] Loading mob {} from zone {}", mob_id, base_zone);
+                if let Err(e) = self.load_mob(base_zone, mob_id) {
+                    log::warn!("[MobCache] Failed to load mob {}: {:?}", key, e);
+                    continue;
+                }
             }
 
             let data = match self.mobs.get(&key) {
                 Some(d) => d,
-                None => continue,
+                None => {
+                    log::warn!("[MobCache] Mob {} not found after loading", key);
+                    continue;
+                }
             };
 
-            // Check if mob already exists in this room+difficulty
-            let exists = self
-                .instances
-                .get(&room_key)
-                .map(|instances| instances.iter().any(|m| m.alive && m.mob_key == key))
-                .unwrap_or(false);
-
-            if !exists {
-                // Create instance with difficulty-adjusted stats
-                let instance = MobInstance::with_difficulty(
-                    key.clone(),
-                    zone.to_string(), // Keep original zone name for display
-                    room,
-                    data,
-                    effective_difficulty,
-                );
-                self.instances
-                    .entry(room_key.clone())
-                    .or_default()
-                    .push(instance);
-            }
+            // Every declaration is a distinct Python object, even when the
+            // same template name occurs more than once.
+            let instance = MobInstance::with_difficulty(
+                key.clone(),
+                zone.to_string(), // Keep original zone name for display
+                room,
+                data,
+                effective_difficulty,
+            );
+            log::debug!("[MobCache] Spawned mob {} in room_key {}", key, room_key);
+            self.instances
+                .entry(room_key.clone())
+                .or_default()
+                .push(instance);
         }
+        log::debug!(
+            "[MobCache] spawn_mobs_for_room done for room_key {}",
+            room_key
+        );
     }
 
     /// Get active mobs in a room
@@ -942,8 +1245,17 @@ impl MobCache {
 
         // Try with difficulty in key
         let room_key_with_diff = format!("{}:{}:{}", base_zone, room, effective_difficulty);
+        log::debug!(
+            "[MobCache] get_mobs_in_room trying key: {}",
+            room_key_with_diff
+        );
         if let Some(instances) = self.instances.get(&room_key_with_diff) {
-            let result: Vec<&MobInstance> = instances.iter().filter(|m| m.alive).collect();
+            // Python Room.insert() prepends objects (objs.insert(0, obj)).
+            // Instances are stored in spawn/JSON order, so expose the reverse
+            // order to match Room.objs traversal and findObjName semantics.
+            let mut result: Vec<&MobInstance> = instances.iter().filter(|m| m.alive).collect();
+            result.reverse();
+            log::debug!("[MobCache] Found {} mobs with diff key", result.len());
             if !result.is_empty() {
                 return result;
             }
@@ -951,10 +1263,74 @@ impl MobCache {
 
         // Fallback to legacy key format for compatibility
         let room_key = format!("{}:{}", zone, room);
-        self.instances
+        log::debug!("[MobCache] get_mobs_in_room fallback to key: {}", room_key);
+        let mut result: Vec<&MobInstance> = self
+            .instances
             .get(&room_key)
             .map(|instances| instances.iter().filter(|m| m.alive).collect())
-            .unwrap_or_default()
+            .unwrap_or_default();
+        result.reverse();
+        log::debug!("[MobCache] Found {} mobs with legacy key", result.len());
+        result
+    }
+
+    /// Get every mob object still placed in a room, regardless of action/alive state.
+    /// Python `Room.objs` keeps death/regeneration-state Mob objects until they are removed.
+    pub fn get_all_mobs_in_room(&self, zone: &str, room: &str) -> Vec<&MobInstance> {
+        use super::difficulty::{base_zone_name, difficulty_from_zone};
+
+        let base_zone = base_zone_name(zone);
+        let difficulty = difficulty_from_zone(zone);
+        if let Some(instances) = self
+            .instances
+            .get(&format!("{}:{}:{}", base_zone, room, difficulty))
+        {
+            let mut result: Vec<&MobInstance> = instances.iter().collect();
+            result.reverse();
+            return result;
+        }
+        let mut result: Vec<&MobInstance> = self
+            .instances
+            .get(&format!("{}:{}", zone, room))
+            .map(|instances| instances.iter().collect())
+            .unwrap_or_default();
+        result.reverse();
+        result
+    }
+
+    /// Mutable runtime instances for one room, using the same difficulty-key
+    /// lookup order as [`Self::get_all_mobs_in_room`].
+    pub(crate) fn get_all_mobs_in_room_mut(
+        &mut self,
+        zone: &str,
+        room: &str,
+    ) -> Option<&mut Vec<MobInstance>> {
+        use super::difficulty::{base_zone_name, difficulty_from_zone};
+
+        let difficulty_key = format!(
+            "{}:{}:{}",
+            base_zone_name(zone),
+            room,
+            difficulty_from_zone(zone)
+        );
+        let legacy_key = format!("{}:{}", zone, room);
+        let key = if self.instances.contains_key(&difficulty_key) {
+            difficulty_key
+        } else {
+            legacy_key
+        };
+        self.instances.get_mut(&key)
+    }
+
+    /// Whether this room already has runtime mob state.
+    pub fn has_room_instance_state(&self, zone: &str, room: &str) -> bool {
+        use super::difficulty::{base_zone_name, difficulty_from_zone};
+
+        let base_zone = base_zone_name(zone);
+        let difficulty = difficulty_from_zone(zone);
+        self.instances
+            .contains_key(&format!("{}:{}:{}", base_zone, room, difficulty))
+            || self.instances.contains_key(&format!("{}:{}", zone, room))
     }
 
     /// Get active mobs in a room with specific difficulty
@@ -1050,13 +1426,46 @@ impl MobCache {
 
     /// Update respawn state for all instances
     pub fn update_respawns(&mut self) {
-        let now = chrono::Utc::now().timestamp();
+        self.update_respawns_at(chrono::Utc::now().timestamp());
+    }
 
+    /// Python `Mob.update()` keeps a corpse visible for `시체` seconds,
+    /// changes it to ACT_REGEN, and only resets it after another `리젠`
+    /// seconds.  Keep that observable two-stage state even when callers only
+    /// need the state update and have no room broadcaster to emit the text.
+    pub(crate) fn update_respawns_at(&mut self, now: i64) {
+        self.update_respawns_for_room_keys_at(now, None);
+    }
+
+    /// Update only rooms selected by the caller. Python `Loop.updateRooms`
+    /// calls `Room.update()` for rooms occupied by connected players each
+    /// second; this keeps the represented respawn branch scoped the same way.
+    pub(crate) fn update_respawns_in_rooms_at(&mut self, rooms: &[(String, String)], now: i64) {
+        use super::difficulty::{base_zone_name, difficulty_from_zone};
+
+        let mut room_keys = HashSet::new();
+        for (zone, room) in rooms {
+            room_keys.insert(format!(
+                "{}:{}:{}",
+                base_zone_name(zone),
+                room,
+                difficulty_from_zone(zone)
+            ));
+            // Keep legacy instances created by old runtime paths observable.
+            room_keys.insert(format!("{}:{}", zone, room));
+        }
+        self.update_respawns_for_room_keys_at(now, Some(&room_keys));
+    }
+
+    fn update_respawns_for_room_keys_at(&mut self, now: i64, room_keys: Option<&HashSet<String>>) {
         // Collect all mob data needed for respawn
         let mut respawn_data: std::collections::HashMap<String, RawMobData> =
             std::collections::HashMap::new();
 
-        for instances in self.instances.values() {
+        for (room_key, instances) in &self.instances {
+            if room_keys.is_some_and(|keys| !keys.contains(room_key)) {
+                continue;
+            }
             for instance in instances {
                 if !instance.alive && !respawn_data.contains_key(&instance.mob_key) {
                     if let Some(data) = self.get_mob(&instance.mob_key) {
@@ -1067,12 +1476,20 @@ impl MobCache {
         }
 
         // Now do the respawns
-        for instances in self.instances.values_mut() {
+        for (room_key, instances) in &mut self.instances {
+            if room_keys.is_some_and(|keys| !keys.contains(room_key)) {
+                continue;
+            }
             for instance in instances {
                 if !instance.alive {
                     if let Some(data) = respawn_data.get(&instance.mob_key) {
-                        if (now - instance.death_time) >= data.regen {
+                        let elapsed = now.saturating_sub(instance.death_time);
+                        if elapsed >= data.corpse_time.saturating_add(data.regen) {
                             instance.respawn(data);
+                        } else if elapsed >= data.corpse_time && instance.act == 2 {
+                            // Python doDeath(): the body is gone but the mob
+                            // object remains in Room.objs in ACT_REGEN.
+                            instance.act = 3;
                         }
                     }
                 }
@@ -1114,10 +1531,19 @@ impl MobCache {
     /// Add a mob instance to the cache (for script spawning)
     pub fn add_mob_instance(&mut self, mob: MobInstance) {
         let room_key = format!("{}:{}", mob.zone, mob.room);
-        self.instances
-            .entry(room_key)
-            .or_default()
-            .push(mob);
+        self.instances.entry(room_key).or_default().push(mob);
+    }
+
+    /// Remove a departing player from every runtime mob target list.
+    pub fn remove_target_everywhere(&mut self, player_name: &str) {
+        for instances in self.instances.values_mut() {
+            for mob in instances {
+                mob.targets.retain(|target| target != player_name);
+                if mob.targets.is_empty() && mob.act == 1 {
+                    mob.act = 0;
+                }
+            }
+        }
     }
 
     /// Get a mutable reference to a mob instance
@@ -1127,12 +1553,9 @@ impl MobCache {
         room: &str,
         mob_key: &str,
     ) -> Option<&mut MobInstance> {
-        let room_key = format!("{}:{}", zone, room);
-        if let Some(instances) = self.instances.get_mut(&room_key) {
-            instances.iter_mut().find(|m| m.mob_key == mob_key)
-        } else {
-            None
-        }
+        self.get_all_mobs_in_room_mut(zone, room)?
+            .iter_mut()
+            .find(|mob| mob.mob_key == mob_key)
     }
 
     /// Get all mob instances across all rooms (for admin search functions)
@@ -1147,6 +1570,28 @@ impl MobCache {
             })
             .filter(|(_, instances)| !instances.is_empty())
             .collect()
+    }
+
+    pub(crate) fn moving_instances_snapshot(&self) -> Vec<(String, String, String, i64)> {
+        self.instances
+            .values()
+            .flat_map(|instances| instances.iter())
+            .filter(|mob| mob.alive && mob.act == 0)
+            .map(|mob| {
+                (
+                    mob.zone.clone(),
+                    mob.room.clone(),
+                    mob.mob_key.clone(),
+                    mob.last_move_millis,
+                )
+            })
+            .collect()
+    }
+
+    pub(crate) fn set_move_time(&mut self, zone: &str, room: &str, mob_key: &str, now_millis: i64) {
+        if let Some(mob) = self.get_mob_instance_mut(zone, room, mob_key) {
+            mob.last_move_millis = now_millis;
+        }
     }
 }
 
@@ -1270,21 +1715,13 @@ impl MobReward {
         }
 
         // Calculate difficulty bonus (Python: Body.difficulty[d-1][2] and [3])
-        // difficulty is 1-indexed in Python (1-7), we use 0-6 here
-        let (bonus_exp, bonus_gold) = if difficulty > 0 && difficulty <= 7 {
-            let bonus_mult = match difficulty {
-                1 => (2, 2),
-                2 => (3, 3),
-                3 => (5, 5),
-                4 => (8, 8),
-                5 => (13, 13),
-                6 => (20, 20),
-                7 => (33, 33),
-                _ => (0, 0),
-            };
-            let be = (exp * bonus_mult.0) / 100;
-            let bg = (gold * bonus_mult.1) / 100;
-            (be, bg)
+        let (bonus_exp, bonus_gold) = if (1..=9).contains(&difficulty) {
+            let multiplier =
+                [1.0, 2.0, 3.0, 4.0, 5.0, 6.5, 9.0, 12.5, 16.0][(difficulty - 1) as usize];
+            (
+                (exp as f64 * multiplier) as i64,
+                (gold as f64 * multiplier) as i64,
+            )
         } else {
             (0, 0)
         };
@@ -1397,6 +1834,45 @@ mod tests {
     }
 
     #[test]
+    fn cloned_mobs_have_distinct_stable_runtime_ids_across_respawn() {
+        let data = RawMobData::new();
+        let mut first = MobInstance::new("zone:same".to_string(), "zone".to_string(), 1, &data);
+        let second = MobInstance::new("zone:same".to_string(), "zone".to_string(), 1, &data);
+        assert_ne!(first.instance_id, second.instance_id);
+        let id = first.instance_id;
+        first.record_player_damage("갑", 30);
+        first.record_player_damage("갑", 12);
+        first.record_player_damage("을", 7);
+        assert_eq!(first.damage_map["갑"], 42);
+        assert_eq!(first.damage_map["을"], 7);
+        first.kill();
+        first.respawn(&data);
+        assert_eq!(first.instance_id, id);
+        assert!(first.damage_map.is_empty());
+    }
+
+    #[test]
+    fn repeated_template_declarations_spawn_distinctly_once_and_do_not_respawn_wanderers() {
+        let data_dir = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
+            .join("data")
+            .join("mob");
+        let mut cache = MobCache::with_data_dir(data_dir);
+        let declarations = vec!["12".to_string(), "12".to_string()];
+        cache.spawn_mobs_for_room("낙양성", "복제방", &declarations);
+        let first = cache.get_all_mobs_in_room("낙양성", "복제방");
+        assert_eq!(first.len(), 2);
+        assert_ne!(first[0].instance_id, first[1].instance_id);
+
+        cache.spawn_mobs_for_room("낙양성", "복제방", &declarations);
+        assert_eq!(cache.get_all_mobs_in_room("낙양성", "복제방").len(), 2);
+        assert!(cache
+            .move_instance("낙양성", "복제방", "낙양성:12", "낙양성", "이동방", 1)
+            .is_some());
+        cache.spawn_mobs_for_room("낙양성", "복제방", &declarations);
+        assert_eq!(cache.get_all_mobs_in_room("낙양성", "복제방").len(), 1);
+    }
+
+    #[test]
     fn test_mob_instance_kill() {
         let mut data = RawMobData::new();
         data.name = "Test Mob".to_string();
@@ -1431,6 +1907,46 @@ mod tests {
 
         assert!(instance.alive);
         assert_eq!(instance.hp, 500);
+    }
+
+    #[test]
+    fn respawn_update_keeps_python_corpse_then_regen_phases() {
+        let mut cache = MobCache::new();
+        let mut data = RawMobData::new();
+        data.name = "단계시험몹".to_string();
+        data.zone = "시험존".to_string();
+        data.corpse_time = 10;
+        data.regen = 20;
+        cache
+            .mobs
+            .insert("시험존:단계시험몹".to_string(), data.clone());
+
+        let mut mob = MobInstance::new(
+            "시험존:단계시험몹".to_string(),
+            "시험존".to_string(),
+            "1",
+            &data,
+        );
+        mob.kill();
+        mob.death_time = 100;
+        cache.add_mob_instance(mob);
+
+        cache.update_respawns_at(109);
+        let mob = cache.get_all_mobs_in_room("시험존", "1")[0];
+        assert!(!mob.alive);
+        assert_eq!(mob.act, 2);
+
+        cache.update_respawns_at(110);
+        let mob = cache.get_all_mobs_in_room("시험존", "1")[0];
+        assert!(!mob.alive);
+        assert_eq!(mob.act, 3);
+
+        cache.update_respawns_at(129);
+        assert!(!cache.get_all_mobs_in_room("시험존", "1")[0].alive);
+        cache.update_respawns_at(130);
+        let mob = cache.get_all_mobs_in_room("시험존", "1")[0];
+        assert!(mob.alive);
+        assert_eq!(mob.act, 0);
     }
 
     #[test]
@@ -1496,6 +2012,21 @@ mod tests {
             "83.json must have '이벤트: $대화 $대 편지', event keys: {:?}",
             ev_keys
         );
+    }
+
+    #[test]
+    fn moving_mob_routes_expand_python_ranges_with_exclusive_end() {
+        let data_dir = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
+            .join("data")
+            .join("mob");
+        let mut cache = MobCache::with_data_dir(data_dir);
+        let data = cache.load_mob("감숙성", "53").unwrap();
+        assert_eq!(data.move_tick, 30);
+        assert!(data.move_rooms.contains(&"400".to_string()));
+        assert!(data.move_rooms.contains(&"457".to_string()));
+        assert!(!data.move_rooms.contains(&"458".to_string()));
+        assert!(data.move_rooms.contains(&"460".to_string()));
+        assert!(!data.move_rooms.contains(&"546".to_string()));
     }
 
     /// Test mob spawning for starting room

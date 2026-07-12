@@ -21,6 +21,7 @@ pub enum SkillType {
 }
 
 impl SkillType {
+    #[allow(clippy::should_implement_trait)]
     pub fn from_str(s: &str) -> Self {
         match s {
             "전투" => SkillType::Combat,
@@ -43,6 +44,7 @@ pub enum PatternAction {
 }
 
 impl PatternAction {
+    #[allow(clippy::should_implement_trait)]
     pub fn from_str(s: &str) -> Self {
         match s {
             "초식" => PatternAction::Opening,
@@ -99,6 +101,10 @@ pub struct Skill {
     pub hp_cost: i64,
     /// 체력 요구 (HP requirement)
     pub hp_requirement: i64,
+    /// 전투회복 계열의 피격 회복 비율과 사용자 출력 스크립트.
+    pub recovery_percent: i64,
+    pub recovery_script: String,
+    pub release_script: String,
     /// 힘 증가 (_str)
     pub str_bonus: i64,
     /// 민첩성 증가 (_dex)
@@ -154,6 +160,9 @@ impl Skill {
             mp_cost: 0,
             hp_cost: 0,
             hp_requirement: 0,
+            recovery_percent: 0,
+            recovery_script: String::new(),
+            release_script: String::new(),
             str_bonus: 0,
             dex_bonus: 0,
             arm_bonus: 0,
@@ -178,11 +187,15 @@ impl Skill {
         }
 
         // 무공스크립 (Mugong script)
-        skill.mugong_script = json
-            .get("무공스크립")
-            .and_then(|v| v.as_str())
-            .unwrap_or("")
-            .to_string();
+        skill.mugong_script = match json.get("무공스크립") {
+            Some(JsonValue::String(value)) => value.clone(),
+            Some(JsonValue::Array(values)) => values
+                .iter()
+                .filter_map(JsonValue::as_str)
+                .collect::<Vec<_>>()
+                .join("\r\n"),
+            _ => String::new(),
+        };
 
         // 실패 (Fail message)
         skill.fail_message = json
@@ -218,6 +231,22 @@ impl Skill {
             .get("계열")
             .and_then(|v| v.as_str())
             .unwrap_or("")
+            .to_string();
+        skill.recovery_percent = json
+            .get("회복능력")
+            .and_then(JsonValue::as_str)
+            .and_then(|value| value.split_whitespace().nth(1))
+            .and_then(|value| value.parse().ok())
+            .unwrap_or(0);
+        skill.recovery_script = json
+            .get("회복스크립")
+            .and_then(JsonValue::as_str)
+            .unwrap_or_default()
+            .to_string();
+        skill.release_script = json
+            .get("무공해제스크립")
+            .and_then(JsonValue::as_str)
+            .unwrap_or_default()
             .to_string();
 
         // 공격 패턴 파싱 (Attack pattern)
@@ -276,10 +305,7 @@ impl Skill {
                 message,
             };
 
-            self.pattern
-                .entry(turn)
-                .or_insert_with(Vec::new)
-                .push(element);
+            self.pattern.entry(turn).or_default().push(element);
         }
 
         // Calculate max_turn
@@ -289,8 +315,12 @@ impl Skill {
 
     /// Parse attributes from JSON
     fn parse_attributes(&mut self, attrs: &JsonValue) -> Result<(), String> {
-        let attr_list: Vec<&str> = if let Some(s) = attrs.as_str() {
-            vec![s]
+        // Python source compares `type(value) == 'str'` (the literal string),
+        // which is always false. A JSON string is therefore iterated one
+        // character at a time and none of the full attribute prefixes match.
+        // Preserve that shipped behavior; only JSON arrays are parsed here.
+        let attr_list: Vec<&str> = if attrs.as_str().is_some() {
+            Vec::new()
         } else if let Some(arr) = attrs.as_array() {
             arr.iter().filter_map(|v| v.as_str()).collect()
         } else {
@@ -469,6 +499,7 @@ impl Skill {
 ///
 /// # Example
 /// ```rust
+/// # use muc_engine::world::calculate_normal_attacks;
 /// let (attacks, remainder) = calculate_normal_attacks(1500);
 /// assert_eq!(attacks, 2);  // 2 normal attacks
 /// assert_eq!(remainder, 100);  // 100 dex carries over
@@ -501,11 +532,12 @@ impl SkillCache {
 
         let json: JsonValue = serde_json::from_str(&content)?;
 
+        let mut updated = HashMap::new();
         if let Some(obj) = json.as_object() {
             for (name, skill_data) in obj {
                 match Skill::from_json(name.clone(), skill_data) {
                     Ok(skill) => {
-                        self.skills.insert(name.clone(), skill);
+                        updated.insert(name.clone(), skill);
                     }
                     Err(e) => {
                         eprintln!("Failed to parse skill {}: {}", name, e);
@@ -513,6 +545,8 @@ impl SkillCache {
                 }
             }
         }
+
+        self.skills = updated;
 
         tracing::info!("Loaded {} skills from {}", self.skills.len(), path);
         Ok(())
@@ -568,6 +602,15 @@ pub fn get_skill(name: &str) -> Option<Skill> {
     get_skill_cache().read().ok()?.get(name).cloned()
 }
 
+/// `MUGONG.load()` counterpart used by the update command.
+pub fn reload_skill_cache() -> Result<(), String> {
+    get_skill_cache()
+        .write()
+        .map_err(|error| error.to_string())?
+        .load_all()
+        .map_err(|error| error.to_string())
+}
+
 /// 스킬 이름으로 방어상태머리말 가져오기
 /// This is already in data/mod.rs but keeping for convenience
 pub fn get_skill_defense_head(name: &str) -> String {
@@ -606,5 +649,18 @@ mod tests {
         assert_eq!(SkillType::from_str("방어"), SkillType::Defense);
         assert_eq!(SkillType::from_str("내공"), SkillType::Internal);
         assert_eq!(SkillType::from_str("unknown"), SkillType::Other);
+    }
+
+    #[test]
+    fn string_skill_attributes_keep_python_type_comparison_bug() {
+        let json = serde_json::json!({
+            "종류": "전투",
+            "속성": "내공소모 28",
+            "공격": "1 공격 test"
+        });
+        let skill = Skill::from_json("파옥권형식".to_string(), &json).unwrap();
+        assert_eq!(skill.mp_cost, 0);
+        assert_eq!(skill.bonus, 1);
+        assert!(!skill.all_attack);
     }
 }

@@ -5,6 +5,9 @@
 //! - 개별 스크립트: step1_welcome(), step2_name(), ... 함수 정의
 //! - 각 단계 함수는 wait_* 호출로 다음 단계 지정하며 suspend
 
+#![allow(clippy::arc_with_non_send_sync)]
+#![allow(clippy::type_complexity)]
+
 use crate::hangul::{han_iga, han_ira};
 use rhai::{Dynamic, Engine, EvalAltResult, Map, Module, Scope, Shared};
 use std::path::Path;
@@ -14,9 +17,9 @@ use std::sync::Arc;
 /// [공], [공](이라/라), [공](아/야), [공](이/가) 치환
 fn substitute_doumi_variables(text: &str, name: &str, _gender: &str) -> String {
     fn has_batchilm(s: &str) -> bool {
-        s.chars().last().map_or(false, |c| {
+        s.chars().last().is_some_and(|c| {
             let code = c as u32;
-            (0xAC00..=0xD7A3).contains(&code) && ((code - 0xAC00) % 28) > 0
+            (0xAC00..=0xD7A3).contains(&code) && !(code - 0xAC00).is_multiple_of(28)
         })
     }
     let mut r = text.to_string();
@@ -84,12 +87,10 @@ pub fn run_doumi(
     let mut engine = Engine::new();
 
     // Get resume parameters
-    let resume_op = resume
-        .map(|(op, _)| op.to_string())
-        .unwrap_or_else(|| String::new());
+    let resume_op = resume.map(|(op, _)| op.to_string()).unwrap_or_default();
     let resume_input = resume
         .map(|(_, input)| input.to_string())
-        .unwrap_or_else(|| String::new());
+        .unwrap_or_default();
 
     // Determine which step to call
     let step_to_call = current_step.unwrap_or("step1_welcome");
@@ -97,7 +98,7 @@ pub fn run_doumi(
     // Debug logging
     eprintln!("DOUMI run: script_path={}, step_to_call={}, resume_op={:?}, resume_input={:?}, output.len={}, ob.len={}",
         script_path, step_to_call, resume_op, resume_input, output.len(), ob.len());
-    if ob.len() > 0 {
+    if !ob.is_empty() {
         eprintln!(
             "  ob contents: {:?}",
             ob.iter()
@@ -333,7 +334,7 @@ pub fn run_doumi(
                 "DOUMI finished: script_path={}, step={}, finished={:?}",
                 script_path, step_to_call, finished
             );
-            return Ok(finished);
+            Ok(finished)
         }
         Err(e) => {
             // Extract the inner error value that contains our Map
@@ -398,12 +399,12 @@ pub fn run_doumi(
                 "DOUMI error: script_path={}, step={}, error={:?}",
                 script_path, step_to_call, e
             );
-            return Err(DoumiSuspend {
+            Err(DoumiSuspend {
                 op: "error".to_string(),
                 prompt: (*e).to_string(),
                 expected: None,
                 next_step: None,
-            });
+            })
         }
     }
 }

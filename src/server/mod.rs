@@ -5,6 +5,8 @@
 //! - Game loop for periodic updates
 //! - Player management
 
+#![allow(clippy::type_complexity)]
+
 pub mod game_loop;
 
 pub use game_loop::{run_game_loop, GameLoop, GameLoopConfig};
@@ -13,13 +15,13 @@ use std::sync::Arc;
 use std::sync::Mutex;
 use std::time::Duration;
 use tokio::net::TcpListener;
-use tokio::sync::Mutex as AsyncMutex;
 use tokio::sync::Notify;
 use tracing::{error, info, warn};
 
 use crate::command::commands::register_basic_commands;
 use crate::command::commands::script::register_script_commands;
 use crate::command::CommandRegistry;
+use crate::create_global_data;
 use crate::hotreload::{HotReloadManager, ReloadConfig};
 use crate::network::broadcaster::Broadcaster;
 use crate::network::client::{get_other_players_desc_in_room, get_other_players_map_for_look};
@@ -92,6 +94,7 @@ impl MudServer {
     }
 
     /// Create a server with default configuration
+    #[allow(clippy::should_implement_trait)]
     pub fn default() -> Self {
         Self::new(ServerConfig::default())
     }
@@ -197,9 +200,14 @@ impl MudServer {
         let get_other_players_map: Arc<
             dyn Fn() -> std::collections::HashMap<String, String> + Send + Sync,
         > = Arc::new(get_other_players_map_for_look);
-        let script_storage = Arc::new(tokio::sync::RwLock::new(ScriptStorage::new(
-            ScriptConfig::default(),
-        )));
+
+        // Create global data for script access
+        let global_data = create_global_data(std::path::PathBuf::from("data"));
+
+        let mut script_storage = ScriptStorage::new(ScriptConfig::default());
+        script_storage.set_global_data(global_data);
+        let script_storage = Arc::new(tokio::sync::RwLock::new(script_storage));
+
         let script_runner =
             create_call_out_script_runner(script_storage.clone(), self.broadcaster.clone());
         let call_out_scheduler = Arc::new(CallOutScheduler::new(
@@ -226,20 +234,23 @@ impl MudServer {
 
         // Spawn game loop (process_due에서 call_out 만료 시 스크립트 함수 실행)
         let broadcaster = self.broadcaster.clone();
-        let players = Arc::new(AsyncMutex::new(Vec::new()));
         let game_loop_config = self.config.game_loop.clone();
         let call_out_for_loop = call_out_scheduler.clone();
+        let game_loop_registry = command_registry.clone();
+        let game_loop_rooms = room_cache.clone();
         tokio::spawn(async move {
             run_game_loop(
                 broadcaster,
-                players,
                 game_loop_config,
                 Some(call_out_for_loop),
+                game_loop_registry,
+                game_loop_rooms,
+                None,
             )
             .await;
         });
 
-        // 셧다운/CTRL+C/kill(SIGTERM) 시 서버 종료 시퀀스 트리거
+        // 리부팅/CTRL+C/kill(SIGTERM) 시 서버 중지 트리거
         let shutdown_notify = Arc::new(Notify::new());
         let sn = shutdown_notify.clone();
         tokio::spawn(async move {
@@ -288,18 +299,18 @@ impl MudServer {
                     }
                 }
                 _ = shutdown_notify.notified() => {
-                    info!("Shutdown requested (CTRL+C / kill / 셧다운)");
+                    info!("Server stop requested (CTRL+C / kill / 리부팅)");
                     break;
                 }
             }
         }
 
-        // 셧다운 시퀀스: 전체 사용자에게 종료 안내 → 연결 해제 요청 → 잠시 대기 후 종료
-        let msg = "\r\n\r\n\x1b[1;33m☞ 서버가 종료됩니다. 다음에 또 만나요~!!!\x1b[0;37m\r\n";
-        self.broadcaster.broadcast(msg, None);
+        // Python reactor.stop() has no invented success/broadcast text.
         for addr in self.broadcaster.client_addresses() {
             let _ = self.broadcaster.request_disconnect(addr);
         }
+        // Give each connection task time to run the same save/logout cleanup
+        // that Python performs from `connectionLost`.
         tokio::time::sleep(tokio::time::Duration::from_secs(2)).await;
         info!("Server shutdown complete");
         Ok(())
@@ -312,9 +323,6 @@ pub const WELCOME_MESSAGE: &str = r#"
           ☞ 무크 Rust 버전에 오신 것을 환영합니다!
 =============================================================
 "#;
-
-/// Server shutdown message
-pub const SHUTDOWN_MESSAGE: &str = "\r\n\r\n다음에 또 만나요~!!!\r\n";
 
 #[cfg(test)]
 mod tests {

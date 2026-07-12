@@ -2,7 +2,22 @@
 // Python: cmds/소켓.py
 
 fn cmd(ob, line) {
-    send_line(ob, "☞ 아이템 소켓 시스템은 현재 구현 중입니다.");
+    if !require_admin(ob, 1000) {
+        send_line(ob, "☞ 무슨 말인지 모르겠어요. *^_^*");
+        return;
+    }
+    let msg = "";
+    let old = "";
+    for entry in get_online_socket_entries() {
+        if entry["name"] == "" { continue; }
+        if old != entry["host"] {
+            msg += "\r\n" + fill_space(16, entry["host"]) + " : " + entry["name"];
+        } else {
+            msg += ", " + entry["name"];
+        }
+        old = entry["host"];
+    }
+    send_line(ob, msg);
 }
 
 fn main(ob, line) {

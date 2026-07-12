@@ -2,17 +2,16 @@
 // Python: cmds/설치.py
 
 fn cmd(ob, line) {
-    let admin_level = get_int(ob, "관리자등급");
-    if admin_level < 2000 {
-        send_line(ob, "☞ 관리자만 사용할 수 있어요.");
-        return;
-    }
     if line == "" || is_empty(line) {
-        send_line(ob, "☞ 운영자 명령: 설치 [방이름]");
+        send_line(ob, "☞ 사용법: [대상] 설치");
         return;
     }
-    send_line(ob, "☞ 방 설치 기능은 현재 구현 중입니다.");
-    send_line(ob, "   (현재 위치에 '" + line + "' 방 설치)");
+    let result = install_item(ob, line);
+    if result == "" {
+        send_line(ob, "당신이 " + line + " 설치합니다.");
+    } else {
+        send_line(ob, result);
+    }
 }
 
 fn main(ob, line) {

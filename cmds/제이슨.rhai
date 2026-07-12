@@ -1,18 +1,12 @@
-// 제이슨.rhai - 제이슨 명령어 (config JSON 조회)
+// 제이슨.rhai - 현재 사용자 객체 속성을 서버 콘솔에 JSON으로 출력
 // Python: cmds/제이슨.py
 
 fn cmd(ob, line) {
-    if is_empty(line) {
-        send_line(ob, "☞ 사용법: 제이슨 [config 파일명]");
+    if !require_admin(ob, 2000) {
+        send_line(ob, "☞ 무슨 말인지 모르겠어요. *^_^*");
         return;
     }
-    let path = "data/config/" + trim(line) + ".json";
-    let s = read_text_file(path);
-    if s == "" {
-        send_line(ob, "☞ 해당 파일이 없습니다: " + path);
-        return;
-    }
-    send_line(ob, s);
+    print(get_body_attrs_json(ob));
 }
 
 fn main(ob, line) {

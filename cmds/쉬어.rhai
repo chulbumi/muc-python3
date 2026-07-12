@@ -9,11 +9,18 @@ fn cmd(ob, line) {
         return;
     }
     let a = get_int(ob, "act");
-    if a == 2 {
+    if a == 4 {
         send_line(ob, "☞ 벌써 쉬고 있어요. ^^");
     } else if a == 0 {
-        set_act(ob, "휴식");
         send_line(ob, "당신이 자세를 편안히 하며 운기조식에 들어갑니다.");
+        let name = get_body_string(ob, "이름");
+        let actor = "\x1b[1m" + name + "\x1b[0;37m" + han_iga(name);
+        for player_name in get_room_players(ob) {
+            if player_name != name {
+                send_to_user(player_name, actor + " 자세를 편안히 하며 운기조식에 들어갑니다.");
+            }
+        }
+        set_act(ob, "휴식");
     } else {
         send_line(ob, "☞ 지금 쉬기에는 좋지가 않네요. ^^");
     }

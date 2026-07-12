@@ -2,7 +2,6 @@
 // Python: cmds/공지말.py
 
 fn cmd(ob, line) {
-    if !require_admin(ob, 1000) { send_line(ob, "☞ 관리자만 사용할 수 있어요."); return; }
     if is_empty(line) {
         send_line(ob, "☞ 사용법: [내용] 공지말");
         return;

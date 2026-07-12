@@ -54,6 +54,38 @@ impl ParsedCommand {
 pub struct CommandParser;
 
 impl CommandParser {
+    /// Python `lib.func.stripANSI`의 입력 정규화 동작.
+    ///
+    /// 일반적인 ANSI 파서와 일부러 다르다. 원본은 ESC를 본 뒤 첫 `m`까지
+    /// 버리고, C1 CSI(155)는 그 바이트만 버리며, 백스페이스는 이미 누적된
+    /// 마지막 문자를 하나 지운다. 명령 해석 결과를 바꾸지 않도록 이 동작을
+    /// 그대로 보존한다.
+    pub fn strip_python_ansi(line: &str) -> String {
+        let mut found_escape = false;
+        let mut output = String::new();
+
+        for character in line.chars() {
+            match character {
+                '\u{009b}' => continue,
+                '\u{0008}' => {
+                    output.pop();
+                    continue;
+                }
+                '\u{001b}' => {
+                    found_escape = true;
+                    continue;
+                }
+                'm' if found_escape => {
+                    found_escape = false;
+                    continue;
+                }
+                _ if found_escape => continue,
+                _ => output.push(character),
+            }
+        }
+        output
+    }
+
     /// Parses a line of input into a ParsedCommand
     ///
     /// # Arguments
@@ -67,12 +99,15 @@ impl CommandParser {
     /// use muc_engine::command::parser::CommandParser;
     ///
     /// let parsed = CommandParser::parse("동 검을 주워");
-    /// assert_eq!(parsed.command, "동");
-    /// assert_eq!(parsed.args, "검을 주워");
+    /// // Command is the last word ("주워" -> resolved to itself)
+    /// assert_eq!(parsed.command, "주워");
+    /// // Args are everything before the command
+    /// assert_eq!(parsed.args, "동 검을");
     /// ```
     pub fn parse(line: &str) -> ParsedCommand {
+        let sanitized = Self::strip_python_ansi(line);
         // Trim newlines but keep trailing spaces for say command detection
-        let line = line.trim_end_matches('\n').trim_end_matches('\r');
+        let line = sanitized.trim_end_matches('\n').trim_end_matches('\r');
 
         // Empty input
         if line.trim().is_empty() {
@@ -80,17 +115,11 @@ impl CommandParser {
         }
 
         // Check if line ends with sentence-ending punctuation or space (treat as 'say' command)
-        if line.ends_with(' ')
-            || line.ends_with('.')
-            || line.ends_with('!')
-            || line.ends_with('?')
-            || line.ends_with(',')
+        if line.ends_with(' ') || line.ends_with('.') || line.ends_with('!') || line.ends_with('?')
         {
-            // In Python: last char triggers 'say' command
-            // The command is the full line (except trailing punctuation), args are the message
-            let cmd =
-                line.trim_end_matches(|c| c == ' ' || c == '.' || c == '!' || c == '?' || c == ',');
-            return ParsedCommand::new(line.to_string(), "말".to_string(), cmd.to_string());
+            // Python passes the entire original line to cmds/말.py.  Sentence
+            // punctuation and a trailing space are part of the spoken message.
+            return ParsedCommand::new(line.to_string(), "말".to_string(), line.to_string());
         }
 
         // For non-say commands, trim whitespace and parse normally
@@ -107,12 +136,14 @@ impl CommandParser {
         // In the Python code, the command is the LAST word and params are everything before
         // This is opposite of typical MUD parsing but matches the Python implementation
         let cmd = words[words.len() - 1];
-        let param_start = line.find(cmd).unwrap_or(0);
-        let param = if param_start > 0 {
-            line[..param_start].trim().to_string()
-        } else {
-            String::new()
-        };
+        // Python: `param = line.rstrip(cmd).strip()`.  `rstrip` receives the
+        // command as a character set, but the separating whitespace stops it
+        // after the final command token.  In particular, an earlier occurrence
+        // of the command inside a target name must not truncate the arguments.
+        let param = line
+            .trim_end_matches(|character| cmd.contains(character))
+            .trim()
+            .to_string();
 
         // Resolve direction aliases
         let resolved_cmd = Self::resolve_alias(cmd);
@@ -220,14 +251,11 @@ impl CommandParser {
     /// # Returns
     /// true if the line should be treated as speech
     pub fn is_say_command(line: &str) -> bool {
+        let sanitized = Self::strip_python_ansi(line);
         // Don't trim first - we need to check the actual last character
         // But trim trailing newlines for user input
-        let line = line.trim_end_matches('\n').trim_end_matches('\r');
-        line.ends_with(' ')
-            || line.ends_with('.')
-            || line.ends_with('!')
-            || line.ends_with('?')
-            || line.ends_with(',')
+        let line = sanitized.trim_end_matches('\n').trim_end_matches('\r');
+        line.ends_with(' ') || line.ends_with('.') || line.ends_with('!') || line.ends_with('?')
     }
 }
 
@@ -248,6 +276,26 @@ mod tests {
     }
 
     #[test]
+    fn python_ansi_and_backspace_are_removed_before_command_detection() {
+        assert_eq!(
+            CommandParser::strip_python_ansi("\x1b[31m안\x08녕 말\x1b[0m"),
+            "녕 말"
+        );
+        let parsed = CommandParser::parse("\x1b[31m안녕\x1b[0m 말");
+        assert_eq!(parsed.raw, "안녕 말");
+        assert_eq!(parsed.command, "말");
+        assert_eq!(parsed.args, "안녕");
+    }
+
+    #[test]
+    fn python_strip_ansi_preserves_its_nonstandard_c1_and_unclosed_escape_rules() {
+        // Python drops codepoint 155 itself without entering escape mode.
+        assert_eq!(CommandParser::strip_python_ansi("\u{009b}31m북"), "31m북");
+        // An ESC without a later `m` consumes the rest of the input.
+        assert_eq!(CommandParser::strip_python_ansi("북\x1b[31K남"), "북");
+    }
+
+    #[test]
     fn test_parse_simple_command() {
         let parsed = CommandParser::parse("동");
         assert_eq!(parsed.command, "동");
@@ -262,17 +310,31 @@ mod tests {
     }
 
     #[test]
+    fn test_parse_uses_the_final_command_token_not_an_earlier_substring() {
+        let parsed = CommandParser::parse("쪽지왕  여러 단어 제목 쪽지");
+        assert_eq!(parsed.command, "쪽지");
+        assert_eq!(parsed.args, "쪽지왕  여러 단어 제목");
+    }
+
+    #[test]
     fn test_parse_say_command() {
         let parsed = CommandParser::parse("안녕하세요.");
         assert_eq!(parsed.command, "말");
-        assert_eq!(parsed.args, "안녕하세요");
+        assert_eq!(parsed.args, "안녕하세요.");
     }
 
     #[test]
     fn test_parse_say_with_space() {
         let parsed = CommandParser::parse("안녕 ");
         assert_eq!(parsed.command, "말");
-        assert_eq!(parsed.args, "안녕");
+        assert_eq!(parsed.args, "안녕 ");
+    }
+
+    #[test]
+    fn test_parse_single_period_as_spoken_message() {
+        let parsed = CommandParser::parse(".");
+        assert_eq!(parsed.command, "말");
+        assert_eq!(parsed.args, ".");
     }
 
     #[test]
@@ -313,7 +375,7 @@ mod tests {
         assert!(CommandParser::is_say_command("안녕!"));
         assert!(CommandParser::is_say_command("안녕?"));
         assert!(CommandParser::is_say_command("안녕 "));
-        assert!(CommandParser::is_say_command("안녕,"));
+        assert!(!CommandParser::is_say_command("안녕,"));
         assert!(!CommandParser::is_say_command("동"));
         assert!(!CommandParser::is_say_command("동쪽"));
     }

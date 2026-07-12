@@ -1,9 +1,9 @@
 // 기연정리.rhai - Python: cmds/기연정리.py
-// [기연이름] → ONEITEM.index, owner 파싱. len==1: Player.load/3일/objs 제거는 미지원. len==3: who,where 출력. 관리자 2000.
+// [기연이름] → ONEITEM.index, owner 파싱. 오프라인 소유자의 3일 경과·인벤토리 제거를 efun으로 처리.
 
 fn cmd(ob, line) {
     if !require_admin(ob, 2000) {
-        send_line(ob, "☞ 관리자만 사용할 수 있어요.");
+        send_line(ob, "☞ 무슨 말인지 모르겠어요. *^_^*");
         return;
     }
     if line == "" || is_empty(line) {
@@ -18,13 +18,21 @@ fn cmd(ob, line) {
     let owner = oneitem_get(idx);
     let words = split(owner, " ");
     if len(words) == 1 {
-        send_line(ob, "☞ 오프라인 사용자 인벤·3일·제거는 아직 지원하지 않습니다.");
+        for online in get_online_names() {
+            if online == words[0] { send_line(ob, "사용자가 접속중입니다.!" ); return; }
+        }
+        let result = cleanup_offline_oneitem(ob, words[0], idx);
+        if result == "ok" {
+            send_line(ob, words[0] + "의 " + trim(line) + "을(를) 정리하였습니다.");
+            oneitem_destroy(idx);
+        } else { send_line(ob, result); }
         return;
     }
     if len(words) == 3 {
         let who = words[0];
         let where = words[1];
         send_line(ob, who + " " + where);
+        oneitem_destroy(idx);
         return;
     }
     send_line(ob, "아무도 소지하고 있지 않습니다.!");

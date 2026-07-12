@@ -58,6 +58,7 @@ impl HeartBeatRegistry {
     }
 
     /// Create with default configuration
+    #[allow(clippy::should_implement_trait)]
     pub fn default() -> Self {
         Self::new(HeartBeatConfig::default())
     }
@@ -124,19 +125,12 @@ impl HeartBeatRegistry {
     /// Process heart beat for a single object
     fn process_object(&self, object_id: &str, storage: &ScriptStorage) -> Result<(), String> {
         debug!("Processing heart beat for {}", object_id);
-
-        // In a full implementation, we would:
-        // 1. Load the object's script
-        // 2. Call the heart_beat() function
-        // 3. Handle any errors
-
-        // For now, just verify the object exists
         if !storage.has_script(object_id) {
-            // Object no longer exists, remove from registry
             return Err(format!("Object not found: {}", object_id));
         }
-
-        Ok(())
+        storage
+            .call_script_unit(object_id, "heart_beat", vec![])
+            .map_err(|error| format!("heart_beat {} failed: {}", object_id, error))
     }
 
     /// Remove an object from the registry

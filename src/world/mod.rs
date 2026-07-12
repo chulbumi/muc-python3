@@ -8,9 +8,12 @@ pub mod event;
 pub mod guild;
 pub mod item;
 pub mod mob;
+pub mod nickname;
 pub mod rank;
 pub mod room;
 pub mod skill;
+pub mod tracking;
+pub mod user_home;
 
 // Re-export commonly used types
 pub use difficulty::{base_zone_name, difficulty_from_zone, DifficultyConfig, DifficultyLevel};
@@ -20,7 +23,9 @@ pub use room::{
     Direction, EnterMode, Exit, ExitMode, Room, RoomCache, RoomError,
 };
 
-pub use mob::{get_mob_cache, EventScript, MobCache, MobError, MobInstance, RawMobData};
+pub use mob::{
+    get_mob_cache, EventScript, MobCache, MobError, MobInstance, MobSkillEffect, RawMobData,
+};
 
 pub use skill::{
     calculate_normal_attacks, get_skill, get_skill_cache, get_skill_defense_head, PatternAction,
@@ -32,10 +37,14 @@ pub use item::{
     RawItemData,
 };
 
+use rand::Rng;
 use std::collections::HashMap;
 use std::sync::{Arc, Mutex, RwLock};
 
-use crate::object::Object;
+use crate::object::{Object, Value};
+
+const FLOOR_ITEM_LIFETIME_SECONDS: f64 = 600.0;
+const FLOOR_ITEM_DROP_TIME_KEY: &str = "timeofdrop";
 
 /// Player position in the world
 #[derive(Debug, Clone)]
@@ -46,6 +55,23 @@ pub struct PlayerPosition {
     pub room: String,
     /// Last movement timestamp
     pub last_move: i64,
+}
+
+/// Python `Room.objs` identity used for cross-type lookup ordering.
+///
+/// The existing room_players index is intentionally kept separate because it
+/// has callers that need only player names. This list records the Python
+/// insert-at-front event order for commands that must distinguish players
+/// from mobs/items/boxes.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum RoomObjectRef {
+    Player(String),
+    /// Stable runtime identity, allowing multiple clones of one template.
+    Mob(u64),
+    FloorItem(usize),
+    /// Stable ordinal into the lazily loaded Python `설치리스트` Box vector.
+    InstalledBox(usize),
+    Box(usize),
 }
 
 impl PlayerPosition {
@@ -97,7 +123,10 @@ pub struct PlayerRoomData {
 #[derive(Debug)]
 pub struct WorldState {
     /// Player positions indexed by player name
-    pub player_positions: HashMap<String, PlayerPosition>,
+    player_positions: HashMap<String, PlayerPosition>,
+    /// Same-room player index. Values retain room insertion order so Rhai
+    /// room-local commands do not have to scan every online position.
+    room_players: HashMap<String, Vec<String>>,
     /// Room cache
     pub room_cache: RoomCache,
     /// Mob cache
@@ -108,10 +137,110 @@ pub struct WorldState {
     pub room_objs: HashMap<String, Vec<Arc<Mutex<Object>>>>,
     /// Stackable items on room floor: "zone:room" -> (인덱스 -> 수량)
     pub room_inv_stack: HashMap<String, HashMap<String, i64>>,
+    /// Python-compatible unified Room.objs order (newest object first).
+    room_object_order: HashMap<String, Vec<RoomObjectRef>>,
     /// 방별 임의 속성 (값설정 "방" 키 값). key = "zone:room", value = attr map.
     pub room_attrs: HashMap<String, HashMap<String, String>>,
-    /// Party membership: player_name -> party_name
-    pub party_memberships: HashMap<String, String>,
+}
+
+/// A Python `Room.writeRoom` payload produced by a periodic mob update.
+/// Formatting remains in the source mob data; delivery is performed by the
+/// network loop after releasing the world lock.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct RoomMobMessage {
+    pub zone: String,
+    pub room: String,
+    pub kind: RoomMobMessageKind,
+    pub message: String,
+    pub mob_name: String,
+    pub revealed_items: Vec<RevealedFloorItem>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct RevealedFloorItem {
+    pub name: String,
+    pub ansi: String,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum RoomMobMessageKind {
+    Speech,
+    CorpseGone,
+}
+
+/// Data-only record of a Python `Item.update()` expiration.  Rhai owns the
+/// eventual Korean/ANSI room notice formatting.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ExpiredFloorItem {
+    pub zone: String,
+    pub room: String,
+    pub name: String,
+}
+
+/// A loaded room branch that Rust cannot yet update with Python `Room.update()`
+/// semantics.  `리부팅` must not stop the server after only a partial or
+/// guessed update, so callers treat every variant as a structural block.
+#[derive(Debug, Clone, PartialEq, Eq, thiserror::Error)]
+pub enum RebootRoomUpdateBlock {
+    #[error("loaded room disappeared from cache: {zone}:{room}")]
+    MissingRoom { zone: String, room: String },
+    #[error("loaded room lock is poisoned: {zone}:{room}")]
+    PoisonedRoom { zone: String, room: String },
+    #[error("floor-item lifetime is not represented: {zone}:{room}")]
+    FloorItems { zone: String, room: String },
+    #[error("configured mobs have no runtime instances: {zone}:{room}")]
+    MissingMobInstances { zone: String, room: String },
+    #[error("mob template is unavailable: {zone}:{room}:{mob}")]
+    MissingMobTemplate {
+        zone: String,
+        room: String,
+        mob: String,
+    },
+    #[error("mob update branch is not represented: {zone}:{room}:{mob}")]
+    UnsupportedMobUpdate {
+        zone: String,
+        room: String,
+        mob: String,
+    },
+    #[error("mob tick cannot be incremented: {zone}:{room}:{mob}")]
+    MobTickOverflow {
+        zone: String,
+        room: String,
+        mob: String,
+    },
+}
+
+fn reboot_mob_update_is_exact_noop(mob: &MobInstance, data: &RawMobData) -> bool {
+    if !mob.alive
+        || mob.act != 0
+        || mob.hp != mob.max_hp
+        || mob.mp != mob.max_mp
+        || !mob.targets.is_empty()
+        || !mob.skills.is_empty()
+        || !mob.skill_effects.is_empty()
+        || mob.str_modifier != 0
+        || mob.dex_modifier != 0
+        || mob.arm_modifier != 0
+        || mob.mp_modifier != 0
+        || mob.max_mp_modifier != 0
+        || mob.hp_modifier != 0
+        || mob.max_hp_modifier != 0
+    {
+        return false;
+    }
+
+    // Python's type-6 item regeneration needs `timeofregen`, which Rust does
+    // not retain.  Aggressive combat needs live player visibility/targets.
+    if data.mob_type == 6 || data.combat_type == 1 {
+        return false;
+    }
+
+    // A matching talk tick consumes Python RNG, may speak, and makes
+    // Room.update print prompts.  Between matching ticks it is a no-op.
+    let Some(next_tick) = mob.tick.checked_add(1) else {
+        return false;
+    };
+    data.talk_tick == 0 || next_tick % data.talk_tick != 0
 }
 
 impl WorldState {
@@ -119,13 +248,14 @@ impl WorldState {
     pub fn new() -> Self {
         Self {
             player_positions: HashMap::new(),
+            room_players: HashMap::new(),
             room_cache: RoomCache::new(),
             mob_cache: MobCache::new(),
             item_cache: ItemCache::new(),
             room_objs: HashMap::new(),
             room_inv_stack: HashMap::new(),
+            room_object_order: HashMap::new(),
             room_attrs: HashMap::new(),
-            party_memberships: HashMap::new(),
         }
     }
 
@@ -147,6 +277,48 @@ impl WorldState {
         self.room_objs.get(&key).cloned().unwrap_or_default()
     }
 
+    /// Return the currently recorded Python `Room.objs` order. The list is
+    /// newest-first, matching `Object.insert()`'s `insert(0, obj)` behavior.
+    pub fn get_room_object_order(&self, zone: &str, room: &str) -> Vec<RoomObjectRef> {
+        self.room_object_order
+            .get(&format!("{}:{}", zone, room))
+            .cloned()
+            .unwrap_or_default()
+    }
+
+    fn record_room_object(&mut self, zone: &str, room: &str, object: RoomObjectRef) {
+        let objects = self
+            .room_object_order
+            .entry(format!("{}:{}", zone, room))
+            .or_default();
+        objects.retain(|existing| existing != &object);
+        objects.insert(0, object);
+    }
+
+    /// Record a non-stackable floor object after Python `Room.insert(obj)`.
+    pub fn record_floor_item(&mut self, zone: &str, room: &str, item: &Arc<Mutex<Object>>) {
+        self.record_room_object(
+            zone,
+            room,
+            RoomObjectRef::FloorItem(Arc::as_ptr(item) as usize),
+        );
+    }
+
+    /// Record an installed Box after Python `Room.insert(box)`.
+    pub fn record_box(&mut self, zone: &str, room: &str, object: &Arc<Mutex<Object>>) {
+        self.record_room_object(zone, room, RoomObjectRef::Box(Arc::as_ptr(object) as usize));
+    }
+
+    fn remove_room_object(&mut self, zone: &str, room: &str, object: &RoomObjectRef) {
+        let key = format!("{}:{}", zone, room);
+        if let Some(objects) = self.room_object_order.get_mut(&key) {
+            objects.retain(|existing| existing != object);
+            if objects.is_empty() {
+                self.room_object_order.remove(&key);
+            }
+        }
+    }
+
     /// Get or create stackable items on a room's floor. Key: "zone:room", inner: 인덱스 -> 수량.
     pub fn get_room_objs_stack_mut(&mut self, zone: &str, room: &str) -> &mut HashMap<String, i64> {
         let key = format!("{}:{}", zone, room);
@@ -157,6 +329,60 @@ impl WorldState {
     pub fn get_room_objs_stack(&self, zone: &str, room: &str) -> HashMap<String, i64> {
         let key = format!("{}:{}", zone, room);
         self.room_inv_stack.get(&key).cloned().unwrap_or_default()
+    }
+
+    /// Apply Python `Room.update()` / `Item.update()` lifetime state to
+    /// individual floor objects.  An item without a timestamp receives its
+    /// first timestamp and survives this update, just like Python's first
+    /// `Item.update()` call.  The legacy compressed stack has no per-object
+    /// timestamps, so it deliberately remains outside this exact branch.
+    pub(crate) fn expire_floor_items_at(
+        &mut self,
+        rooms: &[(String, String)],
+        now: f64,
+    ) -> Vec<ExpiredFloorItem> {
+        let mut expired = Vec::new();
+        for (zone, room) in rooms {
+            let key = format!("{zone}:{room}");
+            let Some(objects) = self.room_objs.get_mut(&key) else {
+                continue;
+            };
+            let mut removed_ids = Vec::new();
+            objects.retain(|arc| {
+                let Ok(mut object) = arc.lock() else {
+                    return true;
+                };
+                let dropped_at = match object.temp.get(FLOOR_ITEM_DROP_TIME_KEY) {
+                    Some(Value::Float(value)) => Some(*value),
+                    Some(Value::Int(value)) => Some(*value as f64),
+                    _ => None,
+                };
+                let Some(dropped_at) = dropped_at else {
+                    object
+                        .temp
+                        .insert(FLOOR_ITEM_DROP_TIME_KEY.to_string(), Value::Float(now));
+                    return true;
+                };
+                if now - dropped_at < FLOOR_ITEM_LIFETIME_SECONDS {
+                    return true;
+                }
+                let index = object.getString("인덱스");
+                if object.checkAttr("아이템속성", "단일아이템") && !index.is_empty() {
+                    let _ = crate::oneitem::oneitem_destroy(&index);
+                }
+                expired.push(ExpiredFloorItem {
+                    zone: zone.clone(),
+                    room: room.clone(),
+                    name: object.getName(),
+                });
+                removed_ids.push(Arc::as_ptr(arc) as usize);
+                false
+            });
+            for id in removed_ids {
+                self.remove_room_object(zone, room, &RoomObjectRef::FloorItem(id));
+            }
+        }
+        expired
     }
 
     /// Initialize the world (load initial data)
@@ -174,12 +400,78 @@ impl WorldState {
 
     /// Set a player's position
     pub fn set_player_position(&mut self, player_name: &str, pos: PlayerPosition) {
+        if let Some(previous) = self.player_positions.get(player_name).cloned() {
+            let previous_key = previous.room_key();
+            if previous_key == pos.room_key() {
+                self.player_positions.insert(player_name.to_string(), pos);
+                let inserted = {
+                    let players = self.room_players.entry(previous_key.clone()).or_default();
+                    if !players.iter().any(|name| name == player_name) {
+                        players.push(player_name.to_string());
+                        true
+                    } else {
+                        false
+                    }
+                };
+                if inserted {
+                    if let Some((zone, room)) = previous_key.split_once(':') {
+                        self.record_room_object(
+                            zone,
+                            room,
+                            RoomObjectRef::Player(player_name.to_string()),
+                        );
+                    }
+                }
+                return;
+            }
+            self.remove_room_object(
+                &previous.zone,
+                &previous.room,
+                &RoomObjectRef::Player(player_name.to_string()),
+            );
+            self.remove_from_room_index(&previous_key, player_name);
+        }
+
+        let room_key = pos.room_key();
+        let zone = pos.zone.clone();
+        let room = pos.room.clone();
         self.player_positions.insert(player_name.to_string(), pos);
+        let inserted = {
+            let players = self.room_players.entry(room_key).or_default();
+            if !players.iter().any(|name| name == player_name) {
+                players.push(player_name.to_string());
+                true
+            } else {
+                false
+            }
+        };
+        if inserted {
+            self.record_room_object(&zone, &room, RoomObjectRef::Player(player_name.to_string()));
+        }
     }
 
     /// Remove a player's position (e.g. when kicked due to duplicate login)
     pub fn remove_player_position(&mut self, player_name: &str) -> Option<PlayerPosition> {
-        self.player_positions.remove(player_name)
+        let removed = self.player_positions.remove(player_name)?;
+        self.remove_room_object(
+            &removed.zone,
+            &removed.room,
+            &RoomObjectRef::Player(player_name.to_string()),
+        );
+        self.remove_from_room_index(&removed.room_key(), player_name);
+        Some(removed)
+    }
+
+    fn remove_from_room_index(&mut self, room_key: &str, player_name: &str) {
+        let should_remove_room = if let Some(players) = self.room_players.get_mut(room_key) {
+            players.retain(|name| name != player_name);
+            players.is_empty()
+        } else {
+            false
+        };
+        if should_remove_room {
+            self.room_players.remove(room_key);
+        }
     }
 
     /// Move a player in a direction
@@ -210,8 +502,8 @@ impl WorldState {
 
         // Update player position. Exit.destination is (zone, room_id: String).
         let new_pos = PlayerPosition::new(dest.0.clone(), dest.1.clone());
-        self.player_positions
-            .insert(player_name.to_string(), new_pos.clone());
+        drop(room_read);
+        self.set_player_position(player_name, new_pos.clone());
 
         Ok((dest.0, dest.1))
     }
@@ -260,8 +552,7 @@ impl WorldState {
         };
 
         let new_pos = PlayerPosition::new(dest.0.clone(), dest.1.clone());
-        self.player_positions
-            .insert(player_name.to_string(), new_pos);
+        self.set_player_position(player_name, new_pos);
         self.spawn_mobs_for_room(&dest.0, &dest.1);
         Ok((dest.0, dest.1, msg_name))
     }
@@ -275,65 +566,13 @@ impl WorldState {
         }
     }
 
-    /// 같은 방에 있는 플레이어 이름 목록. 파이썬 room.objs 중 is_player, 봐/이동 시 다른 유저 표시용.
+    /// 같은 방에 있는 플레이어 이름 목록. 방별 인덱스를 사용하며 해당
+    /// 방에 들어온 플레이어 순서를 보존한다.
     pub fn get_players_in_room(&self, zone: &str, room: &str) -> Vec<String> {
-        self.player_positions
-            .iter()
-            .filter(|(_, pos)| pos.zone == zone && pos.room == room)
-            .map(|(name, _)| name.clone())
-            .collect()
-    }
-
-    // ============================================================
-    // Party Management Methods
-    // ============================================================
-
-    /// Join a player to a party
-    pub fn join_party(&mut self, player_name: &str, party_name: &str) {
-        self.party_memberships
-            .insert(player_name.to_string(), party_name.to_string());
-    }
-
-    /// Remove a player from their party
-    pub fn leave_party(&mut self, player_name: &str) {
-        self.party_memberships.remove(player_name);
-    }
-
-    /// Get a player's party name
-    pub fn get_player_party(&self, player_name: &str) -> Option<&String> {
-        self.party_memberships.get(player_name)
-    }
-
-    /// Get all members of a party
-    pub fn get_party_members(&self, party_name: &str) -> Vec<String> {
-        self.party_memberships
-            .iter()
-            .filter(|(_, p)| *p == party_name)
-            .map(|(name, _)| name.clone())
-            .collect()
-    }
-
-    /// Check if two players are in the same party
-    pub fn is_same_party(&self, player1: &str, player2: &str) -> bool {
-        match (self.party_memberships.get(player1), self.party_memberships.get(player2)) {
-            (Some(p1), Some(p2)) => p1 == p2,
-            _ => false,
-        }
-    }
-
-    /// Get party leader (first player who joined the party)
-    /// Returns None if party doesn't exist or has no members
-    pub fn get_party_leader(&self, party_name: &str) -> Option<String> {
-        // The party name typically contains the leader's name (e.g., "밍밍_파티명")
-        if party_name.contains('_') {
-            party_name.split('_').next().map(|s| s.to_string())
-        } else {
-            // Fall back to first member found
-            self.party_memberships
-                .iter()
-                .find(|(_, p)| *p == party_name)
-                .map(|(name, _)| name.clone())
-        }
+        self.room_players
+            .get(&format!("{}:{}", zone, room))
+            .cloned()
+            .unwrap_or_default()
     }
 
     /// Spawn mobs for a room from 맵정보.몹 (called when player enters, on-demand load). room은 "1" 또는 사용자맵 "이름".
@@ -364,20 +603,381 @@ impl WorldState {
 
         // Get mob_ids from room (load from base zone)
         let base_zone = base_zone_name(zone);
-        let mob_ids = self
+        let (mob_ids, installed_box_count) = self
             .room_cache
             .get_room(base_zone, room)
             .ok()
-            .and_then(|r| r.read().ok().map(|g| g.mob_ids.clone()))
+            .and_then(|r| {
+                r.read()
+                    .ok()
+                    .map(|g| (g.mob_ids.clone(), g.installed_box_count))
+            })
             .unwrap_or_default();
 
-        self.mob_cache
-            .spawn_mobs_for_room_with_difficulty(zone, room, &mob_ids, effective_difficulty);
+        // Python Room.create inserts every installation Box at index zero
+        // before mobs are placed. The Box registry exposes the resulting
+        // reverse insertion vector, so record its ordinals in that order.
+        // Python Room.create skips installation Boxes in difficulty zones
+        // (the zone name's final character is a digit).
+        let boxes_allowed = !zone
+            .chars()
+            .last()
+            .is_some_and(|character| character.is_ascii_digit());
+        let has_installed_boxes = self
+            .get_room_object_order(zone, room)
+            .iter()
+            .any(|object| matches!(object, RoomObjectRef::InstalledBox(_)));
+        if boxes_allowed && !has_installed_boxes {
+            for ordinal in (0..installed_box_count).rev() {
+                self.record_room_object(zone, room, RoomObjectRef::InstalledBox(ordinal));
+            }
+        }
+
+        self.mob_cache.spawn_mobs_for_room_with_difficulty(
+            zone,
+            room,
+            &mob_ids,
+            effective_difficulty,
+        );
+        let mob_ids: Vec<u64> = self
+            .mob_cache
+            .get_all_mobs_in_room(zone, room)
+            .into_iter()
+            .map(|mob| mob.instance_id)
+            .collect();
+        let recorded = self.get_room_object_order(zone, room);
+        for instance_id in mob_ids {
+            if !recorded.contains(&RoomObjectRef::Mob(instance_id)) {
+                self.record_room_object(zone, room, RoomObjectRef::Mob(instance_id));
+            }
+        }
     }
 
     /// Update world state (respawns, etc.)
     pub fn update(&mut self) {
         self.mob_cache.update_respawns();
+    }
+
+    /// Python `Loop.updateRooms` subset for occupied rooms: advance
+    /// corpse/regen state, mob ticks/recovery, and idle automatic speech.
+    /// The returned `writeRoom` payloads must be delivered after releasing
+    /// the world lock, exactly as `Room.update()` does.
+    pub(crate) fn update_occupied_room_mobs(
+        &mut self,
+        rooms: &[(String, String)],
+    ) -> Vec<RoomMobMessage> {
+        let now = chrono::Utc::now().timestamp();
+        let mut corpse_drops = Vec::new();
+        for (zone, room) in rooms {
+            let templates = self
+                .mob_cache
+                .get_all_mobs_in_room(zone, room)
+                .into_iter()
+                .filter_map(|mob| {
+                    self.mob_cache
+                        .get_mob(&mob.mob_key)
+                        .cloned()
+                        .map(|data| (mob.mob_key.clone(), data))
+                })
+                .collect::<HashMap<_, _>>();
+            let Some(mobs) = self.mob_cache.get_all_mobs_in_room_mut(zone, room) else {
+                continue;
+            };
+            for mob in mobs {
+                if mob.alive || mob.act != 2 {
+                    continue;
+                }
+                let Some(data) = templates.get(&mob.mob_key) else {
+                    continue;
+                };
+                let elapsed = now.saturating_sub(mob.death_time);
+                if elapsed < data.corpse_time {
+                    continue;
+                }
+                let drop_age = if elapsed >= data.corpse_time.saturating_add(data.regen) {
+                    elapsed.saturating_sub(data.corpse_time)
+                } else {
+                    0
+                };
+                corpse_drops.push((
+                    zone.clone(),
+                    room.clone(),
+                    mob.name.clone(),
+                    drop_age,
+                    std::mem::take(&mut mob.inventory),
+                ));
+            }
+        }
+        self.mob_cache.update_respawns_in_rooms_at(rooms, now);
+
+        let mut messages = Vec::new();
+        for (zone, room, mob_name, drop_age, items) in corpse_drops {
+            let mut revealed_items = Vec::new();
+            for item in items {
+                if let Ok(mut object) = item.lock() {
+                    object.temp.insert(
+                        FLOOR_ITEM_DROP_TIME_KEY.to_string(),
+                        Value::Float(now as f64 - drop_age as f64),
+                    );
+                    revealed_items.push(RevealedFloorItem {
+                        name: object.getName(),
+                        ansi: object.getString("안시"),
+                    });
+                }
+                self.get_room_objs_mut(&zone, &room).push(item.clone());
+                self.record_floor_item(&zone, &room, &item);
+            }
+            messages.push(RoomMobMessage {
+                zone,
+                room,
+                kind: RoomMobMessageKind::CorpseGone,
+                message: String::new(),
+                mob_name,
+                revealed_items,
+            });
+        }
+        for (zone, room) in rooms {
+            let templates = self
+                .mob_cache
+                .get_all_mobs_in_room(zone, room)
+                .into_iter()
+                .filter_map(|mob| {
+                    self.mob_cache
+                        .get_mob(&mob.mob_key)
+                        .cloned()
+                        .map(|data| (mob.mob_key.clone(), data))
+                })
+                .collect::<HashMap<_, _>>();
+            let Some(mobs) = self.mob_cache.get_all_mobs_in_room_mut(zone, room) else {
+                continue;
+            };
+            for mob in mobs {
+                let Some(data) = templates.get(&mob.mob_key) else {
+                    continue;
+                };
+                // `Mob.update()` increments tick before every branch.
+                mob.tick = mob.tick.saturating_add(1);
+                if mob.tick % 60 == 0 {
+                    let divisor = match mob.act {
+                        0 => Some(10), // stand: 10%
+                        1 => Some(20), // fight: 5%
+                        4 => Some(5),  // rest: 20%
+                        _ => None,
+                    };
+                    if let Some(divisor) = divisor {
+                        mob.hp = (mob.hp + mob.max_hp / divisor).min(mob.max_hp);
+                        mob.mp = (mob.mp + mob.max_mp / divisor).min(mob.max_mp);
+                    }
+                }
+                if mob.alive
+                    && mob.act == 0
+                    && data.talk_tick > 0
+                    && mob.tick % data.talk_tick == 0
+                    && !data.auto_scripts.is_empty()
+                    && rand::thread_rng().gen_range(0..3) == 0
+                {
+                    let index = rand::thread_rng().gen_range(0..data.auto_scripts.len());
+                    messages.push(RoomMobMessage {
+                        zone: zone.clone(),
+                        room: room.clone(),
+                        kind: RoomMobMessageKind::Speech,
+                        message: data.auto_scripts[index].clone(),
+                        mob_name: String::new(),
+                        revealed_items: Vec::new(),
+                    });
+                }
+            }
+        }
+        messages
+    }
+
+    /// Python `Mob.updateMoving`: inspect at most 30 moving clones per
+    /// second, wait their configured movement tick, then choose a valid
+    /// directional exit whose destination is in that mob's move list.
+    pub(crate) fn update_moving_mobs_at(&mut self, now_millis: i64) {
+        let candidates = self.mob_cache.moving_instances_snapshot();
+        if candidates.is_empty() {
+            return;
+        }
+        // Python Loop.updateMovings() always calls movingMobs[0].updateMoving()
+        // and that method examines the first MAXPROCESSMOVING entries.  It
+        // does not round-robin through the complete global list.
+        for (zone, room, key, last_move) in candidates.iter().take(30) {
+            let Some(data) = self.mob_cache.get_mob(key).cloned() else {
+                continue;
+            };
+            if data.move_rooms.is_empty() {
+                continue;
+            }
+            if *last_move == 0 {
+                self.mob_cache.set_move_time(zone, room, key, now_millis);
+                continue;
+            }
+            if now_millis.saturating_sub(*last_move) < data.move_tick.saturating_mul(1_000) {
+                continue;
+            }
+            // Python only moves on one third of due checks.
+            if rand::thread_rng().gen_range(0..3) != 0 {
+                continue;
+            }
+            let Ok(room_arc) = self.room_cache.get_room(zone, room) else {
+                continue;
+            };
+            let exits = room_arc
+                .read()
+                .ok()
+                .map(|r| r.exits.values().cloned().collect::<Vec<_>>())
+                .unwrap_or_default();
+            // Python chooses a member of the entire sorted exitList first;
+            // it does not reroll until it finds a permitted move route.
+            let direction_order = [
+                "동", "서", "남", "북", "위", "아래", "남동", "남서", "북동", "북서",
+            ];
+            let ordered = direction_order
+                .iter()
+                .filter_map(|name| {
+                    exits
+                        .iter()
+                        .find(|exit| exit.display_name == *name)
+                        .cloned()
+                })
+                .collect::<Vec<_>>();
+            if ordered.is_empty() {
+                continue;
+            }
+            let Some(exit) = ordered.get(rand::thread_rng().gen_range(0..ordered.len())) else {
+                continue;
+            };
+            let Some((dest_zone, dest_room)) = exit.destination(zone) else {
+                continue;
+            };
+            if dest_zone != *zone || !data.move_rooms.iter().any(|allowed| allowed == &dest_room) {
+                continue;
+            }
+            // Python created every Room and its configured mobs before any
+            // wandering heartbeat. Materialize the destination placement
+            // before inserting the moving object so Room.objs order matches.
+            self.spawn_mobs_for_room(&dest_zone, &dest_room);
+            if let Some(instance_id) = self
+                .mob_cache
+                .move_instance(zone, room, key, &dest_zone, &dest_room, now_millis)
+            {
+                self.remove_room_object(zone, room, &RoomObjectRef::Mob(instance_id));
+                self.record_room_object(&dest_zone, &dest_room, RoomObjectRef::Mob(instance_id));
+            }
+        }
+    }
+
+    /// Apply the exact subset of Python `CmdObj.updateZones()` that the
+    /// current runtime state can represent, in `Room.Zones` insertion order.
+    ///
+    /// This deliberately preflights every due room before changing any of
+    /// them.  Missing floor-item timestamps, mob death/regeneration, active
+    /// effects, item-regeneration, aggression, and a due talk tick are
+    /// structural blocks rather than guessed success.
+    pub fn update_loaded_rooms_before_reboot(&mut self) -> Result<(), RebootRoomUpdateBlock> {
+        let loaded = self.room_cache.loaded_rooms_in_python_zone_order();
+        let mut zone_order = Vec::new();
+        for (zone, _) in &loaded {
+            if !zone_order.iter().any(|loaded_zone| loaded_zone == zone) {
+                zone_order.push(zone.clone());
+            }
+        }
+        let now_millis = chrono::Utc::now().timestamp_millis();
+        let mut due = Vec::new();
+
+        for (zone, room) in loaded {
+            let room_arc = self
+                .room_cache
+                .get_room_cached(&zone, &room)
+                .ok_or_else(|| RebootRoomUpdateBlock::MissingRoom {
+                    zone: zone.clone(),
+                    room: room.clone(),
+                })?;
+            let (last_update_millis, configured_mobs) = room_arc
+                .read()
+                .map(|loaded_room| (loaded_room.last_update_millis, loaded_room.mob_ids.clone()))
+                .map_err(|_| RebootRoomUpdateBlock::PoisonedRoom {
+                    zone: zone.clone(),
+                    room: room.clone(),
+                })?;
+
+            if now_millis.saturating_sub(last_update_millis) < 1_000 {
+                continue;
+            }
+
+            let room_key = format!("{zone}:{room}");
+            let has_floor_objects = self
+                .room_objs
+                .get(&room_key)
+                .is_some_and(|objects| !objects.is_empty());
+            let has_floor_stacks = self
+                .room_inv_stack
+                .get(&room_key)
+                .is_some_and(|stacks| stacks.values().any(|count| *count > 0));
+            if has_floor_objects || has_floor_stacks {
+                return Err(RebootRoomUpdateBlock::FloorItems { zone, room });
+            }
+
+            if !configured_mobs.is_empty() && !self.mob_cache.has_room_instance_state(&zone, &room)
+            {
+                return Err(RebootRoomUpdateBlock::MissingMobInstances { zone, room });
+            }
+
+            let room_mobs = self.mob_cache.get_all_mobs_in_room(&zone, &room);
+            let base_zone = base_zone_name(&zone);
+            if configured_mobs.iter().any(|mob_id| {
+                let expected_key = format!("{base_zone}:{mob_id}");
+                !room_mobs.iter().any(|mob| mob.mob_key == expected_key)
+            }) {
+                return Err(RebootRoomUpdateBlock::MissingMobInstances { zone, room });
+            }
+
+            for mob in room_mobs {
+                let data = self.mob_cache.get_mob(&mob.mob_key).ok_or_else(|| {
+                    RebootRoomUpdateBlock::MissingMobTemplate {
+                        zone: zone.clone(),
+                        room: room.clone(),
+                        mob: mob.mob_key.clone(),
+                    }
+                })?;
+                if mob.tick.checked_add(1).is_none() {
+                    return Err(RebootRoomUpdateBlock::MobTickOverflow {
+                        zone: zone.clone(),
+                        room: room.clone(),
+                        mob: mob.mob_key.clone(),
+                    });
+                }
+                if !reboot_mob_update_is_exact_noop(mob, data) {
+                    return Err(RebootRoomUpdateBlock::UnsupportedMobUpdate {
+                        zone: zone.clone(),
+                        room: room.clone(),
+                        mob: mob.mob_key.clone(),
+                    });
+                }
+            }
+
+            due.push((zone, room, room_arc));
+        }
+
+        for zone in zone_order {
+            // Python `리부팅.py` prints this to the server console, not to users.
+            println!("update zones...{zone}");
+        }
+        for (zone, room, room_arc) in due {
+            if let Some(mobs) = self.mob_cache.get_all_mobs_in_room_mut(&zone, &room) {
+                for mob in mobs {
+                    // Overflow was rejected during the all-room preflight.
+                    mob.tick += 1;
+                }
+            }
+            room_arc
+                .write()
+                .map_err(|_| RebootRoomUpdateBlock::PoisonedRoom { zone, room })?
+                .last_update_millis = now_millis;
+        }
+
+        Ok(())
     }
 
     /// Get mobs in a room (convenience method)
@@ -410,7 +1010,10 @@ impl WorldState {
         // Parse mob_key to get zone and filename
         let parts: Vec<&str> = mob_key.splitn(2, ':').collect();
         if parts.len() != 2 {
-            return Err(format!("잘못된 몹 키 형식: {} (존:파일명 형식이어야 함)", mob_key));
+            return Err(format!(
+                "잘못된 몹 키 형식: {} (존:파일명 형식이어야 함)",
+                mob_key
+            ));
         }
         let mob_zone = parts[0];
         let mob_filename = parts[1];
@@ -428,9 +1031,11 @@ impl WorldState {
             dest_room.to_string(),
             &mob_data,
         );
+        let instance_id = instance.instance_id;
 
         // Add to cache
         self.mob_cache.add_mob_instance(instance);
+        self.record_room_object(dest_zone, dest_room, RoomObjectRef::Mob(instance_id));
 
         Ok(())
     }
@@ -511,4 +1116,252 @@ pub fn get_world_state() -> &'static RwLock<WorldState> {
         }
         RwLock::new(world)
     })
+}
+
+#[cfg(test)]
+mod world_state_tests {
+    use super::*;
+
+    fn temporary_room_cache(label: &str) -> (std::path::PathBuf, RoomCache) {
+        let root = std::env::temp_dir().join(format!(
+            "muc_world_{label}_{}_{}",
+            std::process::id(),
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap()
+                .as_nanos()
+        ));
+        let zone = root.join("시험존");
+        std::fs::create_dir_all(&zone).unwrap();
+        for room in ["1", "2"] {
+            std::fs::write(
+                zone.join(format!("{room}.json")),
+                format!(
+                    r#"{{"맵정보":{{"이름":"시험방{room}","존이름":"시험존","설명":[],"출구":[],"몹":[],"맵속성":[]}}}}"#
+                ),
+            )
+            .unwrap();
+        }
+        let cache = RoomCache::with_data_dir(&root);
+        (root, cache)
+    }
+
+    #[test]
+    fn room_player_index_tracks_insert_move_and_remove_in_room_order() {
+        let mut world = WorldState::new();
+        world.set_player_position(
+            "첫째",
+            PlayerPosition::new("시험존".to_string(), "1".to_string()),
+        );
+        world.set_player_position(
+            "둘째",
+            PlayerPosition::new("시험존".to_string(), "1".to_string()),
+        );
+        world.set_player_position(
+            "셋째",
+            PlayerPosition::new("시험존".to_string(), "2".to_string()),
+        );
+
+        assert_eq!(world.get_players_in_room("시험존", "1"), ["첫째", "둘째"]);
+        assert_eq!(world.get_players_in_room("시험존", "2"), ["셋째"]);
+        assert_eq!(
+            world.get_room_object_order("시험존", "1"),
+            [
+                RoomObjectRef::Player("둘째".to_string()),
+                RoomObjectRef::Player("첫째".to_string())
+            ]
+        );
+
+        // Reasserting the same position must not duplicate or reorder a player.
+        world.set_player_position(
+            "첫째",
+            PlayerPosition::new("시험존".to_string(), "1".to_string()),
+        );
+        assert_eq!(world.get_players_in_room("시험존", "1"), ["첫째", "둘째"]);
+
+        world.set_player_position(
+            "첫째",
+            PlayerPosition::new("시험존".to_string(), "2".to_string()),
+        );
+        assert_eq!(world.get_players_in_room("시험존", "1"), ["둘째"]);
+        assert_eq!(world.get_players_in_room("시험존", "2"), ["셋째", "첫째"]);
+        assert_eq!(
+            world.get_room_object_order("시험존", "1"),
+            [RoomObjectRef::Player("둘째".to_string())]
+        );
+        assert_eq!(
+            world.get_room_object_order("시험존", "2"),
+            [
+                RoomObjectRef::Player("첫째".to_string()),
+                RoomObjectRef::Player("셋째".to_string())
+            ]
+        );
+
+        assert!(world.remove_player_position("셋째").is_some());
+        assert_eq!(world.get_players_in_room("시험존", "2"), ["첫째"]);
+        assert!(world.remove_player_position("없는이").is_none());
+    }
+
+    #[test]
+    fn installed_boxes_keep_python_reverse_insert_order_before_mobs_and_players() {
+        let mut world = WorldState::new();
+        // Python Room.create inserts A then B at index zero, leaving B,A.
+        // Mob loading and player entry then prepend in that order.
+        world.record_room_object("시험존", "1", RoomObjectRef::InstalledBox(1));
+        world.record_room_object("시험존", "1", RoomObjectRef::InstalledBox(0));
+        world.record_room_object("시험존", "1", RoomObjectRef::Mob(77));
+        world.set_player_position(
+            "플레이어",
+            PlayerPosition::new("시험존".to_string(), "1".to_string()),
+        );
+
+        assert_eq!(
+            world.get_room_object_order("시험존", "1"),
+            [
+                RoomObjectRef::Player("플레이어".to_string()),
+                RoomObjectRef::Mob(77),
+                RoomObjectRef::InstalledBox(0),
+                RoomObjectRef::InstalledBox(1),
+            ]
+        );
+    }
+
+    #[test]
+    fn occupied_room_mob_tick_recovers_like_python_without_unspecified_talk() {
+        let mut world = WorldState::new();
+        let mut data = RawMobData::new();
+        data.name = "시험몹".to_string();
+        data.hp = 100;
+        data.max_hp = 100;
+        data.inner_power = 50;
+        data.talk_tick = 0; // absent `대화틱` must not default to speech.
+        let key = "시험존:시험몹".to_string();
+        world.mob_cache.insert_mob_data(key.clone(), data.clone());
+        let mut instance = MobInstance::new(key, "시험존".to_string(), "1", &data);
+        instance.hp = 1;
+        instance.mp = 1;
+        instance.tick = 59;
+        world.mob_cache.add_mob_instance(instance);
+
+        let messages = world.update_occupied_room_mobs(&[("시험존".to_string(), "1".to_string())]);
+        assert!(messages.is_empty());
+        let mob = world.mob_cache.get_all_mobs_in_room("시험존", "1")[0];
+        assert_eq!(mob.tick, 60);
+        assert_eq!(mob.hp, 11);
+        assert_eq!(mob.mp, 6);
+    }
+
+    #[test]
+    fn corpse_transition_moves_inventory_to_floor_with_python_drop_time() {
+        let mut world = WorldState::new();
+        let mut data = RawMobData::new();
+        data.name = "시체몹".to_string();
+        data.corpse_time = 1;
+        data.regen = 100;
+        let key = "시험존:시체몹".to_string();
+        world.mob_cache.insert_mob_data(key.clone(), data.clone());
+        let item = Arc::new(Mutex::new(Object::new()));
+        item.lock().unwrap().set("이름", "유품검");
+        let mut mob = MobInstance::new(key, "시험존".to_string(), "1", &data);
+        mob.alive = false;
+        mob.act = 2;
+        mob.death_time = chrono::Utc::now().timestamp() - 2;
+        mob.inventory.push(item.clone());
+        world.mob_cache.add_mob_instance(mob);
+
+        let updates = world.update_occupied_room_mobs(&[("시험존".into(), "1".into())]);
+        assert_eq!(updates.len(), 1);
+        assert_eq!(updates[0].kind, RoomMobMessageKind::CorpseGone);
+        assert_eq!(updates[0].mob_name, "시체몹");
+        assert_eq!(updates[0].revealed_items[0].name, "유품검");
+        assert_eq!(world.get_room_objs("시험존", "1").len(), 1);
+        assert!(matches!(
+            item.lock().unwrap().temp.get(FLOOR_ITEM_DROP_TIME_KEY),
+            Some(Value::Float(value)) if *value >= chrono::Utc::now().timestamp() as f64 - 1.0
+        ));
+        assert!(matches!(
+            world.get_room_object_order("시험존", "1").first(),
+            Some(RoomObjectRef::FloorItem(_))
+        ));
+        let mob = world.mob_cache.get_all_mobs_in_room("시험존", "1")[0];
+        assert_eq!(mob.act, 3);
+        assert!(mob.inventory.is_empty());
+    }
+
+    #[test]
+    fn floor_item_expiry_uses_python_first_tick_and_ten_minute_boundary() {
+        let mut world = WorldState::new();
+        let item = Arc::new(Mutex::new(Object::new()));
+        item.lock().unwrap().set("이름", "시험검");
+        world.get_room_objs_mut("시험존", "1").push(item.clone());
+        world.record_floor_item("시험존", "1", &item);
+        let rooms = [("시험존".to_string(), "1".to_string())];
+
+        assert!(world.expire_floor_items_at(&rooms, 100.0).is_empty());
+        assert_eq!(
+            item.lock().unwrap().temp.get(FLOOR_ITEM_DROP_TIME_KEY),
+            Some(&Value::Float(100.0))
+        );
+        assert!(world.expire_floor_items_at(&rooms, 699.999).is_empty());
+        let expired = world.expire_floor_items_at(&rooms, 700.0);
+        assert_eq!(expired.len(), 1);
+        assert_eq!(expired[0].name, "시험검");
+        assert!(world.get_room_objs("시험존", "1").is_empty());
+        assert!(world.get_room_object_order("시험존", "1").is_empty());
+    }
+
+    #[test]
+    fn difficulty_zone_does_not_record_python_skipped_installed_boxes() {
+        let mut world = WorldState::new();
+        // This is the same condition as Room.create's `zone[-1].isdigit()`.
+        let zone = "시험존1";
+        let boxes_allowed = !zone
+            .chars()
+            .last()
+            .is_some_and(|character| character.is_ascii_digit());
+        assert!(!boxes_allowed);
+        if boxes_allowed {
+            world.record_room_object(zone, "1", RoomObjectRef::InstalledBox(0));
+        }
+        assert!(world.get_room_object_order(zone, "1").is_empty());
+    }
+
+    #[test]
+    fn reboot_room_update_preflights_all_rooms_before_mutating_any() {
+        let (root, cache) = temporary_room_cache("reboot_preflight");
+        let mut world = WorldState::new();
+        world.room_cache = cache;
+        let first = world.room_cache.get_room("시험존", "1").unwrap();
+        let second = world.room_cache.get_room("시험존", "2").unwrap();
+        first.write().unwrap().last_update_millis = 0;
+        second.write().unwrap().last_update_millis = 0;
+        world.room_objs.insert(
+            "시험존:2".to_string(),
+            vec![Arc::new(Mutex::new(Object::new()))],
+        );
+
+        assert_eq!(
+            world.update_loaded_rooms_before_reboot(),
+            Err(RebootRoomUpdateBlock::FloorItems {
+                zone: "시험존".to_string(),
+                room: "2".to_string(),
+            })
+        );
+        assert_eq!(first.read().unwrap().last_update_millis, 0);
+        assert_eq!(second.read().unwrap().last_update_millis, 0);
+        let _ = std::fs::remove_dir_all(root);
+    }
+
+    #[test]
+    fn reboot_room_update_advances_a_safe_loaded_room() {
+        let (root, cache) = temporary_room_cache("reboot_safe");
+        let mut world = WorldState::new();
+        world.room_cache = cache;
+        let room = world.room_cache.get_room("시험존", "1").unwrap();
+        room.write().unwrap().last_update_millis = 0;
+
+        assert_eq!(world.update_loaded_rooms_before_reboot(), Ok(()));
+        assert!(room.read().unwrap().last_update_millis > 0);
+        let _ = std::fs::remove_dir_all(root);
+    }
 }

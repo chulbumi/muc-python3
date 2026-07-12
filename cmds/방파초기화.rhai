@@ -22,9 +22,7 @@ fn cmd(ob, line) {
     }
 
     // 방파 데이터 삭제
-    if guild_remove(id) {
-        // TODO: 방파원들의 소속과 직위를 제거해야 함
-        // TODO: 방파 방들의 '방파주인' 속성을 제거해야 함
+    if guild_reset(id) {
         send_line(ob, "* 방파가 초기화되었습니다.");
     } else {
         send_line(ob, "☞ 방파 초기화에 실패했습니다.");

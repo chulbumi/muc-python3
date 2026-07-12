@@ -4,11 +4,10 @@
 fn cmd(ob, line) {
     let admin_level = get_int(ob, "관리자등급");
     if admin_level < 2000 {
-        send_line(ob, "☞ 관리자만 사용할 수 있어요.");
+        send_line(ob, "☞ 무슨 말인지 모르겠어요. *^_^*");
         return;
     }
-    send_line(ob, "☞ 모든 플레이어 저장 기능은 현재 구현 중입니다.");
-    send_line(ob, "   (Client.players 접근 및 ply.save() 호출 필요)");
+    request_save_all(ob);
 }
 
 fn main(ob, line) {

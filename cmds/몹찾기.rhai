@@ -5,7 +5,7 @@
 fn cmd(ob, line) {
     let admin_level = get_int(ob, "관리자등급");
     if admin_level < 1000 {
-        send_line(ob, "☞ 무슨 말인지 모르겠어요. *^^*");
+        send_line(ob, "☞ 무슨 말인지 모르겠어요. *^_^*");
         return;
     }
 

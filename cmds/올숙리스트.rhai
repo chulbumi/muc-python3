@@ -4,11 +4,17 @@
 fn cmd(ob, line) {
     let admin_level = get_int(ob, "관리자등급");
     if admin_level < 1000 {
-        send_line(ob, "☞ 관리자만 사용할 수 있어요.");
+        send_line(ob, "☞ 무슨 말인지 모르겠어요. *^_^*");
         return;
     }
-    send_line(ob, "☞ 모든 아이템 목록 조회 기능은 현재 구현 중입니다.");
-    send_line(ob, "   (Item.Items 데이터베이스 조회 필요)");
+    let msg = "[올숙아이템인덱스]\r\n";
+    for item in get_item_catalog() {
+        let user = item["user"];
+        if user != "0" && user != "\"\"" && user != "null" {
+            msg += "#" + item["name"] + "\r\n:" + item["index"] + "\r\n\r\n";
+        }
+    }
+    send_line(ob, msg);
 }
 
 fn main(ob, line) {

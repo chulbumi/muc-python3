@@ -111,11 +111,15 @@ impl MasterObject {
     fn script_name(&self) -> String {
         self.config
             .master_script
+            .rsplit('/')
+            .next()
+            .unwrap_or(self.config.master_script.as_str())
             .trim_end_matches(".rhai")
             .to_string()
     }
 
     /// Execute a master function and return its result
+    #[allow(dead_code)]
     fn execute_apply(&self, func_name: &str, scope: &mut Scope) -> ApplyResult {
         let storage = self.script_storage.blocking_read();
 
@@ -142,13 +146,11 @@ impl MasterObject {
     /// - None: Use default login
     pub fn connect(&self, player_name: &str) -> ApplyResult {
         debug!("Master::connect() - {}", player_name);
-
-        let mut scope = Scope::new();
-        scope.push("player_name", player_name.to_string());
-
-        // In full implementation, would call master.rhai's connect() function
-        // For now, return None to use default login
-        Ok(None)
+        let storage = self.script_storage.blocking_read();
+        let value = storage
+            .call_script_string(&self.script_name(), "connect", player_name)
+            .map_err(|error| format!("Master connect failed: {error}"))?;
+        Ok(Some(Dynamic::from(value)))
     }
 
     /// ERROR_HANDLER apply - Called when an error occurs
@@ -159,16 +161,11 @@ impl MasterObject {
     pub fn error_handler(&self, error: &str, source: &str) -> Result<bool, String> {
         debug!("Master::error_handler() - {}: {}", source, error);
 
-        let mut scope = Scope::new();
-        scope.push("error", error.to_string());
-        scope.push("source", source.to_string());
-
-        // Log error
-        error!("[ERROR] {} in {}", error, source);
-
-        // In full implementation, would call master.rhai's error_handler() function
-        // For now, always continue (don't shutdown)
-        Ok(true)
+        let storage = self.script_storage.blocking_read();
+        let value = storage
+            .call_script_bool2(&self.script_name(), "error_handler", error, source)
+            .map_err(|failure| format!("Master error_handler failed: {failure}"))?;
+        Ok(value)
     }
 
     /// VALID_COMPILE apply - Check if a file can be compiled
@@ -204,8 +201,9 @@ impl MasterObject {
         error!("!!! MASTER CRASH !!!");
         error!("Error: {}", error);
 
-        // In full implementation, would call master.rhai's crash() function
-        // Could attempt to save game state before shutdown
+        if let Ok(storage) = self.script_storage.try_read() {
+            let _ = storage.call_script_string(&self.script_name(), "crash", error);
+        }
 
         if self.config.log_errors {
             // Write to crash log
@@ -222,15 +220,13 @@ impl MasterObject {
     /// CREATE apply - Called when an object is first created
     ///
     /// This is called for mudlib objects (not players)
-    pub fn create(&self, object_path: &str, object_data: &mut rhai::Map) -> Result<(), String> {
+    pub fn create(&self, object_path: &str, _object_data: &mut rhai::Map) -> Result<(), String> {
         debug!("Master::create() - {}", object_path);
 
-        let mut scope = Scope::new();
-        scope.push("object_path", object_path.to_string());
-        scope.push("object_data", object_data.clone());
-
-        // In full implementation, would call object's create() function
-        Ok(())
+        let storage = self.script_storage.blocking_read();
+        storage
+            .call_script_string(&self.script_name(), "create", object_path)
+            .map(|_| ())
     }
 
     /// RESET apply - Called periodically to refresh objects
@@ -238,9 +234,9 @@ impl MasterObject {
     /// This is called for rooms, mobs, items to regenerate them
     pub fn reset(&self, object_path: &str, _object_data: &mut rhai::Map) {
         debug!("Master::reset() - {}", object_path);
-
-        // In full implementation, would call object's reset() function
-        // Rooms use this to regenerate mobs/items
+        if let Ok(storage) = self.script_storage.try_read() {
+            let _ = storage.call_script_string(&self.script_name(), "reset", object_path);
+        }
     }
 
     /// INIT apply - Called when two objects meet
@@ -253,8 +249,14 @@ impl MasterObject {
             living.get_name()
         );
 
-        // In full implementation, would call object's init() function
-        // This is where add_action() would be called to register commands
+        if let Ok(storage) = self.script_storage.try_read() {
+            let _ = storage.call_script_string2(
+                &self.script_name(),
+                "init",
+                object,
+                &living.get_name(),
+            );
+        }
     }
 
     /// MOVE_OR_DESTRUCT apply - Called when an object is being moved
@@ -264,10 +266,15 @@ impl MasterObject {
     /// - false: Destruct the object instead
     pub fn move_or_destruct(&self, object: &str, destination: &str) -> bool {
         debug!("Master::move_or_destruct() - {} to {}", object, destination);
-
-        // In full implementation, would call object's move_or_destruct() function
-        // Default: allow the move
-        true
+        self.script_storage
+            .try_read()
+            .ok()
+            .and_then(|storage| {
+                storage
+                    .call_script_bool2(&self.script_name(), "move_or_destruct", object, destination)
+                    .ok()
+            })
+            .unwrap_or(true)
     }
 
     /// GET_BB_UID apply - Get the base UID for an object
@@ -307,7 +314,10 @@ impl MasterObject {
     /// EPILOG apply - Called after all objects are loaded
     pub fn epilog(&self) -> Result<(), String> {
         info!("Master::epilog() - All objects loaded");
-        Ok(())
+        let storage = self.script_storage.blocking_read();
+        storage
+            .call_script_string0(&self.script_name(), "epilog")
+            .map(|_| ())
     }
 }
 
@@ -408,6 +418,34 @@ mod tests {
 
         // Default: allow move
         assert!(master.move_or_destruct("object1", "room1"));
+    }
+
+    #[test]
+    fn master_applies_execute_loaded_rhai_functions() {
+        let engine = rhai::Engine::new();
+        let ast = engine.compile("fn f(x) { return \"ok\"; }").unwrap();
+        let mut scope = rhai::Scope::new();
+        assert_eq!(
+            engine
+                .call_fn::<String>(&mut scope, &ast, "f", ("x".to_string(),))
+                .unwrap(),
+            "ok"
+        );
+        let storage = Arc::new(RwLock::new(ScriptStorage::default()));
+        let master = MasterObject::default_storage(storage);
+
+        let connected = master.connect("적용검사").unwrap();
+        assert_eq!(
+            connected.and_then(|value| value.into_string().ok()),
+            Some("cmds/login.rhai".to_string())
+        );
+        assert!(master.error_handler("오류", "테스트").unwrap());
+        assert!(master.move_or_destruct("obj", "room"));
+        let mut object_data = rhai::Map::new();
+        master.create("obj", &mut object_data).unwrap();
+        master.reset("obj", &mut object_data);
+        master.init("obj", &Body::new());
+        master.epilog().unwrap();
     }
 
     #[test]

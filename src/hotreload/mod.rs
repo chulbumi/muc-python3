@@ -4,7 +4,11 @@
 //!
 //! Allows reloading object definitions at runtime without server restart:
 //! ```rust
-//! reload_object(&storage, "cmds/말.rhai")?;
+//! # use muc_engine::hotreload::reload_object;
+//! # use muc_engine::script::{ScriptStorage, ScriptConfig};
+//! # let mut storage = ScriptStorage::new(ScriptConfig::default());
+//! reload_object(&mut storage, "cmds/말.rhai")?;
+//! # Ok::<(), Box<dyn std::error::Error>>(())
 //! ```
 
 use std::sync::Arc;
@@ -242,6 +246,7 @@ mod tests {
 
         // Should be able to reload all
         let count = manager.reload_all().await.unwrap();
-        assert!(count >= 0);
+        // count is usize, always >= 0
+        assert!(count < 1000); // sanity check
     }
 }

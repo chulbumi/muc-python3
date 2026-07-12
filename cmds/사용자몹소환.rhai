@@ -3,16 +3,20 @@
 
 fn cmd(ob, line) {
     let admin_level = get_int(ob, "관리자등급");
-    if admin_level < 2000 {
-        send_line(ob, "☞ 관리자만 사용할 수 있어요.");
+    if admin_level < 1000 {
+        send_line(ob, "☞ 무슨 말인지 모르겠어요. *^_^*");
         return;
     }
     if line == "" || is_empty(line) {
         send_line(ob, "☞ 운영자 명령: 사용자몹소환 [몹이름]");
         return;
     }
-    send_line(ob, "☞ 사용자 생성 몹 소환 기능은 현재 구현 중입니다.");
-    send_line(ob, "   (몹: '" + line + "')");
+    let result = create_user_mob(ob, line);
+    if result == "" {
+        send_line(ob, line + " 소환하였습니다.");
+    } else {
+        send_line(ob, result);
+    }
 }
 
 fn main(ob, line) {

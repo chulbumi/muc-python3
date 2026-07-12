@@ -45,8 +45,6 @@ fn cmd(ob, line) {
     let result = teach_skill_to_player(ob, target_name, mugong_name);
     if result == "not_found" {
         send_line(ob, "☞ 그런 대상이 없어요!");
-    } else if result == "not_implemented" {
-        send_line(ob, "☞ 무공 전수 기능은 현재 구현 중입니다.");
     } else if result == "ok" {
         send_line(ob, "☞ 무공이 전수되었습니다.");
     } else {

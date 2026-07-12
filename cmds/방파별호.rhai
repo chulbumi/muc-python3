@@ -1,7 +1,7 @@
 // 방파별호.rhai - 방파 별호 설정 (방주가 멤버에게 별호 부여)
 // Python: cmds/방파별호.py
-// NOTE: 대상 플레이어의 '방파별호' 속성을 설정해야 함
-//       현재는 guild_set_nickname efun이 필요하며 미구현 상태
+// guild_set_nickname persists the target's guild nickname and broadcasts the
+// announcement through the guild membership list.
 
 fn cmd(ob, line) {
     let my_guild = get_attr(ob, "소속");
@@ -54,17 +54,22 @@ fn cmd(ob, line) {
         return;
     }
 
-    // TODO: 대상이 같은 방파 소속인지 확인
-    // TODO: guild_set_nickname efun이 필요함
-    // 현재는 대상의 별호를 설정할 수 있는 efun이 없음
+    let result = guild_set_nickname(ob, target, nickname);
+    if result == "wrong_guild" {
+        send_line(ob, "☞ 당신의 소속이 아닙니다.");
+        return;
+    }
+    if result != "ok" {
+        send_line(ob, "☞ 이곳에 그런 무림인이 없습니다.");
+        return;
+    }
 
     let target_display = if my_name == target { "자신" } else { target };
 
-    send_line(ob, "당신이 " + target_display + "의 방파별호를 『" + nickname + "』로 함을 선포합니다.");
-    send_line(ob, "☞ (현재 별호 설정 기능은 추가 efun이 필요합니다)");
+    send_line(ob, "당신이 \x1b[1m" + target_display + "\x1b[0;37m의 방파별호를 『\x1b[1;32m" + nickname + "\x1b[0;37m』" + han_uro(nickname) + " 함을 선포합니다.");
 
     // 방파 전체에게 전송
-    let msg = my_name + " 님이 " + target_display + "의 방파별호를 『" + nickname + "』로 함을 선포합니다.";
+    let msg = han_iga(my_name) + " \x1b[1m" + target_display + "\x1b[0;37m의 방파별호를 『\x1b[1;32m" + nickname + "\x1b[0;37m』" + han_uro(nickname) + " 함을 선포합니다.";
     send_broadcast_to_guild(ob, msg);
 }
 

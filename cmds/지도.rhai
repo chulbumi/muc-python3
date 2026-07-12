@@ -7,14 +7,13 @@ fn cmd(ob, line) {
         send_line(ob, "\r\n* 아무것도 보이지 않습니다.\r\n");
         return;
     }
-    let exits = get_exits_string(pos["zone"], pos["room"]);
-    // 간단한 체크로 변경 (substring 대신)
-    if length(exits) == 0 || len(exits) < 5 {
+    let map_text = get_python_map(pos["zone"], pos["room"]);
+    if length(map_text) == 0 {
         send_line(ob, "☞ 아무것도 보이지 않습니다.");
         return;
     }
-    let rn = get_room_name(pos["zone"], pos["room"]);
-    send_line(ob, "\r\n" + rn + "\r\n\r\n" + exits);
+    send_line(ob, map_text);
+    send_line(ob, "");
 }
 
 fn main(ob, line) {

@@ -18,11 +18,9 @@
 /// @param player_name - Name of the connecting player
 /// @return Login object path or error message
 fn connect(player_name) {
-    print("[MASTER] connect() - " + player_name);
-
     // Return the login object for new players
     // The driver will load this object and call its logon() function
-    "cmds/login.rhai"
+    return "cmds/login.rhai";
 }
 
 /// LOGON apply - Called after player is logged in
@@ -33,7 +31,7 @@ fn logon(player_name) {
     print("[MASTER] logon() - " + player_name);
 
     // Return the player object
-    "objs/player/" + player_name + ".rhai"
+    return "objs/player/" + player_name + ".rhai";
 }
 
 // ============================================================================
@@ -46,26 +44,23 @@ fn logon(player_name) {
 /// @param source - Source file where error occurred
 /// @return true to continue, false to shutdown
 fn error_handler(error, source) {
-    print("[MASTER] error_handler() - " + source + ": " + error);
-
     // Log the error
     // In a full implementation, would write to log file
 
     // Return true to continue running (don't shutdown)
-    true
+    return true;
 }
 
 /// CRASH apply - Called when the driver crashes
 ///
 /// @param error - The crash error message
 fn crash(error) {
-    print("[MASTER] crash() - " + error);
-
     // Last chance to save state before shutdown
     // In a full implementation, would:
     // 1. Save all player data
     // 2. Save world state
     // 3. Write crash log
+    return "";
 }
 
 // ============================================================================
@@ -77,8 +72,6 @@ fn crash(error) {
 /// @param path - File path to check
 /// @return true to allow, false to deny
 fn valid_compile(path) {
-    print("[MASTER] valid_compile() - " + path);
-
     // Security checks
     // Don't allow compiling files outside of game directories
     if path.contains("..") {
@@ -92,7 +85,7 @@ fn valid_compile(path) {
         return false;
     }
 
-    true
+    return true;
 }
 
 // ============================================================================
@@ -103,24 +96,22 @@ fn valid_compile(path) {
 ///
 /// @param object_path - Path of the object being created
 fn create(object_path) {
-    print("[MASTER] create() - " + object_path);
-
     // In a full implementation, would:
     // 1. Initialize object properties
     // 2. Set up object state
     // 3. Register with appropriate managers
+    return "";
 }
 
 /// RESET apply - Called periodically to refresh objects
 ///
 /// @param object_path - Path of the object being reset
 fn reset(object_path) {
-    print("[MASTER] reset() - " + object_path);
-
     // In a full implementation, would:
     // 1. Regenerate mobs/items in rooms
     // 2. Refresh object state
     // 3. Handle timed events
+    return "";
 }
 
 /// INIT apply - Called when two objects meet
@@ -128,12 +119,11 @@ fn reset(object_path) {
 /// @param object - The object being encountered
 /// @param living - The living object encountering it
 fn init(object, living) {
-    print("[MASTER] init() - " + object + " encountered by " + living);
-
     // In a full implementation, would:
     // 1. Call object's init() function
     // 2. Allow object to add actions to living
     // 3. Set up any interactions
+    return "";
 }
 
 /// MOVE_OR_DESTRUCT apply - Called when an object is being moved
@@ -142,8 +132,6 @@ fn init(object, living) {
 /// @param destination - Where it's being moved to
 /// @return true to allow move, false to destruct instead
 fn move_or_destruct(object, destination) {
-    print("[MASTER] move_or_destruct() - " + object + " to " + destination);
-
     // Default: allow the move
     true
 }
@@ -157,14 +145,14 @@ fn move_or_destruct(object, destination) {
 /// @param object - Object to get UID for
 /// @return Base UID
 fn get_bb_uid(object) {
-    "mudlib"
+    return "mudlib";
 }
 
 /// GET_ROOT_UID apply - Get the root UID
 ///
 /// @return Root UID string
 fn get_root_uid() {
-    "root"
+    return "root";
 }
 
 /// AUTHOR_FILE apply - Get the author file for a domain
@@ -211,10 +199,7 @@ fn preload() {
 ///
 /// This is the final step of server initialization
 fn epilog() {
-    print("[MASTER] epilog() - All objects loaded, server ready");
-    print("[MASTER] ================================================");
-    print("[MASTER]         무크 Rust 버전이 시작되었습니다.");
-    print("[MASTER] ================================================");
+    return "";
 }
 
 // ============================================================================

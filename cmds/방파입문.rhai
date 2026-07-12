@@ -1,8 +1,5 @@
 // 방파입문.rhai - 방파 입문 (방주가 대상을 방파에 입문시킴)
 // Python: cmds/방파입문.py
-// NOTE: 현재 guild_join efun은 호출자 본인만 가입 가능
-//       대상을 입문시키는 기능은 guild_add_member efun이 필요하며
-//       현재는 직접 파일을 수정해야 함 (미구현 상태로 메시지 표시)
 
 fn cmd(ob, line) {
     if is_empty(line) {
@@ -45,13 +42,20 @@ fn cmd(ob, line) {
         return;
     }
 
-    // TODO: 입문신청자 확인 필요 (별도 속성 저장 필요)
-    // TODO: guild_add_member efun이 필요함
-    // 현재는 대상을 입문시킬 수 있는 efun이 없음
-
-    send_line(ob, "☞ " + line + " 님을 " + my_guild + "에 입문시킵니다.");
-    send_line(ob, "☞ (현재 대상 입문 기능은 추가 efun이 필요합니다)");
-    send_line(ob, "☞ 임시조치: " + line + " 님에게 [방파이름] 가입 명령을 사용하도록 안내하세요");
+    let requested = get_room_player_attr(ob, line, "입문신청자");
+    if requested.is_unit() || requested.to_string() != my_name {
+        send_line(ob, "☞ " + line + " 님은 방파 입문을 신청하지 않았습니다.");
+        return;
+    }
+    if !guild_add_member(ob, line) {
+        send_line(ob, "☞ 이미 방파원이거나 입문 처리에 실패했습니다.");
+        return;
+    }
+    set_room_player_attr(ob, line, "소속", my_guild);
+    set_room_player_attr(ob, line, "직위", "제자");
+    set_room_player_attr(ob, line, "입문신청자", "");
+    send_line(ob, "☞ " + line + " 님을 " + my_guild + "에 입문시켰습니다.");
+    send_to_user(line, "☞ " + my_guild + " 방파에 입문했습니다.");
 }
 
 fn main(ob, line) {

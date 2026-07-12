@@ -1,138 +1,283 @@
-// 무리.rhai - 무리/파티 시스템
-// Python: cmds/무리.py
-// 사용법: [대상이름/모두] 무리  (또는 그냥 '무리'로 조회)
+// Python: cmds/무리.py, Player.sendToParty/logout and Body follower methods
 
-// 조사 생성기
-fn han_iga(name) {
-    let last_char = name[name.len() - 1];
-    if last_char >= 0xAC00 && last_char <= 0xD7A3 {
-        let code = last_char - 0xAC00;
-        let has_jongseong = (code % 28) != 0;
-        if has_jongseong { return "이"; }
-        else { return "가"; }
+fn party_prompt(person) {
+    if !person["show_prompt"] {
+        return "";
     }
-    return "가";
+    "\r\n\x1b[0;37;40m[ " + int_to_str(person["hp"]) + "/"
+        + int_to_str(person["max_hp"]) + ", " + int_to_str(person["mp"]) + "/"
+        + int_to_str(person["max_mp"]) + " ] "
 }
 
-fn han_un(name) {
-    let last_char = name[name.len() - 1];
-    if last_char >= 0xAC00 && last_char <= 0xD7A3 {
-        let code = last_char - 0xAC00;
-        let has_jongseong = (code % 28) != 0;
-        if has_jongseong { return "은"; }
-        else { return "는"; }
+fn object_iga(person) {
+    "\x1b[1m" + person["name"] + "\x1b[0;37m" + han_iga(person["name"])
+}
+
+fn object_eul(person) {
+    "\x1b[1m" + person["name"] + "\x1b[0;37m" + han_eul(person["name"])
+}
+
+fn object_eun(person) {
+    "\x1b[1m" + person["name"] + "\x1b[0;37m" + han_eun(person["name"])
+}
+
+fn command_name(person) {
+    "\x1b[1m" + person["name"] + "\x1b[0m\x1b[40m\x1b[37m"
+}
+
+fn pad_left(value, width) {
+    let text = value.to_string();
+    let result = "";
+    let count = width - length(text);
+    let i = 0;
+    while i < count {
+        result += " ";
+        i += 1;
     }
-    return "는";
+    result + text
 }
 
-// HP 바 생성
-fn get_hp_bar(ob) {
-    let hp = get_int(ob, "hp");
-    let max_hp = get_int(ob, "max_hp");
-    if max_hp <= 0 { max_hp = 100; }
-    if hp < 0 { hp = 0; }
-
-    let percent = (hp * 100) / max_hp;
-    if percent > 100 { percent = 100; }
-
-    // 간단한 HP 바 표시
-    let bars = "==========";
-    let filled = percent / 10;
-    let bar = "[" + bars[0..filled] + " " + bars[filled..10] + "]";
-
-    return " " + to_string(percent) + "% " + bar;
+fn get_hp_bar(person) {
+    let bars = [
+        "\x1b[0m\x1b[41m\x1b[30m\x1b[0m\x1b[47m\x1b[30m         \x1b[0m\x1b[40m\x1b[37m",
+        "\x1b[0m\x1b[41m\x1b[30m \x1b[0m\x1b[47m\x1b[30m        \x1b[0m\x1b[40m\x1b[37m",
+        "\x1b[0m\x1b[41m\x1b[30m  \x1b[0m\x1b[47m\x1b[30m       \x1b[0m\x1b[40m\x1b[37m",
+        "\x1b[0m\x1b[41m\x1b[30m   \x1b[0m\x1b[47m\x1b[30m      \x1b[0m\x1b[40m\x1b[37m",
+        "\x1b[0m\x1b[43m\x1b[30m    \x1b[0m\x1b[47m\x1b[30m     \x1b[0m\x1b[40m\x1b[37m",
+        "\x1b[0m\x1b[43m\x1b[30m     \x1b[0m\x1b[47m\x1b[30m    \x1b[0m\x1b[40m\x1b[37m",
+        "\x1b[0m\x1b[43m\x1b[30m      \x1b[0m\x1b[47m\x1b[30m   \x1b[0m\x1b[40m\x1b[37m",
+        "\x1b[0m\x1b[42m\x1b[30m       \x1b[0m\x1b[47m\x1b[30m  \x1b[0m\x1b[40m\x1b[37m",
+        "\x1b[0m\x1b[42m\x1b[30m        \x1b[0m\x1b[47m\x1b[30m \x1b[0m\x1b[40m\x1b[37m",
+        "\x1b[0m\x1b[42m\x1b[30m         \x1b[0m\x1b[47m\x1b[30m\x1b[0m\x1b[40m\x1b[37m"
+    ];
+    let hp = person["hp"];
+    let max_hp = person["max_hp"];
+    let index = (hp * 9) / max_hp;
+    if index < 0 {
+        index = 0;
+    } else if index > 9 {
+        index = 9;
+    }
+    pad_left((hp * 100) / max_hp, 3) + " " + bars[index]
 }
 
-// 파티/무리 현황 표시
-fn view_party(ob) {
-    let name = get_string(ob, "이름");
-    let nick = get_string(ob, "무림별호");
-    if nick == "" { nick = "무명객"; }
-    let personality = get_string(ob, "성격");
-
-    send_line(ob, "━━━━━━━━━━━━━━━━━━━━━━━━━━━━");
-
-    // 내 파티 확인
-    let my_party = get_string(ob, "소속파티");
-    let is_leader = (my_party == name);
-
-    if is_leader {
-        send_line(ob, "◁ " + name + "의 무리 ▷");
-    } else if my_party != "" {
-        send_line(ob, "◁ " + my_party + "의 무리 ▷");
+fn party_row(person, leader) {
+    let nick = person["nickname"];
+    if nick == "" {
+        nick = "무명객";
+    }
+    let prefix = if leader { "▶ " } else { "　 " };
+    let msg = "";
+    if person["personality"] != "기인" {
+        msg = prefix + "\x1b[1m\x1b[33m\x1b[40m" + fill_space(12, nick)
+            + "\x1b[0m\x1b[37m\x1b[40m " + fill_space(10, person["name"]) + "  ";
     } else {
-        send_line(ob, "◁ " + name + "의 동행 ▷");
+        msg = prefix + fill_space(12, nick) + " " + fill_space(10, person["name"]) + "  ";
+    }
+    msg += fill_space(19, get_hp_bar(person)) + "  ";
+    msg + pad_left(person["mp"], 5) + "/" + fill_space(5, person["max_mp"].to_string())
+}
+
+fn contains_person(people, id) {
+    for person in people {
+        if person["id"] == id {
+            return true;
+        }
+    }
+    false
+}
+
+fn view_party(ob, context) {
+    let actor = context["self"];
+    let leader = context["party_leader"];
+    send_line(ob, "━━━━━━━━━━━━━━━━━━━━━━━━━━━━");
+    if leader["id"] == "" {
+        send_line(ob, "◁ \x1b[1m" + actor["name"] + "\x1b[0m\x1b[40m\x1b[37m의 동행 ▷");
+    } else {
+        send_line(ob, "◁ \x1b[1m" + leader["name"] + "\x1b[0m\x1b[40m\x1b[37m의 무리 ▷");
     }
     send_line(ob, "────────────────────────────");
 
-    // 파티 멤버 표시
-    let members = get_party_members(ob);
-    if len(members) > 0 {
-        // 파티장(본인) 표시
-        if personality != "기인" {
-            send_line(ob, "▶ " + nick + " " + name + get_hp_bar(ob));
-        } else {
-            send_line(ob, "▶ " + nick + " " + name + get_hp_bar(ob));
+    if leader["id"] != "" {
+        send_line(ob, party_row(leader, true));
+        for member in context["party_members"] {
+            send_line(ob, party_row(member, false));
         }
-
-        // 다른 멤버 표시
-        for i in 1..len(members) {
-            // TODO: 다른 멤버의 상세 정보를 가져오는 방법 필요
-            // 현재는 이름만 표시
-            send_line(ob, "　 " + members[i]);
-        }
+        send_line(ob, "━━━━━━━━━━━━━━━━━━━━━━━━━━━━");
     }
-
-    // 팔로워(동행중) 표시
     send_line(ob, "동행중");
-    // TODO: follower 목록 가져오는 efun 필요
-    // 현재는 표시 불가
-
+    for follower in context["followers"] {
+        if leader["id"] != "" && contains_person(context["party_members"], follower["id"]) {
+            continue;
+        }
+        send_line(ob, party_row(follower, false));
+    }
     send_line(ob, "━━━━━━━━━━━━━━━━━━━━━━━━━━━━");
 }
 
-// 무리 추가 (파티 멤버 초대)
-fn add_party(ob, line) {
-    let my_name = get_string(ob, "이름");
-    let my_party = get_string(ob, "소속파티");
-
-    // 이미 다른 파티에 소속된 경우
-    if my_party != "" && my_party != my_name {
+fn add_party(ob, line, context) {
+    let actor = context["self"];
+    let leader = context["party_leader"];
+    if leader["id"] != "" && leader["id"] != actor["id"] {
         send_line(ob, "☞ 이미 당신은 무리중이여서 무리를 만들 수 없어요. ^^");
         return;
     }
 
-    // 내가 파티장이 아니면 새로운 파티 생성
-    if my_party == "" {
-        let err = create_party(ob, my_name);
-        if err != "" {
-            send_line(ob, "☞ " + err);
-            return;
+    let all_mode = line == "모두";
+    let count_added = 0;
+    let count_matched = 0;
+    let count_party = 0;
+    let selected = [];
+    for member in context["followers"] {
+        if !all_mode && member["name"] != line {
+            continue;
+        }
+        count_matched += 1;
+        if !member["is_player"] {
+            if !all_mode {
+                send_line(ob, object_eun(member) + " 이곳에 없어서 무리에 참여하지 못합니다.");
+            }
+            continue;
+        }
+        if member["follow_id"] != actor["id"] {
+            if !all_mode {
+                send_line(ob, object_eun(member) + " 이미 따르는자가 있습니다.");
+            }
+            continue;
+        }
+        if member["party_leader_id"] != "" {
+            if !all_mode {
+                send_line(ob, object_eul(member) + " 따르는 무리가 있으므로 안됩니다.");
+                count_party += 1;
+            }
+            continue;
+        }
+
+        selected.push(member["id"]);
+        send_line(ob, "당신의 무리에 " + command_name(member) + han_iga(member["name"]) + " 들어옵니다.");
+        party_send_raw(
+            ob,
+            member["id"],
+            "\r\n당신이 " + command_name(actor) + "의 무리에 들어갑니다.\r\n" + party_prompt(member)
+        );
+
+        let room_notice = command_name(member) + han_iga(member["name"]) + " "
+            + command_name(actor) + "의 무리에 들어갑니다.";
+        for observer in context["room_players"] {
+            if observer["id"] == actor["id"] || observer["id"] == member["id"] {
+                continue;
+            }
+            party_send_raw(ob, observer["id"], "\r\n" + room_notice + "\r\n" + party_prompt(observer));
+        }
+        count_added += 1;
+    }
+
+    party_request_add_members(ob, selected);
+    if count_matched == 0 {
+        send_line(ob, "☞ 당신을 따르는 대상이 아닙니다.");
+    } else if count_added == 0 && count_party == 0 {
+        send_line(ob, "☞ 추가된 무리원이 없습니다.");
+    }
+}
+
+fn logout_party(ob, context) {
+    let actor = context["self"];
+    let leader = context["party_leader"];
+    party_request_disconnect(ob);
+
+    if leader["id"] != "" {
+        if leader["id"] == actor["id"] && len(context["party_members"]) != 0 {
+            let successor = context["party_members"][0];
+            if len(context["party_members"]) == 1 {
+                party_send_raw(ob, successor["id"], "\r\n무리가 해제 되었습니다\r\n" + party_prompt(successor));
+            } else {
+                let changed = object_iga(successor) + " 무리의 대장으로 변경 되었습니다.";
+                let i = 1;
+                while i < len(context["party_members"]) {
+                    let member = context["party_members"][i];
+                    party_send_raw(ob, member["id"], "\r\n" + changed + "\r\n" + party_prompt(member));
+                    i += 1;
+                }
+                party_send_raw(
+                    ob,
+                    successor["id"],
+                    "\r\n당신은 무리의 대장으로 변경 되었습니다.\r\n" + party_prompt(successor)
+                );
+            }
+        } else if leader["id"] != actor["id"] {
+            let remaining = [];
+            for member in context["party_members"] {
+                if member["id"] != actor["id"] {
+                    remaining.push(member);
+                }
+            }
+            if len(remaining) == 0 {
+                party_send_raw(ob, leader["id"], "\r\n무리가 해제 되었습니다\r\n" + party_prompt(leader));
+            } else {
+                let departed = "\r\n" + object_iga(actor) + " 무리에서 이탈 하였습니다.";
+                // This is a bound `leader.sendToParty(...)` call in Python:
+                // leader == self, so the leader gets only sendLine(line) here.
+                party_send_raw(ob, leader["id"], departed + "\r\n");
+                for member in remaining {
+                    party_send_raw(ob, member["id"], "\r\n" + departed + "\r\n" + party_prompt(member));
+                }
+                // The explicit leader.lpPrompt() after sendToParty is the
+                // leader's sole prompt for this notification.
+                let prompt = party_prompt(leader);
+                if prompt != "" {
+                    party_send_raw(ob, leader["id"], prompt);
+                }
+            }
         }
     }
 
-    // TODO: follower에서 대상 찾아 파티에 추가
-    // 현재는 follower 관리를 위한 efun이 부족하여 구현 제한
-    send_line(ob, "☞ 무리 추가 기능은 follower 시스템과 연동되어야 합니다.");
-    send_line(ob, "   (대상: '" + line + "')");
+    let old_target = context["follow"];
+    if old_target["id"] != "" {
+        party_send_raw(
+            ob,
+            actor["id"],
+            "당신이 " + object_eul(old_target) + " 따라다니는 것을 그만둡니다.\r\n"
+        );
+        party_send_raw(
+            ob,
+            old_target["id"],
+            "\r\n" + object_iga(actor) + " 당신과 따라다니는 것을 그만둡니다.\r\n"
+                + party_prompt(old_target)
+        );
+    }
+
+    for follower in context["followers"] {
+        if follower["follow_id"] == "" {
+            continue;
+        }
+        party_send_raw(
+            ob,
+            follower["id"],
+            "\r\n당신이 " + object_eul(actor) + " 따라다니는 것을 그만둡니다.\r\n"
+                + party_prompt(follower)
+        );
+        party_send_raw(
+            ob,
+            actor["id"],
+            "\r\n" + object_iga(follower) + " 당신과 따라다니는 것을 그만둡니다.\r\n"
+                + party_prompt(actor)
+        );
+    }
 }
 
 fn cmd(ob, line) {
-    if is_empty(line) {
-        // 무리 조회
-        let my_party = get_string(ob, "소속파티");
-        let members = get_party_members(ob);
-
-        if my_party == "" && len(members) == 0 {
-            send_line(ob, "☞ 당신이 속한 무리가 없어요. ^^");
-        } else {
-            view_party(ob);
-        }
+    let context = get_party_context();
+    if is_party_disconnect(ob) {
+        logout_party(ob, context);
         return;
     }
-
-    // 무리 추가
-    add_party(ob, line);
+    if line == "" {
+        // Python compares follower (always a list) to None, so even an empty
+        // relation renders the 동행 frame rather than the intended error.
+        view_party(ob, context);
+        return;
+    }
+    add_party(ob, line, context);
 }
 
 fn main(ob, line) {

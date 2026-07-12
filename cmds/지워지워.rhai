@@ -2,7 +2,14 @@
 // Python: cmds/지워지워.py
 
 fn cmd(ob, line) {
-    send_line(ob, "☞ 기록 삭제 기능은 현재 구현 중입니다.");
+    if line == "" {
+        send_line(ob, "☞ 사용법: [아이템 이름] 먹어");
+        return;
+    }
+    let result = clear_item_magic(ob, line);
+    if result == "no_item" { send_line(ob, "☞ 그런 아이템이 소지품에 없어요."); }
+    else if result == "no_option" { }
+    else { send_line(ob, result); }
 }
 
 fn main(ob, line) {

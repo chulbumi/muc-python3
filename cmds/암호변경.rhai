@@ -1,4 +1,17 @@
-// 암호변경: Rust에서 구현 (이전암호 → 새암호 → 확인, 명령줄에 암호 넣지 않음).
-// 등록: command/commands/system.rs. 이 스크립트는 built-in에 의해 등록 스킵됨.
+// Python: cmds/암호변경.py, objs/player.py get_oldpass/change_password/change_password1
 
-fn main(ob, line) {}
+fn cmd(ob, line) {
+    begin_password_change(
+        ob,
+        "이전암호ː ",
+        "☞ 현재의 암호가 맞지 않아요. ^^\r\n",
+        "☞ 변경 하실 암호를 입력해주세요. \r\n존함암호ː",
+        "☞ 한번 더 암호를 입력해주세요. \r\n암호확인ː",
+        "☞ 이전 입력과 다릅니다. 암호변경을 취소합니다.\r\n",
+        "☞ 암호가 변경되었습니다."
+    );
+}
+
+fn main(ob, line) {
+    cmd(ob, line);
+}

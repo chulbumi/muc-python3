@@ -91,8 +91,8 @@ pub fn check_event_key(data: &RawMobData, words: &[&str]) -> Option<String> {
         }
 
         let all: Vec<&str> = cmd_list.iter().chain(issue_list.iter()).copied().collect();
-        let score = all.iter().filter(|k| words.contains(&k)).count();
-        if best.as_ref().map_or(true, |(_, s)| *s < score) {
+        let score = all.iter().filter(|k| words.contains(*k)).count();
+        if best.as_ref().is_none_or(|(_, s)| *s < score) {
             best = Some((key.clone(), score));
         }
     }
@@ -334,7 +334,9 @@ pub fn do_event(
                     }
                     for _ in 0..cnt {
                         if let Some((arc, _)) = object_from_item_json(&index) {
-                            body.object.objs.push(arc);
+                            // Python Body.addItem uses insert(), so every
+                            // granted item becomes the first inventory object.
+                            body.object.objs.insert(0, arc);
                         }
                     }
                 }
@@ -456,7 +458,7 @@ pub fn do_event_rhai(
         }
         for _ in 0..cnt {
             if let Some((arc, _)) = object_from_item_json(index) {
-                b.object.objs.push(arc);
+                b.object.objs.insert(0, arc);
             }
         }
     });
@@ -540,7 +542,7 @@ pub fn do_event_rhai(
         },
         Err(e) => {
             // end_event()의 throw는 ErrorInFunctionCall로 감싸져 올 수 있음. 안쪽 ErrorRuntime까지 풀어서 확인.
-            let mut err: &EvalAltResult = &*e;
+            let mut err: &EvalAltResult = &e;
             while let EvalAltResult::ErrorInFunctionCall(_, _, inner, _) = err {
                 err = inner.as_ref();
             }
@@ -633,7 +635,7 @@ pub fn try_mob_event(
             words_ref, zone, room
         );
     }
-    for (inst, data) in candidates {
+    if let Some((inst, data)) = candidates.first() {
         let event_key = match check_event_key(data, &words_ref) {
             Some(k) => k,
             None => {
@@ -810,7 +812,7 @@ pub fn run_script_chunk(
             continue;
         }
         if line.starts_with('$') {
-            let nw = if let Some(rest) = line.splitn(2, |c: char| c.is_whitespace()).nth(1) {
+            let nw = if let Some((_, rest)) = line.split_once(|c: char| c.is_whitespace()) {
                 rest.trim()
             } else {
                 ""
@@ -962,7 +964,7 @@ pub fn run_script_chunk_rhai(
     script_resume_op: Option<String>,
 ) -> (Vec<String>, ScriptNext) {
     let mut out: Vec<String> = Vec::new();
-    let mut ob = script_ob.map(script_hashmap_to_ob).unwrap_or_else(Map::new);
+    let mut ob = script_ob.map(script_hashmap_to_ob).unwrap_or_default();
 
     let res_op = script_resume_op.as_deref().unwrap_or("");
     let res_in = input.as_deref().unwrap_or("");
@@ -1101,6 +1103,7 @@ pub fn run_script_chunk_rhai(
 
 /// $엔터$ 재개: mob_key로 데이터 조회 후 do_event( start_from_line, resume_for_rhai ).
 /// resume_func: Rhai wait_enter 시 Some("step1") 등. Legacy면 None.
+#[allow(clippy::too_many_arguments)]
 pub fn try_mob_event_resume(
     body: &mut Body,
     _zone: &str,

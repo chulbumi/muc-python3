@@ -1,56 +1,90 @@
-// 꺼내.rhai - 보관함에서 물건 꺼내기
-// Python: cmds/꺼내.py
-// 사용법: [보관함이름] [물품] 꺼내
+// Python cmds/꺼내.py의 출력만 구성한다.
+
+fn box_item_post(item) {
+    let name_a = if item["ansi"] != "" {
+        item["ansi"] + item["name"] + "\x1b[0;37m"
+    } else {
+        "\x1b[0;36m" + item["name"] + "\x1b[37m"
+    };
+    name_a + han_eul(item["particle_source"])
+}
+
+fn send_box_room(ob, message) {
+    let context = get_box_room_context();
+    for player in context["players"] {
+        if player["id"] == context["self_id"] {
+            continue;
+        }
+        let raw = "\r\n" + message + "\r\n";
+        if player["show_prompt"] {
+            raw += "\r\n\x1b[0;37;40m[ " + player["hp"].to_string() + "/"
+                + player["max_hp"].to_string() + ", " + player["mp"].to_string()
+                + "/" + player["max_mp"].to_string() + " ] ";
+        }
+        box_send_raw(ob, player["id"], raw);
+    }
+}
 
 fn cmd(ob, line) {
-    if is_empty(line) {
-        send_line(ob, "☞ 사용법: [보관함이름] [물품] 꺼내");
-        return;
-    }
-
     let words = line_args(line);
-    if len(words) < 2 {
+    if length(line) == 0 || len(words) < 2 {
         send_line(ob, "☞ 사용법: [보관함이름] [물품] 꺼내");
         return;
     }
 
-    let box_name = words[0];
-    let item_type = words[1];
-
-    // 방에서 보관함 찾기
-    let found_box_name = find_box_in_room(ob);
-    if found_box_name.is_empty() {
-        send_line(ob, "☞ 이곳에는 보관함이 없네");
+    let result = box_take_python(ob, line);
+    let status = result["status"];
+    if status == "unsupported" {
+        internal_not_handled();
+        return;
+    }
+    if status == "no_box" {
+        send_line(ob, "☞ 당신의 안광으로는 그런것을 볼수 없다네");
+        return;
+    }
+    if status == "too_heavy" {
+        send_line(ob, "☞ 자네의 힘으로는 더이상 가질 수 없다네");
+        return;
+    }
+    if status == "item_limit" {
+        send_line(ob, "☞ 자네가 가질 물품의 한계라네");
+        return;
+    }
+    if status == "item_not_found" {
+        send_line(ob, "☞ 그런 물건이 없어요. ^^");
+        return;
+    }
+    if status == "nothing" {
+        send_line(ob, "☞ 더 이상 꺼낼 물건이 없어요. ^^");
+        return;
+    }
+    if status != "ok" {
+        internal_not_handled();
         return;
     }
 
-    // 이름이 일치하는지 확인
-    if found_box_name != box_name {
-        send_line(ob, "☞ 이곳에는 '" + box_name + "' 보관함이 없네");
-        return;
-    }
-
-    // 은전 꺼내기
-    if item_type == "은전" {
-        let amount = 1;
-        if len(words) >= 3 {
-            amount = to_int(words[2]);
-            if amount < 1 { amount = 1; }
-        }
-
-        // 돈 꺼내기
-        if box_withdraw_money(ob, box_name, amount) {
-            send_line(ob, "당신이 " + box_name + "에서 은전 " + amount + "냥을 꺼냅니다.");
-            body_save(ob);
+    let box_a = "\x1b[36m" + result["box_name"] + "\x1b[37m";
+    let own_name = get_body_string(ob, "이름");
+    let actor = "\x1b[1m" + own_name + "\x1b[0;37m" + han_iga(own_name);
+    let room_lines = [];
+    for item in result["groups"] {
+        let count = item["count"];
+        if count == 1 {
+            let post = box_item_post(item);
+            send_line(ob, "당신이 " + box_a + "에서 \x1b[36m" + post
+                + "\x1b[37m 꺼냅니다.");
+            room_lines.push(actor + " " + box_a + "에서 \x1b[36m" + post
+                + "\x1b[37m 꺼냅니다.");
         } else {
-            send_line(ob, "☞ 꺼낼 돈이 모자라네요.");
+            let count_text = count.to_string();
+            send_line(ob, "당신이 " + box_a + "에서 \x1b[36m" + item["name"]
+                + "\x1b[37m " + count_text + "개를 꺼냅니다.");
+            room_lines.push(actor + " " + box_a + "에서 \x1b[36m" + item["name"]
+                + "\x1b[37m " + count_text + "개를 꺼냅니다.");
         }
-        return;
     }
 
-    // TODO: 보관함 내용물 확인 및 꺼내기
-    // box.objs에서 아이템을 꺼내서 ob에 추가
-    send_line(ob, "☞ '" + item_type + "' 꺼내기 기능은 현재 구현 중입니다.");
+    send_box_room(ob, join(room_lines, "\r\n"));
 }
 
 fn main(ob, line) {

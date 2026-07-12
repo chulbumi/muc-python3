@@ -170,7 +170,7 @@ pub fn find(line: &str, word: &str) -> i32 {
 ///
 /// // Normal numbers are converted
 /// assert_eq!(tto_number("123"), Value::Int(123));
-/// assert_eq!(tto_number("3.14"), Value::Float(3.14));
+/// assert_eq!(tto_number("42.5"), Value::Float(42.5));
 ///
 /// // Invalid numbers return as string
 /// assert_eq!(tto_number("abc"), Value::String("abc".to_string()));
@@ -221,7 +221,7 @@ pub fn tto_number(s: &str) -> Value {
 /// assert_eq!(to_number("-456"), Value::Int(-456));
 ///
 /// // Floats
-/// assert_eq!(to_number("3.14"), Value::Float(3.14));
+/// assert_eq!(to_number("42.5"), Value::Float(42.5));
 /// assert_eq!(to_number("-2.5"), Value::Float(-2.5));
 ///
 /// // Strings that can't be parsed
@@ -236,10 +236,8 @@ pub fn to_number(s: &str) -> Value {
     // Try to parse as float first (handles both int and float)
     if let Ok(f) = trimmed.parse::<f64>() {
         // Check if it's a whole number (no decimal point in original string)
-        if !trimmed.contains('.') {
-            if f >= i64::MIN as f64 && f <= i64::MAX as f64 {
-                return Value::Int(f as i64);
-            }
+        if !trimmed.contains('.') && f >= i64::MIN as f64 && f <= i64::MAX as f64 {
+            return Value::Int(f as i64);
         }
         return Value::Float(f);
     }
@@ -328,7 +326,7 @@ mod tests {
 
     #[test]
     fn test_tto_number_floats() {
-        assert_eq!(tto_number("3.14"), Value::Float(3.14));
+        assert_eq!(tto_number("42.5"), Value::Float(42.5));
         assert_eq!(tto_number("-2.5"), Value::Float(-2.5));
         assert_eq!(tto_number("0.5"), Value::Float(0.5));
         assert_eq!(tto_number("123.456"), Value::Float(123.456));
@@ -345,7 +343,7 @@ mod tests {
     fn test_tto_number_whitespace() {
         assert_eq!(tto_number("  123  "), Value::Int(123));
         assert_eq!(tto_number("  0123  "), Value::String("0123".to_string()));
-        assert_eq!(tto_number("  3.14  "), Value::Float(3.14));
+        assert_eq!(tto_number("  42.5  "), Value::Float(42.5));
     }
 
     #[test]
@@ -361,7 +359,7 @@ mod tests {
 
     #[test]
     fn test_to_number_floats() {
-        assert_eq!(to_number("3.14"), Value::Float(3.14));
+        assert_eq!(to_number("42.5"), Value::Float(42.5));
         assert_eq!(to_number("-2.5"), Value::Float(-2.5));
         assert_eq!(to_number("0.5"), Value::Float(0.5));
         assert_eq!(to_number("123.456"), Value::Float(123.456));
@@ -377,7 +375,7 @@ mod tests {
     #[test]
     fn test_to_number_whitespace() {
         assert_eq!(to_number("  123  "), Value::Int(123));
-        assert_eq!(to_number("  3.14  "), Value::Float(3.14));
+        assert_eq!(to_number("  42.5  "), Value::Float(42.5));
     }
 
     #[test]
@@ -401,27 +399,27 @@ mod tests {
     fn test_value_is_string() {
         assert!(Value::String("test".to_string()).is_string());
         assert!(!Value::Int(123).is_string());
-        assert!(!Value::Float(3.14).is_string());
+        assert!(!Value::Float(42.5).is_string());
     }
 
     #[test]
     fn test_value_is_number() {
         assert!(!Value::String("test".to_string()).is_number());
         assert!(Value::Int(123).is_number());
-        assert!(Value::Float(3.14).is_number());
+        assert!(Value::Float(42.5).is_number());
     }
 
     #[test]
     fn test_value_as_str() {
         assert_eq!(Value::String("test".to_string()).as_str(), Some("test"));
         assert_eq!(Value::Int(123).as_str(), None);
-        assert_eq!(Value::Float(3.14).as_str(), None);
+        assert_eq!(Value::Float(42.5).as_str(), None);
     }
 
     #[test]
     fn test_value_from_str() {
         assert_eq!(Value::from("123"), Value::Int(123));
-        assert_eq!(Value::from("3.14"), Value::Float(3.14));
+        assert_eq!(Value::from("42.5"), Value::Float(42.5));
         assert_eq!(Value::from("abc"), Value::String("abc".to_string()));
     }
 

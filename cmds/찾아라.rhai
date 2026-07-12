@@ -2,7 +2,13 @@
 // Python: cmds/찾아라.py
 
 fn cmd(ob, line) {
-    send_line(ob, "☞ 찾기 기능은 현재 구현 중입니다.");
+    if !require_admin(ob, 2000) {
+        send_line(ob, "☞ 무슨 말인지 모르겠어요. *^_^*");
+        return;
+    }
+    for room_name in find_object_rooms(ob, line) {
+        send_line(ob, room_name);
+    }
 }
 
 fn main(ob, line) {

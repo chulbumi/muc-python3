@@ -101,13 +101,13 @@ impl SkillLevel {
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
 pub struct SkillTraining {
     /// Skill proficiency level (1-12)
-    pub level: u8,
+    pub level: i64,
     /// Skill experience points
     pub exp: u32,
 }
 
 impl SkillTraining {
-    pub fn new(level: u8, exp: u32) -> Self {
+    pub fn new(level: i64, exp: u32) -> Self {
         Self { level, exp }
     }
 }
@@ -129,6 +129,16 @@ pub struct ActiveSkill {
     pub mp_bonus: i32,
     /// Max MP bonus
     pub max_mp_bonus: i32,
+    /// HP percentage bonus/penalty
+    pub hp_bonus: i32,
+    /// Max HP bonus/penalty
+    pub max_hp_bonus: i32,
+    /// Category blocked by this effect (`Skill.getAntiType()` in Python)
+    pub anti_type: String,
+    pub category: String,
+    pub recovery_percent: i64,
+    pub recovery_script: String,
+    pub release_script: String,
 }
 
 impl ActiveSkill {
@@ -141,6 +151,13 @@ impl ActiveSkill {
             arm_bonus: 0,
             mp_bonus: 0,
             max_mp_bonus: 0,
+            hp_bonus: 0,
+            max_hp_bonus: 0,
+            anti_type: String::new(),
+            category: String::new(),
+            recovery_percent: 0,
+            recovery_script: String::new(),
+            release_script: String::new(),
         }
     }
 }
@@ -207,15 +224,19 @@ pub struct Body {
     pub skill_map: HashMap<String, SkillTraining>,
     /// List of learned skills
     pub skill_list: Vec<String>,
+    /// `무공이름`/`무공숙련도` 객체 속성을 런타임 맵으로 복원했는지 여부.
+    pub skill_state_loaded: bool,
     /// Item skill training map
     pub item_skill_map: HashMap<String, u32>,
+    /// Python itemSkillMap dict insertion order for save compatibility.
+    pub item_skill_order: Vec<String>,
     /// Skill cooldown tracking (skill_name -> last_cast_timestamp)
     pub skill_cooldowns: HashMap<String, i64>,
     /// 범용 스크립트: 아이템확인에서 설정, 옵션출력/옵션확인 등에서 사용. Complete 시 클리어.
     pub script_temp_item: Option<Arc<Mutex<Object>>>,
     /// 도착 쪽지. 키 "메모:발신자이름", 값 MemoRecord. load/save 시 JSON 루트의 "메모:xxx"와 연동.
     pub memos: HashMap<String, MemoRecord>,
-    /// 대화 기록 (NPC와의 대화 내용)
+    /// Python `Player.talkHistory`: 현재 접속의 전음 대화 기록 (저장하지 않음)
     pub talk_history: Vec<String>,
     /// Death progression step (0-4, for doDeath() progression)
     pub step_death: i32,
@@ -274,7 +295,9 @@ impl Body {
             active_skills: Vec::new(),
             skill_map: HashMap::new(),
             skill_list: Vec::new(),
+            skill_state_loaded: false,
             item_skill_map: HashMap::new(),
+            item_skill_order: Vec::new(),
             skill_cooldowns: HashMap::new(),
             script_temp_item: None,
             memos: HashMap::new(),
@@ -345,8 +368,10 @@ impl Body {
     pub fn get_mp(&self) -> i64 {
         if self._mp != 0 {
             let base = self.object.getInt("내공");
-            
-            base + (base * self._mp as i64 / 100)
+            // Python `//` floors negative percentage modifiers; Rust `/`
+            // truncates toward zero and differs whenever the product is not
+            // divisible by 100.
+            base + (base * self._mp as i64).div_euclid(100)
         } else {
             self.object.getInt("내공")
         }
@@ -490,7 +515,7 @@ impl Body {
     pub fn get_mastery_diff(&self) -> i64 {
         let weapon_type = self.get_weapon_type();
         let s1 = self.get_weapon_skill(); // 무기 기량
-        let s2 = self.get_mastery(weapon_type); // 숙련도
+        let s2 = self.get_mastery(weapon_type); // 숙련도 (`숙련도상승` 포함)
         let ss = s1 - s2;
         ss.max(0)
     }
@@ -631,6 +656,201 @@ impl Body {
 
     // ==================== Skill Methods ====================
 
+    /// Python `Body.loadSkillList()`와 `Body.loadSkillUp()`에 해당한다.
+    ///
+    /// Python JSON 배열은 Rust `Object::attr`에서 `|` 구분 문자열로 보존된다.
+    /// 과거 Rust 저장본의 쉼표 구분 문자열도 읽되, 런타임 상태는 Python과
+    /// 동일하게 `skill_list`/`skill_map`에 다시 구성한다.
+    pub fn load_skill_state_from_attrs(&mut self) {
+        fn split_entries(raw: &str) -> Vec<&str> {
+            if raw.contains('|') {
+                raw.split('|').collect()
+            } else if raw.contains(',') {
+                raw.split(',').collect()
+            } else if raw.is_empty() {
+                Vec::new()
+            } else {
+                vec![raw]
+            }
+        }
+
+        self.skill_list.clear();
+        let skill_names = self.get_string("무공이름");
+        for name in split_entries(&skill_names) {
+            let name = name.trim();
+            if !name.is_empty() {
+                self.skill_list.push(name.to_string());
+            }
+        }
+
+        self.skill_map.clear();
+        let training_entries = self.get_string("무공숙련도");
+        for entry in split_entries(&training_entries) {
+            let words: Vec<&str> = entry.split_whitespace().collect();
+            if words.len() < 3 {
+                continue;
+            }
+            let Ok(level) = words[1].parse::<i64>() else {
+                continue;
+            };
+            let Ok(exp) = words[2].parse::<u32>() else {
+                continue;
+            };
+            self.skill_map
+                .insert(words[0].to_string(), SkillTraining::new(level, exp));
+        }
+        self.item_skill_map.clear();
+        self.item_skill_order.clear();
+        let item_training = self.get_string("무공이름수련리스트");
+        for entry in split_entries(&item_training) {
+            let words = entry.split_whitespace().collect::<Vec<_>>();
+            if words.len() < 2 {
+                continue;
+            }
+            let Some(value) = words.last().and_then(|value| value.parse::<u32>().ok()) else {
+                continue;
+            };
+            let name = words[..words.len() - 1].join(" ");
+            if !self.item_skill_order.contains(&name) {
+                self.item_skill_order.push(name.clone());
+            }
+            self.item_skill_map.insert(name, value);
+        }
+        self.skill_state_loaded = true;
+    }
+
+    /// Python 저장 직전의 `buildSkillList()`/`buildSkillUp()`과 같이 런타임
+    /// 무공 상태를 객체 속성 해시맵으로 되돌린다.
+    pub fn sync_skill_state_to_attrs(&mut self) {
+        self.object.set("무공이름", self.skill_list.join("|"));
+
+        // 기존 배열 순서를 가능한 한 유지하고, 새 항목은 skill_list 순서 뒤에
+        // 이름순으로 붙인다. 숙련도 조회 자체는 이름 키 기반이다.
+        let previous = self.get_string("무공숙련도");
+        let mut ordered_names = Vec::new();
+        for entry in previous.split(['|', ',']) {
+            let Some(name) = entry.split_whitespace().next() else {
+                continue;
+            };
+            if self.skill_map.contains_key(name)
+                && !ordered_names.iter().any(|existing| existing == name)
+            {
+                ordered_names.push(name.to_string());
+            }
+        }
+        for name in &self.skill_list {
+            if self.skill_map.contains_key(name)
+                && !ordered_names.iter().any(|existing| existing == name)
+            {
+                ordered_names.push(name.clone());
+            }
+        }
+        let mut remaining: Vec<_> = self
+            .skill_map
+            .keys()
+            .filter(|name| !ordered_names.iter().any(|existing| existing == *name))
+            .cloned()
+            .collect();
+        remaining.sort();
+        ordered_names.extend(remaining);
+
+        let training = ordered_names
+            .into_iter()
+            .filter_map(|name| {
+                self.skill_map
+                    .get(&name)
+                    .map(|value| format!("{} {} {}", name, value.level, value.exp))
+            })
+            .collect::<Vec<_>>()
+            .join("|");
+        self.object.set("무공숙련도", training);
+        let mut item_names = self.item_skill_order.clone();
+        let mut remaining = self
+            .item_skill_map
+            .keys()
+            .filter(|name| !item_names.contains(name))
+            .cloned()
+            .collect::<Vec<_>>();
+        remaining.sort();
+        item_names.extend(remaining);
+        let item_training = item_names
+            .into_iter()
+            .filter_map(|name| {
+                self.item_skill_map
+                    .get(&name)
+                    .map(|value| format!("{name} {value}"))
+            })
+            .collect::<Vec<_>>()
+            .join("|");
+        self.object.set("무공이름수련리스트", item_training);
+        self.skill_state_loaded = true;
+    }
+
+    /// Python `Body.loadSkills()`: restore active defense effects from the
+    /// `방어무공시전` object attribute and re-apply their modifiers.
+    pub fn load_active_skills_from_attrs(&mut self) {
+        // Repeated loads must not stack the same temporary modifiers.
+        for effect in self.active_skills.drain(..) {
+            self._str -= effect.str_bonus;
+            self._dex -= effect.dex_bonus;
+            self._arm -= effect.arm_bonus;
+            self._mp -= effect.mp_bonus;
+            self._maxmp -= effect.max_mp_bonus;
+            self._hp -= effect.hp_bonus;
+            self._maxhp -= effect.max_hp_bonus;
+        }
+
+        let raw = self.get_string("방어무공시전");
+        if raw.is_empty() {
+            return;
+        }
+        for entry in raw.split(['|', ',']) {
+            let words = entry.split_whitespace().collect::<Vec<_>>();
+            if words.len() < 2 {
+                continue;
+            }
+            let Ok(remaining) = words[1].parse::<i32>() else {
+                continue;
+            };
+            let Some(skill) = crate::world::get_skill(words[0]) else {
+                continue;
+            };
+            let mut effect = ActiveSkill::new(skill.name, remaining);
+            effect.str_bonus = skill.str_bonus as i32;
+            effect.dex_bonus = skill.dex_bonus as i32;
+            effect.arm_bonus = skill.arm_bonus as i32;
+            effect.mp_bonus = skill.mp_bonus as i32;
+            effect.max_mp_bonus = skill.max_mp_bonus as i32;
+            effect.hp_bonus = skill.hp_bonus as i32;
+            effect.max_hp_bonus = skill.max_hp_bonus as i32;
+            effect.anti_type = skill.deny;
+            effect.category = skill.category;
+            effect.recovery_percent = skill.recovery_percent;
+            effect.recovery_script = skill.recovery_script;
+            effect.release_script = skill.release_script;
+            self._str += effect.str_bonus;
+            self._dex += effect.dex_bonus;
+            self._arm += effect.arm_bonus;
+            self._mp += effect.mp_bonus;
+            self._maxmp += effect.max_mp_bonus;
+            self._hp += effect.hp_bonus;
+            self._maxhp += effect.max_hp_bonus;
+            self.active_skills.push(effect);
+        }
+    }
+
+    /// Python `Body.buildSkills()`: keep active effect state in the object
+    /// property hashmap so Rhai and Python-compatible JSON can access it.
+    pub fn sync_active_skills_to_attrs(&mut self) {
+        let value = self
+            .active_skills
+            .iter()
+            .map(|effect| format!("{} {}", effect.name, effect.start_time))
+            .collect::<Vec<_>>()
+            .join("|");
+        self.object.set("방어무공시전", value);
+    }
+
     /// Gets a skill by name (caches last skill)
     pub fn get_skill(&mut self, s_name: &str) -> Option<String> {
         if let Some(ref last) = self.last_skill {
@@ -689,7 +909,7 @@ impl Body {
     }
 
     /// Sets skill training data
-    pub fn set_skill_training(&mut self, skill_name: &str, level: u8, exp: u32) {
+    pub fn set_skill_training(&mut self, skill_name: &str, level: i64, exp: u32) {
         self.skill_map
             .insert(skill_name.to_string(), SkillTraining::new(level, exp));
     }
@@ -771,6 +991,12 @@ impl Body {
 
         let current_mp = self.get_max_mp();
         self.object.set("내공", current_mp);
+        if self.get_int("전직") < 2 {
+            let level = self.get_int("레벨");
+            if level >= 2_000 || level % 10 == 0 {
+                self.set("특성치", self.get_int("특성치") + 1);
+            }
+        }
     }
 
     /// Initializes body stats for a new character
@@ -805,6 +1031,9 @@ impl Body {
         self.object.set("2 성격플킬", 0);
         self.object.set("무공숙련도", "");
         self.object.set("무공이름", "");
+        self.skill_map.clear();
+        self.skill_list.clear();
+        self.skill_state_loaded = true;
         self.object.set("보험료", 0);
     }
 
@@ -897,7 +1126,7 @@ impl Body {
     }
 
     /// Adds armor experience
-    pub fn add_arm(&mut self, arm: i32) {
+    pub fn add_arm(&mut self, arm: i32) -> bool {
         let mut exp = self.object.getInt("맷집경험치");
         exp += arm as i64;
         self.object.set("맷집경험치", exp);
@@ -908,7 +1137,9 @@ impl Body {
         if exp >= threshold && threshold > 0 {
             self.object.set("맷집경험치", 0);
             self.object.set("맷집", armor_val + 1);
+            return true;
         }
+        false
     }
 
     /// Adds strength experience
@@ -921,7 +1152,7 @@ impl Body {
             let str_stat = self.object.getInt("힘");
             let threshold = (str_stat - 10) * 20;
 
-            if exp >= threshold && threshold > 0 {
+            if exp >= threshold {
                 self.object.set("힘경험치", 0);
                 self.object.set("힘", str_stat + 1);
                 return true; // Leveled up
@@ -947,6 +1178,105 @@ impl Body {
             }
         }
         false
+    }
+
+    /// Python `Body.weaponSkillUp`: every attempted player attack advances
+    /// the mastery experience of the currently equipped weapon type.
+    pub fn weapon_skill_up(&mut self, amount: i64) -> bool {
+        let weapon_type = self.get_weapon_type();
+        let mastery_key = format!("{weapon_type} 숙련도");
+        let exp_key = format!("{weapon_type} 숙련도경험치");
+        let mastery = self.get_int(&mastery_key);
+        let experience = self.get_int(&exp_key).saturating_add(amount);
+        self.set(&exp_key, experience);
+        if experience >= (mastery + 5).saturating_mul(7) {
+            self.set(&mastery_key, mastery + 1);
+            self.set(&exp_key, 0_i64);
+            true
+        } else {
+            false
+        }
+    }
+
+    /// Python `Body.addAnger`, called after every successful ordinary mob hit.
+    /// Returns true only for the transition that emits the 100-point message.
+    pub fn add_anger(&mut self) -> bool {
+        let anger = self.get_int("분노");
+        if anger >= 600 {
+            return false;
+        }
+        let next = anger + 1;
+        self.set("분노", next);
+        next == 100
+    }
+
+    /// Python `Body.checkItemSkill` for the currently equipped weapon.
+    /// The caller supplies the inclusive 0..99 roll so combat tests can lock
+    /// the probability boundary.  Returns the newly discovered skill name.
+    pub fn check_item_skill_with_roller(
+        &mut self,
+        roll: &mut impl FnMut() -> i64,
+    ) -> Option<String> {
+        let weapon = self.weapon_item.as_ref()?.upgrade()?;
+        let (weapon_name, declarations, consume_after_learning, armor, attack) = {
+            let weapon = weapon.lock().ok()?;
+            let raw = weapon.getString("무공이름");
+            if raw.is_empty() {
+                return None;
+            }
+            (
+                weapon.getString("이름"),
+                raw.split('|').map(str::to_string).collect::<Vec<_>>(),
+                weapon.checkAttr("아이템속성", "무공배운후소멸"),
+                weapon.getInt("방어력"),
+                weapon.getInt("공격력"),
+            )
+        };
+        if !self.item_skill_map.contains_key(&weapon_name) {
+            self.item_skill_order.push(weapon_name.clone());
+        }
+        let counter = self.item_skill_map.entry(weapon_name.clone()).or_insert(0);
+        *counter = counter.saturating_add(1);
+        let count = *counter;
+        for declaration in declarations {
+            let words = declaration.split_whitespace().collect::<Vec<_>>();
+            if words.len() < 5 || self.skill_list.iter().any(|name| name == words[0]) {
+                continue;
+            }
+            let tendency = words[1];
+            let personality = self.get_string("성격");
+            if tendency != "정사"
+                && personality != tendency
+                && personality != "기인"
+                && personality != "선인"
+            {
+                continue;
+            }
+            let required = words[2].parse::<u32>().unwrap_or(0);
+            let interval = words[3].parse::<u32>().unwrap_or(0);
+            let chance = words[4].parse::<i64>().unwrap_or(0);
+            if count < required || interval == 0 || count % interval != 0 {
+                continue;
+            }
+            if count < 2_500_000 && roll() > chance {
+                continue;
+            }
+            let skill_name = words[0].to_string();
+            self.skill_list.push(skill_name.clone());
+            self.item_skill_map.insert(weapon_name.clone(), 0);
+            self.sync_skill_state_to_attrs();
+            if consume_after_learning {
+                if let Ok(mut item) = weapon.lock() {
+                    item.set("inUse", 0_i64);
+                }
+                self.armor = self.armor.saturating_sub(armor as i32);
+                self.attpower = self.attpower.saturating_sub(attack as i32);
+                self.object.remove(&weapon);
+                self.weapon_item = None;
+            }
+            return Some(skill_name);
+        }
+        None
     }
 
     /// Removes HP, returns true if died
@@ -1172,11 +1502,9 @@ impl Body {
 
     /// Check if player has a specific secret skill learned (비전이름)
     pub fn has_secret_skill(&self, skill_name: &str) -> bool {
-        let skills = self.object.getString("비전이름");
-        if skills.is_empty() {
-            return false;
-        }
-        skills.split(',').any(|s| s.trim() == skill_name)
+        self.get_secret_skills()
+            .iter()
+            .any(|learned| learned == skill_name)
     }
 
     /// Get list of learned secret skills
@@ -1186,7 +1514,9 @@ impl Body {
             Vec::new()
         } else {
             skills
-                .split(',')
+                // JSON 배열은 로드 시 `|`로 보존된다. 쉼표는 기존 Rust
+                // 저장값을 읽기 위한 레거시 호환 구분자다.
+                .split(['|', ','])
                 .map(|s| s.trim().to_string())
                 .filter(|s| !s.is_empty())
                 .collect()
@@ -1231,157 +1561,86 @@ impl Body {
         let mut skills = self.get_secret_skills();
         if !skills.contains(&skill_name.to_string()) {
             skills.push(skill_name.to_string());
-            let skills_str = skills.join(",");
+            let skills_str = skills.join("|");
             self.object.set("비전이름", skills_str);
         }
     }
 
     /// Check vision training progress - called during combat
     /// Python: checkVision(skill) - increases progress if skill matches training
-    /// Returns (completed, message)
-    pub fn check_vision_training(&mut self, skill_name: &str) -> (bool, String) {
+    /// Returns whether training completed; presentation belongs to Rhai.
+    pub fn check_vision_training(&mut self, skill_name: &str) -> bool {
+        self.check_vision_training_with_roll(skill_name, &mut || {
+            rand::Rng::gen_range(&mut rand::thread_rng(), 0..=99)
+        })
+    }
+
+    pub fn check_vision_training_with_roll(
+        &mut self,
+        skill_name: &str,
+        roll: &mut impl FnMut() -> i64,
+    ) -> bool {
         let (training_skill, progress) = self.get_vision_training();
 
         if training_skill.is_empty() {
-            return (false, String::new());
+            return false;
         }
 
         if training_skill != skill_name {
-            return (false, String::new());
+            return false;
         }
 
-        // Training progress: ~1% chance per hit to complete
-        // In Python: if randint(0, 99) > 1: progress += 1
-        use rand::Rng;
-        let roll = rand::thread_rng().gen_range(0..100);
-
-        if roll > 1 {
-            let new_progress = progress + 1;
-
-            // Check if completed (threshold seems to be around 10-15 in Python)
-            if new_progress >= 10 {
-                // Training complete!
-                self.clear_vision_training();
-                self.add_secret_skill(skill_name);
-
-                let msg = format!(
-                    "\r\n\x1b[1m당신이 『\x1b[32m{}\x1b[37m』의 무공 구결을 깨우치기 시작합니다. \'ΔΨΞλΟ~\'\x1b[0;37m\r\n",
-                    skill_name
-                );
-                return (true, msg);
-            } else {
-                self.set_vision_training(skill_name, new_progress);
-            }
+        // Python completes immediately on 0 or 1; every other roll merely
+        // increments the persisted progress counter without a threshold.
+        if roll() > 1 {
+            self.set_vision_training(skill_name, progress + 1);
+            return false;
         }
-
-        (false, String::new())
+        self.clear_vision_training();
+        self.add_secret_skill(skill_name);
+        true
     }
 
     /// Get damage reduction against a mob skill based on vision setting
-    /// Returns (multiplier, description) - e.g., (0.5, "damage halved")
-    pub fn get_vision_damage_modifier(&self, mob_skill_name: &str) -> (f64, String) {
+    pub fn get_vision_damage_modifier(&self, mob_skill_name: &str) -> f64 {
         let vision = self.get_vision_setting();
         if vision.is_empty() {
-            return (1.0, String::new());
+            return 1.0;
         }
 
-        // Check if mob skill matches vision setting
-        // 비전설정 can be:
-        // - "비전무공" - matches any "비전XXX" skill
-        // - Specific skill name like "강룡십팔장" - matches that exact skill
-        if vision == "비전무공" {
-            if mob_skill_name.starts_with("비전") {
-                return (0.5, format!("비전({}) 때문에 피해가 절반입니다.", vision));
-            }
-        } else if vision == mob_skill_name {
-            return (0.5, format!("비전({}) 때문에 피해가 절반입니다.", vision));
+        let configured = vision.replace("비전", "");
+        let poison = mob_skill_name
+            .strip_prefix('독')
+            .is_some_and(|suffix| !suffix.is_empty() && suffix.chars().all(|c| c.is_ascii_digit()));
+        if mob_skill_name == configured || poison {
+            return 0.5;
         }
 
-        (1.0, String::new())
+        1.0
     }
 
     // ==================== Death & Reborn ====================
 
-    /// Handle player death (Python: die() in objs/player.py:821)
-    /// Sets death state, resets stats, drops items, enters coma
-    pub fn die(&mut self) {
-        self.act = ActState::Death;
-        self._str = 0;
-        self._dex = 0;
-        self._arm = 0;
-        // Note: autoMoveList would be cleared here if implemented
-
-        self.unwear_all();
-        self.drop_all_items_death();
-
-        // Send death messages (matching Python output exactly)
-        self.send_line("\r\n\x1b[1;37m당신이 쓰러집니다. '쿠웅~~ 철퍼덕~~'\x1b[0;37m");
-        self.send_line("당신은 정신이 혼미합니다.");
-
-        self.clear_targets_death();
-        self.clear_skills();
-
-        // Recalculate modifiers from skills (Python: for s in self.skills)
-        let skill_list = self.get_string("무공이름");
-        if !skill_list.is_empty() {
-            for skill_name in skill_list.split(',') {
-                let skill_name = skill_name.trim();
-                if !skill_name.is_empty() {
-                    // In full implementation, would load skill data and add modifiers
-                    // For now, this is simplified
+    /// Advance Python `Player.doDeath()` state without owning presentation.
+    /// Returns `(processed_step, insured_items)` for the Rhai renderer.
+    pub fn advance_death(&mut self) -> (i32, i64) {
+        let step = self.step_death;
+        let insured = self.get_int("_death_insured_items");
+        match step {
+            9 => {
+                self.act = ActState::Rest;
+                self.step_death = 0;
+                self.set("체력", (self.get_int("최고체력") as f64 * 0.33) as i64);
+            }
+            _ => {
+                if (0..9).contains(&step) {
+                    self.step_death += 1;
+                } else {
+                    self.step_death = 0;
                 }
             }
         }
-
-        // Enter coma state (input_to(self.coma) in Python)
-        // The actual coma handler is implemented at the network level
-    }
-
-    /// Process death progression through reborn (Python: doDeath() in objs/player.py:2248)
-    /// Returns messages to send to player
-    pub fn do_death(&mut self) -> Vec<String> {
-        let mut messages = Vec::new();
-
-        match self.step_death {
-            0 => {
-                messages.push("\r\n기혈이 거꾸로 돌며 정신이 혼미해 집니다.".to_string());
-                self.step_death = 1;
-            }
-            1 => {
-                messages.push("\r\n누군가가 당신 주위를 어슬렁 거립니다.".to_string());
-                self.step_death = 2;
-            }
-            2 => {
-                messages.push("\r\n장의사가 당신을 어깨에 메고 낑낑대며 걸어갑니다.".to_string());
-                self.step_death = 3;
-            }
-            3 => {
-                // Python: enterRoom('낙양성:7', '사망', '사망')
-                // For now, just send message - actual room move handled by caller
-                messages.push("\r\n장의사가 당신을 어깨에 메고 낑낑대며 걸어갑니다.".to_string());
-                self.step_death = 4;
-            }
-            4 => {
-                messages
-                    .push("\r\n코끝을 찌르는 향냄새에 정신을 차려보니 장의사 내부다.".to_string());
-                messages.push("당신은 죽었다가 다시 살아났습니다.".to_string());
-
-                // Reset to alive state
-                self.act = ActState::Stand;
-                self.step_death = 0;
-
-                // Full heal
-                let max_hp = self.get_int("최대체력");
-                self.set("체력", max_hp);
-                let max_mp = self.get_int("최대내공");
-                self.set("내공", max_mp);
-            }
-            _ => {
-                self.step_death = 0;
-            }
-        }
-
-        messages
+        (step, insured)
     }
 
     /// Check if player is in coma/death state
@@ -1398,14 +1657,6 @@ impl Body {
         false
     }
 
-    /// Drop all items on death (Python: dropAllItem())
-    pub fn drop_all_items_death(&mut self) {
-        // Clear all items from inventory
-        // In full implementation, items would be moved to the room
-        self.object.objs.clear();
-        self.object.inv_stack.clear();
-    }
-
     /// Clear all combat targets (separate method for death handling)
     pub fn clear_targets_death(&mut self) {
         self.targets.clear();
@@ -1418,7 +1669,7 @@ impl Body {
 
     /// Set death progress step
     pub fn set_death_step(&mut self, step: i32) {
-        self.step_death = step.clamp(0, 4);
+        self.step_death = step.clamp(0, 9);
     }
 
     /// Record time of death
@@ -1463,6 +1714,28 @@ mod tests {
         assert_eq!(body.tick, 0);
         assert!(body.skill.is_none());
         assert!(body.targets.is_empty());
+    }
+
+    #[test]
+    fn death_progression_matches_python_ten_heartbeat_sequence() {
+        let mut body = Body::new();
+        body.act = ActState::Death;
+        body.set("최고체력", 900_i64);
+        body.set("보험료", 0_i64);
+
+        let mut steps = Vec::new();
+        for _ in 0..10 {
+            steps.push(body.advance_death());
+        }
+
+        assert_eq!(
+            steps.iter().map(|step| step.0).collect::<Vec<_>>(),
+            (0..10).collect::<Vec<_>>()
+        );
+        assert_eq!(steps[8].1, 0);
+        assert_eq!(body.act, ActState::Rest);
+        assert_eq!(body.get_hp(), 297);
+        assert_eq!(body.get_death_step(), 0);
     }
 
     #[test]
@@ -1670,6 +1943,15 @@ mod tests {
     }
 
     #[test]
+    fn get_mp_uses_python_floor_division_for_negative_percent_effects() {
+        let mut body = Body::new();
+        body.set("내공", 1i64);
+        body._mp = -40;
+
+        assert_eq!(body.get_mp(), 0);
+    }
+
+    #[test]
     fn test_get_hp_string() {
         let mut body = Body::new();
         body.init_body();
@@ -1711,6 +1993,69 @@ mod tests {
 
         let training = body.get_skill_training("test_skill");
         assert_eq!(training, Some(SkillTraining::new(2, 0)));
+    }
+
+    #[test]
+    fn test_load_skill_state_from_python_array_attributes() {
+        let mut body = Body::new();
+        body.set("무공이름", "지르기|강룡십팔장");
+        body.set("무공숙련도", "지르기 3 17|강룡십팔장 9 42");
+
+        body.load_skill_state_from_attrs();
+
+        assert_eq!(body.skill_list, vec!["지르기", "강룡십팔장"]);
+        assert_eq!(
+            body.skill_map.get("지르기"),
+            Some(&SkillTraining::new(3, 17))
+        );
+        assert_eq!(
+            body.skill_map.get("강룡십팔장"),
+            Some(&SkillTraining::new(9, 42))
+        );
+    }
+
+    #[test]
+    fn test_sync_skill_state_to_python_array_attributes() {
+        let mut body = Body::new();
+        body.skill_list = vec!["지르기".to_string(), "강룡십팔장".to_string()];
+        body.skill_map
+            .insert("지르기".to_string(), SkillTraining::new(3, 17));
+        body.skill_map
+            .insert("강룡십팔장".to_string(), SkillTraining::new(9, 42));
+
+        body.sync_skill_state_to_attrs();
+
+        assert_eq!(body.get_string("무공이름"), "지르기|강룡십팔장");
+        assert_eq!(body.get_string("무공숙련도"), "지르기 3 17|강룡십팔장 9 42");
+    }
+
+    #[test]
+    fn secret_skill_names_use_python_array_storage() {
+        let mut body = Body::new();
+        body.set("비전이름", "강룡십팔장비전|무극검비전");
+
+        assert!(body.has_secret_skill("강룡십팔장비전"));
+        assert!(body.has_secret_skill("무극검비전"));
+        assert!(!body.has_secret_skill("강룡십팔장"));
+        assert_eq!(
+            body.get_secret_skills(),
+            vec!["강룡십팔장비전", "무극검비전"]
+        );
+
+        body.add_secret_skill("천마검비전");
+        assert_eq!(
+            body.get_string("비전이름"),
+            "강룡십팔장비전|무극검비전|천마검비전"
+        );
+    }
+
+    #[test]
+    fn secret_skill_names_still_read_legacy_comma_storage() {
+        let mut body = Body::new();
+        body.set("비전이름", "강룡십팔장비전, 무극검비전");
+
+        assert!(body.has_secret_skill("강룡십팔장비전"));
+        assert!(body.has_secret_skill("무극검비전"));
     }
 
     #[test]
@@ -1849,5 +2194,97 @@ mod tests {
         assert!(leveled_up);
         assert_eq!(body.get_int("민첩성"), 1);
         assert_eq!(body.get_int("민첩성경험치"), 0);
+    }
+
+    #[test]
+    fn item_weapon_skill_learning_uses_python_counter_roll_and_consumption() {
+        let mut body = Body::new();
+        body.set("성격", "정파");
+        let weapon = Arc::new(Mutex::new(Object::new()));
+        {
+            let mut weapon_data = weapon.lock().unwrap();
+            weapon_data.set("이름", "비급검");
+            weapon_data.set("무공이름", "비검술 정파 1 1 25");
+            weapon_data.set("아이템속성", "무공배운후소멸");
+            weapon_data.set("inUse", 1_i64);
+            weapon_data.set("공격력", 7_i64);
+        }
+        body.attpower = 7;
+        body.object.objs.push(weapon.clone());
+        body.weapon_item = Some(Arc::downgrade(&weapon));
+
+        assert_eq!(body.check_item_skill_with_roller(&mut || 26), None);
+        assert_eq!(body.item_skill_map["비급검"], 1);
+        assert_eq!(
+            body.check_item_skill_with_roller(&mut || 25),
+            Some("비검술".to_string())
+        );
+        assert!(body.skill_list.iter().any(|skill| skill == "비검술"));
+        assert!(body.weapon_item.is_none());
+        assert!(body.object.objs.is_empty());
+        assert_eq!(body.attpower, 0);
+    }
+
+    #[test]
+    fn anger_caps_at_six_hundred_and_only_signals_one_hundred() {
+        let mut body = Body::new();
+        body.set("분노", 99_i64);
+        assert!(body.add_anger());
+        assert!(!body.add_anger());
+        body.set("분노", 600_i64);
+        assert!(!body.add_anger());
+        assert_eq!(body.get_int("분노"), 600);
+    }
+
+    #[test]
+    fn vision_training_completes_only_on_python_zero_or_one_roll() {
+        let mut body = Body::new();
+        body.set("비전수련", "독문무공 9");
+        assert!(!body.check_vision_training_with_roll("독문무공", &mut || 2));
+        assert_eq!(body.get_string("비전수련"), "독문무공 10");
+        assert!(body.check_vision_training_with_roll("독문무공", &mut || 1));
+        assert!(body.get_string("비전수련").is_empty());
+        assert!(body.get_secret_skills().contains(&"독문무공".to_string()));
+    }
+
+    #[test]
+    fn vision_setting_halves_configured_and_numeric_poison_skills() {
+        let mut body = Body::new();
+        body.set("비전설정", "비전독문무공");
+        assert_eq!(body.get_vision_damage_modifier("독문무공"), 0.5);
+        assert_eq!(body.get_vision_damage_modifier("독12"), 0.5);
+        assert_eq!(body.get_vision_damage_modifier("강룡십팔장"), 1.0);
+    }
+
+    #[test]
+    fn item_skill_training_round_trips_in_python_insertion_order() {
+        let mut body = Body::new();
+        body.set("무공이름수련리스트", "첫 무기 12|둘째 7");
+        body.load_skill_state_from_attrs();
+        assert_eq!(body.item_skill_order, vec!["첫 무기", "둘째"]);
+        assert_eq!(body.item_skill_map["첫 무기"], 12);
+        body.item_skill_map.insert("셋째".to_string(), 3);
+        body.item_skill_order.push("셋째".to_string());
+        body.sync_skill_state_to_attrs();
+        assert_eq!(
+            body.get_string("무공이름수련리스트"),
+            "첫 무기 12|둘째 7|셋째 3"
+        );
+    }
+
+    #[test]
+    fn level_up_awards_python_trait_points_before_second_job() {
+        let mut body = Body::new();
+        body.set("레벨", 10_i64);
+        body.set("최고체력", 100_i64);
+        body.set("맷집", 10_i64);
+        body.set("전직", 0_i64);
+        body.level_up();
+        assert_eq!(body.get_int("특성치"), 1);
+
+        body.set("레벨", 2_001_i64);
+        body.set("전직", 2_i64);
+        body.level_up();
+        assert_eq!(body.get_int("특성치"), 1);
     }
 }

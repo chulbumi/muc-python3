@@ -203,9 +203,9 @@ pub struct CallOutScheduler {
     /// Registry of all tasks
     registry: Arc<RwLock<CallOutRegistry>>,
     /// Broadcaster for sending messages and mutating player body (점프_착지 등)
-    broadcaster: Arc<Broadcaster>,
+    _broadcaster: Arc<Broadcaster>,
     /// Resolution for checking due tasks
-    resolution: Duration,
+    _resolution: Duration,
     /// Optional runner to execute Rhai script functions when task.script is Some
     script_runner: Option<Arc<ScriptRunnerFn>>,
 }
@@ -219,8 +219,8 @@ impl CallOutScheduler {
     ) -> Self {
         Self {
             registry: Arc::new(RwLock::new(CallOutRegistry::new())),
-            broadcaster,
-            resolution,
+            _broadcaster: broadcaster,
+            _resolution: resolution,
             script_runner,
         }
     }

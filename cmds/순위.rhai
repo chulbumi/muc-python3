@@ -1,4 +1,4 @@
-// 순위.rhai - [특성치] rank_get_all(ty). 은전 10만 차감. channel.players+Body 수집은 추후.
+// 순위.rhai - [특성치] rank_get_all(ty). 은전 10만 차감.
 
 fn cmd(ob, line) {
     let ln = trim(line);
@@ -13,6 +13,10 @@ fn cmd(ob, line) {
             return;
         }
     }
+    // Python cmds/순위.py의 사용자-facing 특성치 별칭 변환.
+    if ln == "내공" { ln = "최고내공"; }
+    if ln == "체력" { ln = "최고체력"; }
+    if ln == "민첩" { ln = "민첩성"; }
     if get_int(ob, "은전") < 100000 {
         send_line(ob, "☞ 은전이 부족해요.");
         return;

@@ -145,9 +145,10 @@ mod tests {
         );
         data.insert("key2".to_string(), Box::new(ScriptValueInner::Int(42)));
 
-        let mut list = Vec::new();
-        list.push(Box::new(ScriptValueInner::String("item1".to_string())));
-        list.push(Box::new(ScriptValueInner::Int(123)));
+        let list = vec![
+            Box::new(ScriptValueInner::String("item1".to_string())),
+            Box::new(ScriptValueInner::Int(123)),
+        ];
         data.insert("list".to_string(), Box::new(ScriptValueInner::List(list)));
 
         let script_value = Box::new(ScriptValueInner::Dict(data));

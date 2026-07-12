@@ -56,8 +56,8 @@ fn cmd(ob, line) {
         return;
     }
 
-    // TODO: 실제 전투 시작 로직은 Rust combat.rs에서 처리
-    // start_fight, do_attack, calculate_damage efuns 필요
+    // 실제 전투 시작과 데미지 계산은 등록된 `쳐.rhai`와 Rust 전투
+    // efun이 담당한다. 이 파일은 legacy 영문 명령의 참고용 템플릿이다.
     let iga = ob_iga(ob);
     send_line(ob, "당신이 공격 자세를 취합니다!");
     send_room(ob, name + iga + " 공격 자세를 취합니다.");

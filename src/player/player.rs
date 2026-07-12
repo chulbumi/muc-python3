@@ -5,6 +5,54 @@
 
 use std::collections::HashMap;
 use std::sync::{Arc, Mutex, Weak};
+
+/// Python `Player.buildAlias()`가 저장하는 사용자 줄임말 속성 이름.
+pub const ALIAS_LIST_ATTR: &str = "줄임말리스트";
+
+/// `줄임말리스트`의 내부 문자열을 Python의 `["키 명령", ...]` 순서로 복원한다.
+///
+/// 새 형식은 JSON 배열 문자열이며, 예전에 배열을 `|`로 합쳐 로드한 Body도 계속
+/// 읽는다. 같은 키가 여러 번 있으면 Python dict처럼 처음 위치를 유지하고 마지막
+/// 값을 사용한다.
+pub fn decode_alias_entries(raw: &str) -> Vec<(String, String)> {
+    let serialized: Vec<String> = serde_json::from_str(raw).unwrap_or_else(|_| {
+        if raw.is_empty() {
+            Vec::new()
+        } else {
+            raw.split('|').map(str::to_string).collect()
+        }
+    });
+
+    let mut entries: Vec<(String, String)> = Vec::new();
+    let mut positions: HashMap<String, usize> = HashMap::new();
+    for entry in serialized {
+        let entry = entry.trim_start_matches(char::is_whitespace);
+        let Some(split_at) = entry.find(char::is_whitespace) else {
+            continue;
+        };
+        let key = &entry[..split_at];
+        let data = entry[split_at..].trim_start_matches(char::is_whitespace);
+        if key.is_empty() || data.is_empty() {
+            continue;
+        }
+        if let Some(index) = positions.get(key).copied() {
+            entries[index].1 = data.to_string();
+        } else {
+            positions.insert(key.to_string(), entries.len());
+            entries.push((key.to_string(), data.to_string()));
+        }
+    }
+    entries
+}
+
+/// 사용자 줄임말을 Python 호환 JSON 배열의 손실 없는 내부 문자열로 만든다.
+pub fn encode_alias_entries(entries: &[(String, String)]) -> String {
+    let serialized: Vec<String> = entries
+        .iter()
+        .map(|(key, data)| format!("{} {}", key, data))
+        .collect();
+    serde_json::to_string(&serialized).unwrap_or_else(|_| "[]".to_string())
+}
 use tokio::sync::mpsc;
 
 use crate::object::Object;
@@ -54,47 +102,6 @@ pub const CFG_OPTIONS: &[&str] = &[
     "잡담시간보기",
     "자동채널입장",
 ];
-
-/// Party/Group structure for players
-#[derive(Debug)]
-pub struct Party {
-    /// Party leader
-    pub leader: Weak<Mutex<Player>>,
-    /// Party members
-    pub members: Vec<Weak<Mutex<Player>>>,
-}
-
-impl Party {
-    pub fn new(leader: Arc<Mutex<Player>>) -> Self {
-        Self {
-            leader: Arc::downgrade(&leader),
-            members: Vec::new(),
-        }
-    }
-
-    /// Broadcast a message to all party members
-    pub fn broadcast(&self, message: &str, exclude: Option<&Arc<Mutex<Player>>>) {
-        // Send to leader
-        if let Some(leader) = self.leader.upgrade() {
-            if exclude.map_or(true, |e| Arc::as_ptr(&leader) != Arc::as_ptr(e)) {
-                if let Ok(p) = leader.lock() {
-                    p.send_line(message);
-                }
-            }
-        }
-
-        // Send to members
-        for member_weak in &self.members {
-            if let Some(member) = member_weak.upgrade() {
-                if exclude.map_or(true, |e| Arc::as_ptr(&member) != Arc::as_ptr(e)) {
-                    if let Ok(p) = member.lock() {
-                        p.send_line(message);
-                    }
-                }
-            }
-        }
-    }
-}
 
 /// Channel for network communication
 #[derive(Debug)]
@@ -174,6 +181,8 @@ pub struct Player {
     pub configs: HashMap<String, bool>,
     /// Command alias/shortcuts
     pub alias: HashMap<String, String>,
+    /// Python dict의 삽입 순서를 보존하는 사용자 줄임말 키 목록
+    alias_order: Vec<String>,
     /// Talk history for anti-spam
     pub talk_history: Vec<String>,
     /// Previous command for '!' repeat
@@ -188,16 +197,6 @@ pub struct Player {
     pub interactive: i32,
     /// Fight mode flag
     pub fight_mode: bool,
-
-    /// Party reference
-    pub party: Option<Weak<Mutex<Player>>>,
-    /// Party members list (when leader)
-    pub party_members: Vec<Weak<Mutex<Player>>>,
-
-    /// Followers (other players following this player)
-    pub followers: Vec<Weak<Mutex<Player>>>,
-    /// Who this player is following
-    pub following: Option<Weak<Mutex<Player>>>,
 
     /// Memo/messages from other players
     pub memos: HashMap<String, String>,
@@ -228,6 +227,7 @@ impl Player {
             step_death: 0,
             configs: HashMap::new(),
             alias: HashMap::new(),
+            alias_order: Vec::new(),
             talk_history: Vec::new(),
             prev_cmd: String::new(),
             cmd_cnt: 0,
@@ -235,10 +235,6 @@ impl Player {
             auto_move_list: Vec::new(),
             interactive: 0,
             fight_mode: false,
-            party: None,
-            party_members: Vec::new(),
-            followers: Vec::new(),
-            following: None,
             memos: HashMap::new(),
             channel: Channel::new(),
             input_handler: None,
@@ -466,18 +462,10 @@ impl Player {
         }
 
         let msg = match mode {
-            "귀환" => {
-                format!("당신이 경공술을 펼치며 하늘로 치솟아 오릅니다. '무영지신!!!'")
-            }
-            "소환" => {
-                format!("당신이 알수 없는 기운에 휘말려 사라집니다. '고오오오~~~'")
-            }
-            "도망" => {
-                format!("당신이 신형을 비틀거리며 간신히 도망갑니다. '살리도~~'")
-            }
-            _ => {
-                format!("{} {}쪽으로 갔습니다.", self.body.han_iga(), move_dir)
-            }
+            "귀환" => "당신이 경공술을 펼치며 하늘로 치솟아 오릅니다. '무영지신!!!'".to_string(),
+            "소환" => "당신이 알수 없는 기운에 휘말려 사라집니다. '고오오오~~~'".to_string(),
+            "도망" => "당신이 신형을 비틀거리며 간신히 도망갑니다. '살리도~~'".to_string(),
+            _ => format!("{} {}쪽으로 갔습니다.", self.body.han_iga(), move_dir),
         };
 
         self.send_line(&msg);
@@ -495,63 +483,6 @@ impl Player {
     pub fn write_room(&self, message: &str) {
         let _ = message;
         // Placeholder implementation
-    }
-
-    // ==================== Party Methods ====================
-
-    /// Sends a message to party members
-    pub fn send_to_party(&self, message: &str, prompt: bool) {
-        if let Some(party_leader) = &self.party {
-            if let Some(leader) = party_leader.upgrade() {
-                if let Ok(leader_player) = leader.lock() {
-                    leader_player.send_line(message);
-                    if prompt {
-                        leader_player.lp_prompt(false);
-                    }
-
-                    // Send to party members
-                    for member_weak in &leader_player.party_members {
-                        if let Some(member) = member_weak.upgrade() {
-                            if let Ok(member_player) = member.lock() {
-                                member_player.send_line(message);
-                                if prompt {
-                                    member_player.lp_prompt(false);
-                                }
-                            }
-                        }
-                    }
-                }
-            }
-        }
-    }
-
-    /// Creates a party with this player as leader
-    pub fn create_party(&mut self, self_ref: Arc<Mutex<Player>>) {
-        self.party = Some(Arc::downgrade(&self_ref));
-        self.party_members.clear();
-    }
-
-    /// Adds a member to the party
-    pub fn add_party_member(&mut self, member: Arc<Mutex<Player>>) {
-        self.party_members.push(Arc::downgrade(&member));
-
-        // Set member's party to us
-        if let Ok(mut member_player) = member.lock() {
-            member_player.party = self.party.clone();
-        }
-    }
-
-    /// Removes a member from the party
-    pub fn remove_party_member(&mut self, member: &Arc<Mutex<Player>>) {
-        let ptr = Arc::as_ptr(member);
-        self.party_members
-            .retain(|m| m.upgrade().map(|m| Arc::as_ptr(&m) != ptr).unwrap_or(false));
-    }
-
-    /// Leaves the current party
-    pub fn leave_party(&mut self) {
-        self.party = None;
-        self.party_members.clear();
     }
 
     // ==================== Item Methods ====================
@@ -665,12 +596,6 @@ impl Player {
 
     /// Logs out the player
     pub fn logout(&mut self) {
-        // Clear party
-        self.leave_party();
-
-        // Clear followers
-        self.followers.clear();
-
         // Clear targets
         self.body.clear_all_targets();
 
@@ -746,74 +671,6 @@ impl Player {
         format!("{} 『{}』", prefix, title)
     }
 
-    /// Dies (drops items, etc.)
-    pub fn die(&mut self) {
-        self.body.act = ActState::Stand; // Will be set to DEATH by caller
-        self.body.unwear_all();
-        self.send_line("\r\n\x1b[1;37m당신이 쓰러집니다. '쿠웅~~ 철퍼덕~~'\x1b[0;37m");
-
-        // Drop items logic would go here
-
-        self.body.clear_all_targets();
-        self.body.clear_skills();
-    }
-
-    // ==================== Follower System ====================
-
-    /// Adds a follower
-    pub fn add_follower(&mut self, follower: Arc<Mutex<Player>>) {
-        let ptr = Arc::as_ptr(&follower);
-        for f in &self.followers {
-            if f.upgrade().map(|f| Arc::as_ptr(&f) == ptr).unwrap_or(false) {
-                return; // Already following
-            }
-        }
-
-        self.followers.push(Arc::downgrade(&follower));
-
-        if let Ok(f) = follower.lock() {
-            f.send_line(&format!(
-                "당신은 {} 따라다니기 시작합니다.",
-                self.body.han_obj()
-            ));
-        }
-    }
-
-    /// Removes a follower
-    pub fn remove_follower(&mut self, follower: &Arc<Mutex<Player>>) {
-        let ptr = Arc::as_ptr(follower);
-        self.followers.retain(|f| {
-            if let Some(strong) = f.upgrade() {
-                Arc::as_ptr(&strong) != ptr
-            } else {
-                false
-            }
-        });
-    }
-
-    /// Clears all followers
-    pub fn clear_followers(&mut self) {
-        self.followers.clear();
-    }
-
-    /// Sets this player to follow another
-    pub fn follow(&mut self, _target: Arc<Mutex<Player>>) -> bool {
-        if !self.body.is_movable() {
-            self.send_line("지금은 따라다니기를 시작할 수 없습니다.");
-            return false;
-        }
-
-        // Note: This would set following but requires external Arc management
-        self.send_line("당신이 따라다니기 시작합니다.");
-        true
-    }
-
-    /// Stops following
-    pub fn unfollow(&mut self) {
-        self.following = None;
-        self.send_line("당신이 따라다니는 것을 그만둡니다.");
-    }
-
     // ==================== Save/Load ====================
 
     /// Saves player data
@@ -830,9 +687,42 @@ impl Player {
 
     // ==================== Alias/Shortcuts ====================
 
-    /// Sets an alias/shortcut
-    pub fn set_alias(&mut self, name: &str, command: &str) {
+    /// Python `loadAlias`: Body의 `줄임말리스트`를 런타임 HashMap으로 복원한다.
+    pub fn load_aliases_from_body(&mut self) {
+        self.alias.clear();
+        self.alias_order.clear();
+        for (key, data) in decode_alias_entries(&self.body.get_string(ALIAS_LIST_ATTR)) {
+            self.alias_order.push(key.clone());
+            self.alias.insert(key, data);
+        }
+    }
+
+    /// Python `buildAlias`: 런타임 HashMap을 Body의 배열 호환 속성에 반영한다.
+    pub fn build_aliases(&mut self) {
+        self.alias_order.retain(|key| self.alias.contains_key(key));
+        for key in self.alias.keys() {
+            if !self.alias_order.contains(key) {
+                self.alias_order.push(key.clone());
+            }
+        }
+        let entries: Vec<(String, String)> = self
+            .alias_order
+            .iter()
+            .filter_map(|key| self.alias.get(key).map(|data| (key.clone(), data.clone())))
+            .collect();
+        self.body
+            .set(ALIAS_LIST_ATTR, encode_alias_entries(&entries));
+    }
+
+    /// Python `setAlias`: 이미 있는 키는 덮어쓰지 않는다.
+    pub fn set_alias(&mut self, name: &str, command: &str) -> bool {
+        if self.alias.contains_key(name) {
+            return false;
+        }
         self.alias.insert(name.to_string(), command.to_string());
+        self.alias_order.push(name.to_string());
+        self.build_aliases();
+        true
     }
 
     /// Gets an alias
@@ -840,9 +730,14 @@ impl Player {
         self.alias.get(name)
     }
 
-    /// Removes an alias
+    /// Python `delAlias`: 없는 키는 false, 삭제 성공은 true.
     pub fn remove_alias(&mut self, name: &str) -> bool {
-        self.alias.remove(name).is_some()
+        if self.alias.remove(name).is_none() {
+            return false;
+        }
+        self.alias_order.retain(|key| key != name);
+        self.build_aliases();
+        true
     }
 }
 
@@ -882,8 +777,6 @@ mod tests {
         assert_eq!(player.login_state, LoginState::GetName);
         assert_eq!(player.login_retry, 0);
         assert!(player.channel.sender.is_none());
-        assert!(player.followers.is_empty());
-        assert!(player.party.is_none());
         assert!(player.login_name.is_empty());
         assert!(player.login_password.is_empty());
     }
@@ -1115,11 +1008,33 @@ mod tests {
     fn test_alias() {
         let mut player = Player::new();
 
-        player.set_alias("l", "바라보기");
+        assert!(player.set_alias("l", "바라보기"));
         assert_eq!(player.get_alias("l"), Some(&"바라보기".to_string()));
+        assert!(!player.set_alias("l", "북"));
+        assert_eq!(player.get_alias("l"), Some(&"바라보기".to_string()));
+        assert_eq!(
+            decode_alias_entries(&player.body.get_string(ALIAS_LIST_ATTR)),
+            vec![("l".to_string(), "바라보기".to_string())]
+        );
 
-        player.remove_alias("l");
+        assert!(player.remove_alias("l"));
+        assert!(!player.remove_alias("l"));
         assert_eq!(player.get_alias("l"), None);
+        assert_eq!(player.body.get_string(ALIAS_LIST_ATTR), "[]");
+    }
+
+    #[test]
+    fn test_load_aliases_from_python_list_preserves_order_and_last_duplicate_value() {
+        let mut player = Player::new();
+        player
+            .body
+            .set(ALIAS_LIST_ATTR, r#"["길 동;서","대상 * 쳐","길 북"]"#);
+
+        player.load_aliases_from_body();
+
+        assert_eq!(player.alias_order, vec!["길", "대상"]);
+        assert_eq!(player.get_alias("길").map(String::as_str), Some("북"));
+        assert_eq!(player.get_alias("대상").map(String::as_str), Some("* 쳐"));
     }
 
     #[test]
@@ -1229,16 +1144,6 @@ mod tests {
     }
 
     #[test]
-    fn test_create_party() {
-        let mut player = Player::new();
-        let self_ref = Arc::new(Mutex::new(Player::new()));
-
-        player.create_party(self_ref);
-        assert!(player.party.is_some());
-        assert!(player.party_members.is_empty());
-    }
-
-    #[test]
     fn test_logout_clears_state() {
         let mut player = Player::new();
         player.body.act = ActState::Fight;
@@ -1248,7 +1153,6 @@ mod tests {
 
         assert_eq!(player.body.act, ActState::Stand);
         assert!(player.body.targets.is_empty());
-        assert!(player.party.is_none());
     }
 
     #[test]
@@ -1259,34 +1163,5 @@ mod tests {
         // Can access Body methods through Player
         assert_eq!(player.get_int("레벨"), 1);
         assert_eq!(player.get_hp(), 450);
-    }
-
-    #[test]
-    fn test_unfollow() {
-        let mut player = Player::new();
-
-        let target = Arc::new(Mutex::new(Player::new()));
-        player.following = Some(Arc::downgrade(&target));
-
-        player.unfollow();
-
-        assert!(player.following.is_none());
-    }
-
-    #[test]
-    fn test_clear_followers() {
-        let mut player = Player::new();
-
-        let follower1 = Arc::new(Mutex::new(Player::new()));
-        let follower2 = Arc::new(Mutex::new(Player::new()));
-
-        player.followers.push(Arc::downgrade(&follower1));
-        player.followers.push(Arc::downgrade(&follower2));
-
-        assert_eq!(player.followers.len(), 2);
-
-        player.clear_followers();
-
-        assert_eq!(player.followers.len(), 0);
     }
 }

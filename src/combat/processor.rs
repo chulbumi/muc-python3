@@ -6,10 +6,33 @@
 //! - Combat state management
 //! - Death and rewards
 
-use crate::hangul;
 use crate::player::{ActState, Body};
+use crate::world::skill::Skill;
 use crate::world::{MobInstance, RawMobData, WorldState};
 use rand::Rng;
+use serde_json::Value as JsonValue;
+
+fn mob_equipment_stats(mob: &RawMobData) -> (i64, i64) {
+    mob.use_items
+        .iter()
+        .fold((0, 0), |(attack, armor), (key, _, _, _)| {
+            let path = std::path::Path::new("data/item").join(format!("{key}.json"));
+            let Some(info) = std::fs::read_to_string(path)
+                .ok()
+                .and_then(|source| serde_json::from_str::<JsonValue>(&source).ok())
+                .and_then(|root| root.get("아이템정보").cloned())
+            else {
+                return (attack, armor);
+            };
+            let item_attack = info
+                .get("공격력")
+                .or_else(|| info.get("타격"))
+                .and_then(JsonValue::as_i64)
+                .unwrap_or(0);
+            let item_armor = info.get("방어력").and_then(JsonValue::as_i64).unwrap_or(0);
+            (attack + item_attack, armor + item_armor)
+        })
+}
 
 /// Combat action result
 #[derive(Debug, Clone)]
@@ -29,10 +52,8 @@ pub enum CombatAction {
 /// Combat round result
 #[derive(Debug, Clone)]
 pub struct CombatRound {
-    /// Player to attacker messages
-    pub player_messages: Vec<String>,
-    /// Room messages (to others in room)
-    pub room_messages: Vec<String>,
+    /// State-only presentation events rendered by the heartbeat Rhai command.
+    pub presentation_events: Vec<JsonValue>,
     /// Total damage dealt
     pub damage_dealt: i64,
     /// Total damage taken
@@ -54,8 +75,7 @@ impl Default for CombatRound {
 impl CombatRound {
     pub fn new() -> Self {
         Self {
-            player_messages: Vec::new(),
-            room_messages: Vec::new(),
+            presentation_events: Vec::new(),
             damage_dealt: 0,
             damage_taken: 0,
             combat_ended: false,
@@ -74,6 +94,10 @@ impl CombatRound {
 /// m1 = (c1 + c2) - (mob.getArm() + mob.getArmor())
 /// Then apply ±20% random variation (0.8~1.2x)
 pub fn calculate_player_damage(player: &Body, mob_data: &RawMobData) -> i64 {
+    calculate_player_damage_with_arm(player, mob_data, mob_data.arm)
+}
+
+fn calculate_player_damage_with_arm(player: &Body, mob_data: &RawMobData, mob_arm: i64) -> i64 {
     let player_str = player.get_str();
     let max_mp = player.get_max_mp();
     let weapon_power = player.attpower as i64;
@@ -90,7 +114,8 @@ pub fn calculate_player_damage(player: &Body, mob_data: &RawMobData) -> i64 {
     // 방어력 계산: 몹 맷집 (arm = 맷집)
     // Python: mob.getArm() returns 맷집, mob.getArmor() returns equipment defense
     // 현재는 맷집만 사용 (장비 방어력은 추후 구현)
-    let mob_defense = mob_data.arm; // mob.getArm() + mob.getArmor()
+    let (_, equipment_armor) = mob_equipment_stats(mob_data);
+    let mob_defense = mob_arm + equipment_armor;
 
     // 기본 데미지: (c1 + c2) - 방어력
     let mut damage = (c1 + c2) - mob_defense;
@@ -100,10 +125,12 @@ pub fn calculate_player_damage(player: &Body, mob_data: &RawMobData) -> i64 {
         damage = 1;
     }
 
-    // Python: ±20% 랜덤 변동 (0.8~1.2배)
-    // randint(0, s1 - 1) + c1 where c1 = m * 0.80, c2 = m * 1.20
-    let variation = rand::thread_rng().gen_range(-20..=20);
-    damage = (damage * (100 + variation)) / 100;
+    // Python chooses every integer in [int(m*0.80), int(m*1.20)] with equal
+    // probability.  Multiplying by a random percentage is not equivalent for
+    // larger values because it skips most integers in that interval.
+    let min_damage = damage * 80 / 100;
+    let max_damage = damage * 120 / 100;
+    damage = rand::thread_rng().gen_range(min_damage..=max_damage);
 
     // 최소 데미지 1 보장 (랜덤 후)
     if damage < 1 {
@@ -128,10 +155,18 @@ pub fn calculate_player_damage(player: &Body, mob_data: &RawMobData) -> i64 {
 /// damage = (c1 + c2) - player_defense
 /// Then apply ±20% random variation
 pub fn calculate_mob_damage(mob_data: &RawMobData, player: &Body) -> i64 {
-    let mob_str = mob_data.strength;
-    // 몹 공격력: 현재는 strength를 기본 공격력으로 사용
-    // Python: mob.attpower는 사용아이템에서 계산됨
-    let mob_weapon = mob_data.strength; // 기본 공격력
+    calculate_mob_damage_with_strength(mob_data, mob_data.strength, player)
+}
+
+fn calculate_mob_damage_with_strength(
+    mob_data: &RawMobData,
+    mob_strength: i64,
+    player: &Body,
+) -> i64 {
+    let mob_str = mob_strength;
+    // Python Mob.init() sums 공격력 from every configured 사용아이템.
+    // An unarmed mob has attack power zero; strength is not used twice.
+    let (mob_weapon, _) = mob_equipment_stats(mob_data);
 
     // Python 공식: c1 = 힘 × 2
     let c1 = mob_str * 2;
@@ -150,9 +185,9 @@ pub fn calculate_mob_damage(mob_data: &RawMobData, player: &Body) -> i64 {
         damage = 1;
     }
 
-    // ±20% 랜덤 변동
-    let variation = rand::thread_rng().gen_range(-20..=20);
-    damage = (damage * (100 + variation)) / 100;
+    let min_damage = damage * 80 / 100;
+    let max_damage = damage * 120 / 100;
+    damage = rand::thread_rng().gen_range(min_damage..=max_damage);
 
     // 최소 데미지 1 보장 (랜덤 후)
     if damage < 1 {
@@ -162,6 +197,32 @@ pub fn calculate_mob_damage(mob_data: &RawMobData, player: &Body) -> i64 {
     damage
 }
 
+/// Python `Mob.getSkillPoint`: runtime strength/difficulty, ordinary attack
+/// variance, skill hit-rate amplification, then the mob's luck/critical roll.
+pub(crate) fn calculate_mob_skill_damage(
+    mob: &MobInstance,
+    mob_data: &RawMobData,
+    player: &Body,
+    skill: &crate::world::skill::Skill,
+    critical_roll: i64,
+) -> i64 {
+    let strength = (mob.strength + mob.str_modifier).max(0);
+    let base = calculate_mob_damage_with_strength(mob_data, strength, player);
+    let rate = if skill.hit_rate <= 0.0 {
+        0.1
+    } else {
+        skill.hit_rate
+    };
+    let amplified = (base as f64 + base as f64 * rate) as i64;
+    let chance = mob_data.luck as f64 * crate::script::get_murim_config_float("운확률");
+    let multiplier = if chance > critical_roll as f64 {
+        (mob_data.critical as f64 * crate::script::get_murim_config_float("필살배수")).max(1.0)
+    } else {
+        1.0
+    };
+    (amplified as f64 * multiplier) as i64
+}
+
 /// Check if player hits the mob
 ///
 /// Python formula (from objs/body.py:getAttackChance):
@@ -169,30 +230,75 @@ pub fn calculate_mob_damage(mob_data: &RawMobData, player: &Body) -> i64 {
 /// bonus = self.getHit() * MAIN_CONFIG['명중확률']  # 0.2
 /// bonus -= mob.getMiss() * MAIN_CONFIG['회피확률']  # 0.2
 /// return CHANCE - (((mob['레벨']-self['레벨'])+90)//3) + bonus
-pub fn check_hit(player: &Body, mob_data: &RawMobData) -> bool {
-    const HIT_RATE: f64 = 0.2;  // MAIN_CONFIG['명중확률']
-    const DODGE_RATE: f64 = 0.2;  // MAIN_CONFIG['회피확률']
-
-    let player_level = player.get_int("레벨");
-    let mob_level = mob_data.level;
-    let player_hit = player.get_hit();
-    let mob_miss = mob_data.agility; // mob.getMiss() uses agility
-
-    // Python 공식
-    let base_chance = 100;
-    let level_modifier = ((mob_level - player_level) + 90) / 3;
-    let bonus = (player_hit as f64 * HIT_RATE) - (mob_miss as f64 * DODGE_RATE);
-
-    let hit_chance = base_chance - level_modifier + bonus as i64;
-
-    // Clamp to 5-95%
-    let hit_chance = hit_chance.clamp(5, 95);
-
-    rand::thread_rng().gen_range(0..100) < hit_chance
+pub fn calculate_attack_chance(player: &Body, mob_data: &RawMobData) -> f64 {
+    calculate_attack_chance_with_level(player, mob_data, mob_data.level)
 }
 
-/// Process player attack on mob
-pub fn process_player_attack(
+fn calculate_attack_chance_with_level(player: &Body, mob_data: &RawMobData, mob_level: i64) -> f64 {
+    const HIT_RATE: f64 = 0.2; // MAIN_CONFIG['명중확률']
+    const DODGE_RATE: f64 = 0.2; // MAIN_CONFIG['회피확률']
+
+    let player_level = player.get_int("레벨");
+    // data/config/murim.json `최대사냥레벨차이`; Python returns -1 before
+    // applying any hit/evasion bonuses at this boundary.
+    if mob_level - player_level >= 400 {
+        return -1.0;
+    }
+    let player_hit = player.get_hit();
+    let mob_miss = mob_data.miss;
+
+    // Python 공식
+    let base_chance = 100.0;
+    // Python 2 integer `//` floors negative values.  `div_euclid` preserves
+    // that behavior, unlike Rust's truncating `/`.
+    let level_modifier = ((mob_level - player_level) + 90).div_euclid(3) as f64;
+    let bonus = (player_hit as f64 * HIT_RATE) - (mob_miss as f64 * DODGE_RATE);
+
+    base_chance - level_modifier + bonus
+}
+
+pub fn check_hit(player: &Body, mob_data: &RawMobData) -> bool {
+    let hit_chance = calculate_attack_chance(player, mob_data);
+
+    // Python uses randint(0, 100), whose upper bound is inclusive.  This is
+    // observably different at both 0 and 100 and must not be modeled as
+    // Rust's half-open 0..100 range.
+    hit_chance >= rand::thread_rng().gen_range(0..=100) as f64
+}
+
+fn check_hit_instance(player: &Body, mob: &MobInstance, mob_data: &RawMobData) -> bool {
+    let hit_chance = calculate_attack_chance_with_level(player, mob_data, mob.level);
+    hit_chance >= rand::thread_rng().gen_range(0..=100) as f64
+}
+
+pub(crate) fn apply_player_attack_training(player: &mut Body, hit: bool, round: &mut CombatRound) {
+    if let Some(skill) =
+        player.check_item_skill_with_roller(&mut || rand::thread_rng().gen_range(0..=99))
+    {
+        round.presentation_events.push(serde_json::json!({
+            "kind": "item_skill_learned", "skill": skill,
+        }));
+    }
+    let stat_up = if hit {
+        player.add_str(1, true).then_some("strength_up")
+    } else {
+        let max_dex = crate::script::get_murim_config_int("민첩성최고수치");
+        player.add_dex(1, max_dex).then_some("dexterity_up")
+    };
+    if let Some(kind) = stat_up {
+        round
+            .presentation_events
+            .push(serde_json::json!({ "kind": kind }));
+    }
+    if player.weapon_skill_up(1) {
+        round
+            .presentation_events
+            .push(serde_json::json!({ "kind": "mastery_up" }));
+    }
+}
+
+/// Resolve one player strike without advancing the mob's independent clock.
+pub fn process_player_strike(
     player: &mut Body,
     mob_instance: &MobInstance,
     mob_data: &RawMobData,
@@ -201,9 +307,10 @@ pub fn process_player_attack(
 
     let mob = mob_instance.clone();
     if !mob.alive {
-        round
-            .player_messages
-            .push("☞ 이미 죽은 몬스터입니다.".to_string());
+        round.presentation_events.push(serde_json::json!({
+            "kind": "combat_error",
+            "code": "already_dead",
+        }));
         round.combat_ended = true;
         return round;
     }
@@ -212,27 +319,31 @@ pub fn process_player_attack(
     player.act = ActState::Fight;
 
     // Check hit
-    if !check_hit(player, mob_data) {
-        let particle = hangul::han_obj(&mob.name);
-        let msg = format!("{} {} 공격했지만 빗나갔습니다!", mob.name, particle);
-        round.player_messages.push(msg.clone());
-        round.room_messages.push(format!(
-            "{} {} 공격했지만 빗나갔습니다.",
-            player.get_name(),
-            mob.name
-        ));
+    if !check_hit_instance(player, &mob, mob_data) {
+        round.presentation_events.push(serde_json::json!({
+            "kind": "player_miss",
+            "mob": mob.name,
+            "player": player.get_name(),
+            "weapon_type": player.get_fight_script_type(),
+        }));
+        apply_player_attack_training(player, false, &mut round);
         return round;
     }
 
     // Calculate damage
-    let damage = calculate_player_damage(player, mob_data);
+    let effective_arm = (mob.arm + mob.arm_modifier).max(0);
+    let damage = calculate_player_damage_with_arm(player, mob_data, effective_arm);
     round.damage_dealt = damage;
 
-    // Format attack message
-    let particle = hangul::han_obj(&mob.name);
-    let attack_msgs = get_attack_message(player, &mob.name, damage, particle);
-    round.player_messages.push(attack_msgs.0);
-    round.room_messages.push(attack_msgs.1);
+    round.presentation_events.push(serde_json::json!({
+        "kind": "player_attack",
+        "mob": mob.name,
+        "player": player.get_name(),
+        "weapon": player.get_weapon_name(),
+        "weapon_type": player.get_fight_script_type(),
+        "damage": damage,
+    }));
+    apply_player_attack_training(player, true, &mut round);
 
     // Check if mob died
     let new_hp = mob.hp - damage;
@@ -240,202 +351,115 @@ pub fn process_player_attack(
         round.target_died = true;
         round.combat_ended = true;
 
-        // Calculate rewards
-        let exp = calculate_exp_reward(mob_data, player.get_int("레벨"));
-        let gold = calculate_gold_reward(mob_data);
-
-        // Death message (Python: mob_name + han_iga + ' 쓰러집니다. \'쿠웅~~ 철퍼덕~~\'')
-        let mob_particle = hangul::han_iga(&mob.name);
-        let death_msg = format!("\x1b[1;37m{}{} 쓰러집니다. '쿠웅~~ 철퍼덕~~'\x1b[0;37m", mob.name, mob_particle);
-        round.player_messages.push(death_msg.clone());
-        round.room_messages.push(death_msg);
-
-        // Reward message (Python format)
-        let exp_msg = format!("\r\n당신이 {}의 경험치를 얻습니다.", exp);
-        round.player_messages.push(exp_msg);
-
-        let gold_msg = format!("당신이 {}에게 은전 {}개를 획득합니다.", mob.name, gold);
-        round.player_messages.push(gold_msg);
-
-        // Apply rewards
-        player.add_exp(exp);
-        // Add gold directly through object
-        let current_gold = player.get_int("은전");
-        player.set("은전", current_gold + gold);
-
         // Reset player state
         player.act = ActState::Stand;
-    } else {
-        // Mob counter-attacks
-        let mob_damage = calculate_mob_damage(mob_data, player);
-        round.damage_taken = mob_damage;
-
-        player.set("체력", player.get_hp() - mob_damage);
-
-        let mob_particle = hangul::han_obj(&mob.name);
-        let counter_msg = format!(
-            "{} {} {}의 피해를 입혔습니다!",
-            mob.name, mob_particle, mob_damage
-        );
-        round.player_messages.push(counter_msg.clone());
-        round.room_messages.push(format!(
-            "{} {} {}의 피해를 입혔습니다.",
-            mob.name,
-            player.get_name(),
-            mob_damage
-        ));
-
-        // Check if player died
-        if player.get_hp() <= 0 {
-            round.player_died = true;
-            round.combat_ended = true;
-            player.act = ActState::Death;
-
-            let death_msg = format!("☞ {} 당했습니다...", mob.name);
-            round.player_messages.push(death_msg);
-            round.room_messages.push(format!(
-                "{} {} 쓰러졌습니다.",
-                player.get_name(),
-                hangul::han_obj(&player.get_name())
-            ));
-        }
     }
 
     round
 }
 
-/// Get attack message (based on weapon type)
-/// Python: objs/body.py getAttackScript(), makeFightScript()
-fn get_attack_message(
-    player: &Body,
-    target_name: &str,
-    damage: i64,
-    _particle: &str,
-) -> (String, String) {
-    use crate::hangul::{post_position_all, strip_ansi};
-    use rand::Rng;
+/// Resolve one ordinary mob strike without advancing the player's clock.
+pub fn process_mob_strike(
+    player: &mut Body,
+    mob: &MobInstance,
+    mob_data: &RawMobData,
+) -> CombatRound {
+    let mut round = CombatRound::new();
+    let chance = 100.0 - ((player.get_int("레벨") - mob.level + 90).div_euclid(3)) as f64
+        + mob_data.hit as f64 * 0.2
+        - player.get_miss() as f64 * 0.2;
+    if chance < rand::thread_rng().gen_range(0..=100) as f64 {
+        round.presentation_events.push(serde_json::json!({
+            "kind": "mob_normal_miss", "mob": mob.name,
+            "player": player.get_name(), "weapon_type": mob_data.combat_script,
+        }));
+        return round;
+    }
+    let effective_strength = (mob.strength + mob.str_modifier).max(0);
+    let damage = calculate_mob_damage_with_strength(mob_data, effective_strength, player);
+    round.damage_taken = damage;
+    let lethal = player.minus_hp(damage);
+    round.presentation_events.push(serde_json::json!({
+        "kind": "mob_normal_attack", "mob": mob.name,
+        "player": player.get_name(), "damage": damage,
+        "weapon_type": mob_data.combat_script,
+    }));
+    if player.add_anger() {
+        round
+            .presentation_events
+            .push(serde_json::json!({ "kind": "anger_100" }));
+    }
+    if lethal {
+        round.player_died = true;
+        round.combat_ended = true;
+        player.act = ActState::Death;
+        player.unwear_all();
+        player.clear_targets_death();
+        player.clear_skills();
+        player.set_death_step(0);
+        round
+            .presentation_events
+            .push(serde_json::json!({ "kind": "player_death" }));
+    }
+    round
+}
 
-    let player_name = player.get_name();
-    let weapon_name = player.get_weapon_name();
-    let fight_type = player.get_fight_script_type();
-
-    // Combat scripts by weapon type (matching Python SCRIPT data format)
-    // Pattern: [공](이/가) [방](을/를) [무](을/를) or [무](으로/로)
-    let scripts: &[(&str, &[&str])] = &[
-        ("주먹", &[
-            "[공](이/가) [방](을/를) 무릎으로 강력하게 찍었습니다",
-            "[공](이/가) [방]의 급소를 야비하게 찍어 찹니다",
-            "[공](이/가) [방]의 안면에 강력한 선풍각을 날립니다",
-            "[공](이/가) [방]에게 결정적인 일격을 날립니다",
-            "[공](이/가) [방]에게 그럭저럭 강한 충격을 줬습니다",
-            "[공](이/가) [방](을/를) 약하게 때립니다",
-            "[공](이/가) [방](을/를) 주먹으로 툭툭 칩니다",
-        ]),
-        ("검", &[
-            "[공](이/가) [무](을/를) 흉악하게 돌리며 [방](을/를) 난자합니다",
-            "[공](이/가) [방](을/를) [무](으로/로) 강력하게 베었습니다",
-            "[공](이/가) [무](을/를) 휘둘러 [방](을/를) 공격했습니다",
-            "[공](이/가) [무](으로/로) [방](을/를) 미친듯이 난도질 해버렸습니다",
-            "[공](이/가) [무](으로/로) [방](을/를) 잔인하게 베었습니다",
-        ]),
-        ("도", &[
-            "[공](이/가) [방](을/를) [무](으로/로) 내리쳤습니다",
-            "[공](이/가) [방]에게 [무](으로/로) 강력한 타격을 입혔습니다",
-            "[공](이/가) [무](으로/로) [방](을/를) 베어 넘겼습니다",
-        ]),
-        ("창", &[
-            "[공](이/가) [방](을/를) [무](으로/로) 찔렀습니다",
-            "[공](이/가) [방]에게 [무](으로/로) 뚫고 들어갔습니다",
-            "[공](이/가) [무](을/를) 휘둘러 [방](을/를) 후렸습니다",
-        ]),
-        ("봉", &[
-            "[공](이/가) [방](을/를) [무](으로/로) 내리쳤습니다",
-            "[공](이/가) [방]에게 [무](으로/로) 후려쳤습니다",
-            "[공](이/가) [무](으로/로) [방](을/를) 강타했습니다",
-        ]),
-    ];
-
-    // Find matching script type (default to 주먹)
-    let default_scripts: &[&str] = &[
-        "[공](이/가) [방](을/를) 공격했습니다",
-    ];
-    let script_set = scripts
-        .iter()
-        .find(|(t, _)| fight_type.starts_with(t))
-        .map(|(_, s)| *s)
-        .unwrap_or(default_scripts);
-
-    // Pick random script
-    let script = if script_set.is_empty() {
-        "[공](이/가) [방](을/를) 공격했습니다".to_string()
-    } else {
-        let idx = rand::thread_rng().gen_range(0..script_set.len());
-        script_set[idx].to_string()
-    };
-
-    // For player message: [공] -> "당신", [방] -> target_name
-    let mut to_player = script.replace("[공]", "당신");
-    to_player = to_player.replace("[방]", target_name);
-    to_player = to_player.replace("[무]", &weapon_name);
-    // Apply Korean particles
-    to_player = post_position_all(&to_player);
-    // Add damage
-    to_player = format!("{} ({} 피해)", to_player, damage);
-
-    // For room message: [공] -> player_name, [방] -> target_name
-    let player_name_clean = strip_ansi(&player_name);
-    let mut to_room = script.replace("[공]", &player_name_clean);
-    to_room = to_room.replace("[방]", target_name);
-    to_room = to_room.replace("[무]", &weapon_name);
-    // Apply Korean particles
-    to_room = post_position_all(&to_room);
-    // Add damage
-    to_room = format!("{} ({} 피해)", to_room, damage);
-
-    (to_player, to_room)
+/// Compatibility one-exchange API. The heartbeat uses the two independent
+/// strike functions because Python maintains separate dexterity clocks.
+pub fn process_player_attack(
+    player: &mut Body,
+    mob: &MobInstance,
+    mob_data: &RawMobData,
+) -> CombatRound {
+    let mut round = process_player_strike(player, mob, mob_data);
+    if !round.target_died && !round.combat_ended {
+        let counter = process_mob_strike(player, mob, mob_data);
+        round.damage_taken = counter.damage_taken;
+        round.player_died = counter.player_died;
+        round.combat_ended = counter.combat_ended;
+        round
+            .presentation_events
+            .extend(counter.presentation_events);
+    }
+    round
 }
 
 /// Calculate EXP reward from mob
 ///
 /// Based on Python objs/mob.py die() and objs/body.py addExp()
 /// Base exp scales with mob level and adjusts for player level difference
-fn calculate_exp_reward(mob_data: &RawMobData, player_level: i64) -> i64 {
-    // 기본 경험치: 몹 레벨 기반
-    let mob_level = mob_data.level;
-    let base_exp = if mob_level < 10 {
-        mob_level * 5
-    } else if mob_level < 50 {
-        mob_level * 10
-    } else if mob_level < 100 {
-        mob_level * 15
-    } else {
-        mob_level * 20
-    };
+fn base_exp_reward(mob_level: i64, player_level: i64) -> i64 {
+    // Python Mob.getExpGold.  Use i128 intermediates because Python integers
+    // do not overflow before the final MAX_INT clamp.
+    let level = mob_level as i128;
+    let target = player_level as i128;
+    let a = level * level / 3 + 30;
+    let b = (a * (level - target)).div_euclid(100);
+    (a + b).clamp(1, i32::MAX as i128) as i64
+}
 
-    // 레벨 차이에 따른 조정 (Python 스타일)
-    let level_diff = player_level - mob_level;
-    let adjusted_exp = if level_diff > 20 {
-        base_exp / 4  // 너무 낮은 몹
-    } else if level_diff > 10 {
-        base_exp / 2
-    } else if level_diff < -10 {
-        base_exp * 2  // 높은 몹 보너스
-    } else if level_diff < -5 {
-        (base_exp * 150) / 100  // 1.5배
+pub(crate) fn calculate_exp_reward_for_level(mob_level: i64, player_level: i64) -> i64 {
+    let mut exp = base_exp_reward(mob_level, player_level);
+    let variance = rand::thread_rng().gen_range(0..=9);
+    if rand::thread_rng().gen_range(0..=1) == 0 {
+        exp = exp.saturating_add(variance);
     } else {
-        base_exp
-    };
-
-    adjusted_exp.max(1)
+        exp = exp.saturating_sub(variance);
+    }
+    exp.clamp(1, i32::MAX as i64)
 }
 
 /// Calculate gold reward from mob
-fn calculate_gold_reward(mob_data: &RawMobData) -> i64 {
-    let base_gold = mob_data.level * 5;
-
-    // Random variation ±50%
-    let variation = rand::thread_rng().gen_range(-50..=50);
-    (base_gold * (100 + variation)) / 100
+pub(crate) fn calculate_gold_reward_for_level(mob_level: i64, carried_gold: i64) -> i64 {
+    let variance = rand::thread_rng().gen_range(0..=4);
+    let mut gold = (mob_level as i128) + 14;
+    if rand::thread_rng().gen_range(0..=1) == 0 {
+        gold += variance as i128;
+    } else {
+        gold -= variance as i128;
+    }
+    gold += carried_gold as i128;
+    gold.clamp(1, i32::MAX as i128) as i64
 }
 
 /// Start combat with a mob
@@ -494,10 +518,93 @@ pub struct SkillDamageResult {
     pub final_damage: i64,
     /// Whether the skill hit
     pub hit: bool,
-    /// Message to show to the player
-    pub player_message: String,
-    /// Message to show to the room
-    pub room_message: String,
+}
+
+fn calculate_skill_result_with_rolls(
+    player: &Body,
+    skill: &Skill,
+    skill_level: i32,
+    mob_data: &RawMobData,
+    mob: &MobInstance,
+    attack_roll: i64,
+    damage_roll: i64,
+    critical_roll: i64,
+) -> (bool, i64) {
+    if mob.level - player.get_int("레벨") >= 400 {
+        return (false, 0);
+    }
+    let mastery_chance = match skill_level {
+        11 => 10.0,
+        12 => 20.0,
+        _ => 0.0,
+    };
+    let chance = skill.probability as f64 + skill_level as f64 * 4.0
+        - ((mob.level - player.get_int("레벨") + 90).div_euclid(3)) as f64
+        + player.get_hit() as f64 * 0.2
+        - mob_data.miss as f64 * 0.2
+        + mastery_chance;
+    if chance < attack_roll as f64 {
+        return (false, 0);
+    }
+
+    let c1 = player.get_str() * 2 + player.get_max_mp().div_euclid(5);
+    let c2 = player.attpower as i64 - player.get_mastery_diff();
+    let (_, equipment_armor) = mob_equipment_stats(mob_data);
+    let base = (c1 + c2 - (mob.arm + mob.arm_modifier).max(0) - equipment_armor).max(1);
+    let min_damage = base * 80 / 100;
+    let max_damage = base * 120 / 100;
+    let normal_damage = damage_roll.clamp(min_damage, max_damage).max(1);
+    let hit_rate = if skill.hit_rate <= 0.0 {
+        0.1
+    } else {
+        skill.hit_rate
+    };
+    let mut damage = (normal_damage as f64 + normal_damage as f64 * hit_rate) as i64;
+    let (critical_chance_bonus, mastery_damage) = match skill_level {
+        11 => (10.0, 1.3),
+        12 => (20.0, 1.5),
+        _ => (0.0, 1.0),
+    };
+    let critical_chance = player.get_critical_chance() as f64 * 0.2 + critical_chance_bonus;
+    let critical_multiplier = if critical_chance > critical_roll as f64 {
+        (player.get_critical() as f64 * 0.015).max(1.0)
+    } else {
+        1.0
+    };
+    damage = (damage as f64 * critical_multiplier * mastery_damage) as i64;
+    (true, damage.max(1))
+}
+
+pub fn calculate_skill_damage_against(
+    player: &Body,
+    skill: &Skill,
+    skill_level: i32,
+    mob_data: &RawMobData,
+    mob: &MobInstance,
+    _target_name: &str,
+) -> SkillDamageResult {
+    let c1 = player.get_str() * 2 + player.get_max_mp().div_euclid(5);
+    let c2 = player.attpower as i64 - player.get_mastery_diff();
+    let (_, equipment_armor) = mob_equipment_stats(mob_data);
+    let base = (c1 + c2 - (mob.arm + mob.arm_modifier).max(0) - equipment_armor).max(1);
+    let min_damage = base * 80 / 100;
+    let max_damage = base * 120 / 100;
+    let damage_roll = rand::thread_rng().gen_range(min_damage..=max_damage);
+    let (hit, final_damage) = calculate_skill_result_with_rolls(
+        player,
+        skill,
+        skill_level,
+        mob_data,
+        mob,
+        rand::thread_rng().gen_range(0..=100),
+        damage_roll,
+        rand::thread_rng().gen_range(0..=100),
+    );
+    SkillDamageResult {
+        base_damage: base,
+        final_damage,
+        hit,
+    }
 }
 
 /// Calculate skill-based damage
@@ -509,10 +616,10 @@ pub struct SkillDamageResult {
 /// - Random variation ±20%
 pub fn calculate_skill_damage(
     player: &Body,
-    skill_name: &str,
+    _skill_name: &str,
     skill_level: i32,
     skill_bonus: i64,
-    target_name: &str,
+    _target_name: &str,
 ) -> SkillDamageResult {
     // Get player's base attack stats
     let player_str = player.get_str();
@@ -534,17 +641,18 @@ pub fn calculate_skill_damage(
 
     // Python 숙련도 보너스 (11=초급 1.3x, 12=중급 1.5x, 13=상급 1.7x, etc.)
     let mastery_bonus = match skill_level {
-        11 => 1.3,   // 초급
-        12 => 1.5,   // 중급
-        13 => 1.7,   // 상급
-        14 => 2.0,   // 고급
-        15 => 2.5,   // 특급
+        11 => 1.3,       // 초급
+        12 => 1.5,       // 중급
+        13 => 1.7,       // 상급
+        14 => 2.0,       // 고급
+        15 => 2.5,       // 특급
         16..=100 => 3.0, // 절정 이상
         _ => 1.0,
     };
 
     // Calculate base damage
-    let base_damage = (base_attack as f64 * level_multiplier * skill_multiplier * mastery_bonus) as i64;
+    let base_damage =
+        (base_attack as f64 * level_multiplier * skill_multiplier * mastery_bonus) as i64;
 
     // Random variation ±20%
     let variation = rand::thread_rng().gen_range(-20..=20);
@@ -555,37 +663,10 @@ pub fn calculate_skill_damage(
     let hit_chance = 80 + (skill_level * 2);
     let hit = rand::thread_rng().gen_range(0..100) < hit_chance.min(95);
 
-    // Generate messages
-    let (player_message, room_message) = if hit {
-        let to_player = format!(
-            "{} 무공으로 {}에게 {}의 피해를 입혔습니다!",
-            skill_name, target_name, final_damage
-        );
-        let to_room = format!(
-            "{}이(가) {} 무공으로 {}에게 {}의 피해를 입혔습니다!",
-            player.get_name(),
-            skill_name,
-            target_name,
-            final_damage
-        );
-        (to_player, to_room)
-    } else {
-        let to_player = format!("{} 무공이 {}에게 빗나갔습니다!", skill_name, target_name);
-        let to_room = format!(
-            "{}이(가) {}에게 {} 무공을 시전했지만 빗나갔습니다!",
-            player.get_name(),
-            target_name,
-            skill_name
-        );
-        (to_player, to_room)
-    };
-
     SkillDamageResult {
         base_damage,
         final_damage,
         hit,
-        player_message,
-        room_message,
     }
 }
 
@@ -654,9 +735,16 @@ pub fn apply_skill_effects(
             amount: hp_change,
             duration: 0,
             message: if hp_bonus > 0 {
-                format!("{} 무공으로 체력이 {} 회복되었습니다.", skill_name, hp_change)
+                format!(
+                    "{} 무공으로 체력이 {} 회복되었습니다.",
+                    skill_name, hp_change
+                )
             } else {
-                format!("{} 무공의 부작용으로 체력이 {} 감소했습니다.", skill_name, hp_change.abs())
+                format!(
+                    "{} 무공의 부작용으로 체력이 {} 감소했습니다.",
+                    skill_name,
+                    hp_change.abs()
+                )
             },
         });
     }
@@ -682,9 +770,16 @@ pub fn apply_skill_effects(
             amount: mp_change,
             duration: 0,
             message: if mp_bonus > 0 {
-                format!("{} 무공으로 내공이 {} 회복되었습니다.", skill_name, mp_change)
+                format!(
+                    "{} 무공으로 내공이 {} 회복되었습니다.",
+                    skill_name, mp_change
+                )
             } else {
-                format!("{} 무공의 부작용으로 내공이 {} 감소했습니다.", skill_name, mp_change.abs())
+                format!(
+                    "{} 무공의 부작용으로 내공이 {} 감소했습니다.",
+                    skill_name,
+                    mp_change.abs()
+                )
             },
         });
     }
@@ -726,6 +821,101 @@ pub fn apply_skill_effects(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn every_player_attack_attempt_trains_python_stat_and_weapon_mastery() {
+        let mut player = Body::new();
+        player.set("힘", 11_i64);
+        player.set("힘경험치", 19_i64);
+        player.set("민첩성", 0_i64);
+        player.set("민첩성경험치", 31_i64);
+        player.set("1 숙련도", 0_i64);
+        player.set("1 숙련도경험치", 33_i64);
+
+        let mut hit_round = CombatRound::new();
+        apply_player_attack_training(&mut player, true, &mut hit_round);
+        assert_eq!(player.get_int("힘"), 12);
+        assert_eq!(player.get_int("힘경험치"), 0);
+        assert_eq!(player.get_int("1 숙련도"), 0);
+        assert!(hit_round
+            .presentation_events
+            .iter()
+            .any(|event| event["kind"] == "strength_up"));
+
+        let mut miss_round = CombatRound::new();
+        apply_player_attack_training(&mut player, false, &mut miss_round);
+        assert_eq!(player.get_int("민첩성"), 1);
+        assert_eq!(player.get_int("민첩성경험치"), 0);
+        assert_eq!(player.get_int("1 숙련도"), 1);
+        assert_eq!(player.get_int("1 숙련도경험치"), 0);
+        assert!(miss_round
+            .presentation_events
+            .iter()
+            .any(|event| event["kind"] == "dexterity_up"));
+        assert!(miss_round
+            .presentation_events
+            .iter()
+            .any(|event| event["kind"] == "mastery_up"));
+    }
+
+    #[test]
+    fn mob_skill_damage_uses_runtime_strength_and_python_critical_fields() {
+        let mut data = RawMobData::new();
+        data.strength = 1;
+        data.luck = 1_000;
+        data.critical = 200;
+        let mut mob = MobInstance::new("시험:무공몹".to_string(), "시험".to_string(), "1", &data);
+        mob.strength = 100;
+        let player = Body::new();
+        let skill = crate::world::skill::Skill::from_json(
+            "시험무공".to_string(),
+            &serde_json::json!({ "타격률": 0 }),
+        )
+        .unwrap();
+
+        let damage = calculate_mob_skill_damage(&mob, &data, &player, &skill, 100);
+        // Runtime strength 100 gives at least 160 before 10% amplification,
+        // and luck 1000 guarantees the 200 * 0.015 == 3x critical.
+        assert!(damage >= 528, "runtime/critical damage was {damage}");
+    }
+
+    #[test]
+    fn attack_chance_matches_python_fraction_and_uses_miss_not_agility() {
+        let mut player = Body::new();
+        player.set("레벨", 10_i64);
+        player.set("명중", 3_i64);
+
+        let mut mob = RawMobData::new();
+        mob.level = 10;
+        mob.agility = 9_999; // getMiss() is the separate 회피 attribute.
+        mob.miss = 1;
+
+        // 100 - ((10 - 10 + 90) // 3) + 3*0.2 - 1*0.2
+        assert_eq!(calculate_attack_chance(&player, &mob), 70.4);
+    }
+
+    #[test]
+    fn attack_chance_keeps_python_flooring_for_negative_level_term() {
+        let mut player = Body::new();
+        player.set("레벨", 101_i64);
+        let mut mob = RawMobData::new();
+        mob.level = 10;
+        mob.miss = 0;
+
+        // Python: ((10 - 101 + 90) // 3) == -1.
+        assert_eq!(calculate_attack_chance(&player, &mob), 101.0);
+    }
+
+    #[test]
+    fn attack_chance_rejects_python_max_hunting_level_boundary() {
+        let mut player = Body::new();
+        player.set("레벨", 100_i64);
+        player.set("명중", 99_999_i64);
+        let mut mob = RawMobData::new();
+        mob.level = 500;
+
+        assert_eq!(calculate_attack_chance(&player, &mob), -1.0);
+    }
 
     #[test]
     fn test_calculate_player_damage() {
@@ -773,28 +963,63 @@ mod tests {
         mob_data.strength = 40; // 힘
         mob_data.inner_power = 20; // 내공 (attack power contribution)
 
-        // 공식: (40*2 + 40) - (10 + 40) = 80 + 40 - 50 = 70
-        // ±20%: 56 ~ 84
+        // Python의 무장하지 않은 몹 attpower는 0이다:
+        // (40*2 + 0) - (10 + 40) = 30, 범위 24..=36.
         let damage = calculate_mob_damage(&mob_data, &player);
-        assert!(damage > 0);
-        assert!((50..=100).contains(&damage));
+        assert!((24..=36).contains(&damage));
+    }
+
+    #[test]
+    fn mob_use_items_supply_python_attack_and_armor_totals() {
+        let mut mob = RawMobData::new();
+        mob.use_items.push(("160-5".to_string(), 1, 1, 1));
+        // Python Mob.init ignores count/probability here and equips every
+        // configured 사용아이템 once.  160-5 has 공격력 1000, 방어력 0.
+        assert_eq!(mob_equipment_stats(&mob), (1000, 0));
+    }
+
+    #[test]
+    fn skill_damage_uses_python_target_defense_hit_rate_and_mastery_bonus() {
+        let mut player = Body::new();
+        player.set("레벨", 10_i64);
+        player.set("힘", 50_i64);
+        player.set("최고내공", 100_i64);
+        player.set("명중", 0_i64);
+        player.set("운", 0_i64);
+        player.set("필살", 0_i64);
+        player.attpower = 20;
+        let mut data = RawMobData::new();
+        data.name = "표적".to_string();
+        data.level = 10;
+        data.arm = 50;
+        data.miss = 0;
+        let mob = MobInstance::new("시험:표적".to_string(), "시험".to_string(), "1", &data);
+        let mut skill = Skill::from_json(
+            "시험무공".to_string(),
+            &serde_json::json!({
+                "확률": 100,
+                "타격률": 0.5,
+                "공격": "1 공격 시험"
+            }),
+        )
+        .unwrap();
+        skill.probability = 100;
+
+        // Normal roll 90; 90 + 50% = 135; level-11 mastery => 175.5 -> 175.
+        assert_eq!(
+            calculate_skill_result_with_rolls(&player, &skill, 11, &data, &mob, 100, 90, 100),
+            (true, 175)
+        );
     }
 
     #[test]
     fn test_calculate_exp_reward() {
-        let mut mob_data = RawMobData::new();
-        mob_data.level = 10;
-
-        // Same level
-        let exp = calculate_exp_reward(&mob_data, 10);
-        assert_eq!(exp, 100);
-
-        // Much higher level player
-        let exp_low = calculate_exp_reward(&mob_data, 25);
-        assert!(exp_low < exp);
-
-        // Lower level player
-        let exp_high = calculate_exp_reward(&mob_data, 3);
-        assert!(exp_high > exp);
+        // Python: a=((10*10)//3)+30 == 63.
+        assert_eq!(base_exp_reward(10, 10), 63);
+        assert_eq!(base_exp_reward(10, 25), 53);
+        assert_eq!(base_exp_reward(10, 3), 67);
+        for _ in 0..100 {
+            assert!((54..=72).contains(&calculate_exp_reward_for_level(10, 10)));
+        }
     }
 }

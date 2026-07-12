@@ -4,11 +4,13 @@
 //! game entities with stats, combat, skills, and network connectivity.
 
 pub mod body;
+#[allow(clippy::module_inception)]
 pub mod player;
 
 pub use body::{ActState, ActiveSkill, Body, MemoRecord, SendLine, SkillLevel, SkillTraining};
 pub use player::{
-    Channel, Party, Player, CFG_OPTIONS, STATE_ACTIVE, STATE_DOUMI, STATE_INACTIVE, STATE_NOTICE,
+    decode_alias_entries, encode_alias_entries, Channel, Player, ALIAS_LIST_ATTR, CFG_OPTIONS,
+    STATE_ACTIVE, STATE_DOUMI, STATE_INACTIVE, STATE_NOTICE,
 };
 
 /// Configuration constants for game mechanics

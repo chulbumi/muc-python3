@@ -5,6 +5,7 @@
 pub mod broadcaster;
 pub mod client;
 pub mod server;
+pub(crate) mod social;
 
 pub use broadcaster::Broadcaster;
 pub use client::{Client, ClientState};
@@ -42,18 +43,8 @@ impl DelimiterCodec {
 
     /// Feed data into the codec and return any complete lines found
     pub fn feed_data(&mut self, data: &[u8]) -> Result<Vec<String>, io::Error> {
-        // 한 줄이 max_length를 넘으면: 버퍼를 비우고 Err. (끊긴 데이터가 다음 명령에 섞이는 것 방지)
-        if self.buffer.len() + data.len() > self.max_length {
-            self.buffer.clear();
-            return Err(io::Error::new(
-                io::ErrorKind::InvalidData,
-                format!(
-                    "한 줄이 {}바이트를 넘습니다. (붙여넣기 시 일부만 넣어 주세요.)",
-                    self.max_length
-                ),
-            ));
-        }
-
+        // A single TCP read may contain many complete commands.  Limit the
+        // length of each logical line, not the size of the read itself.
         self.buffer.extend_from_slice(data);
         self.extract_lines()
     }
@@ -63,7 +54,7 @@ impl DelimiterCodec {
         let mut lines = Vec::new();
 
         // Delimiters: \r\n and \r\000
-        let delimiters: &[&[u8]] = &[b"\r\n", b"\r\000"];
+        let delimiters: &[&[u8]] = &[b"\r\n", b"\r\x00"];
 
         loop {
             let mut found_delim = None;
@@ -79,6 +70,16 @@ impl DelimiterCodec {
 
             match found_delim {
                 Some(pos) => {
+                    if pos > self.max_length {
+                        self.buffer.clear();
+                        return Err(io::Error::new(
+                            io::ErrorKind::InvalidData,
+                            format!(
+                                "한 줄이 {}바이트를 넘습니다. (붙여넣기 시 일부만 넣어 주세요.)",
+                                self.max_length
+                            ),
+                        ));
+                    }
                     let line_data = self.buffer.split_to(pos + delim_len);
                     let line_bytes = &line_data[..pos];
 
@@ -132,7 +133,7 @@ mod tests {
         assert_eq!(lines, vec!["hello"]);
 
         // Test \r\000 delimiter
-        let lines = codec.feed_data(b"world\r\000").unwrap();
+        let lines = codec.feed_data(b"world\r\x00").unwrap();
         assert_eq!(lines, vec!["world"]);
     }
 
@@ -147,5 +148,17 @@ mod tests {
         // Feed rest of data
         let lines = codec.feed_data(b"lo\r\n").unwrap();
         assert_eq!(lines, vec!["hello"]);
+    }
+
+    #[test]
+    fn test_large_tcp_read_containing_many_commands() {
+        let mut codec = DelimiterCodec::new();
+        let data = (0..200)
+            .map(|i| format!("명령{}\r\n", i))
+            .collect::<String>();
+        let lines = codec.feed_data(data.as_bytes()).unwrap();
+        assert_eq!(lines.len(), 200);
+        assert_eq!(lines.first().unwrap(), "명령0");
+        assert_eq!(lines.last().unwrap(), "명령199");
     }
 }

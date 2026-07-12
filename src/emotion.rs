@@ -141,7 +141,7 @@ pub fn do_emotion(
         }
         None => None,
     };
-    let u_ref = u_owned.as_ref().map(|s| s.as_str());
+    let u_ref = u_owned.as_deref();
 
     if param.is_empty() {
         let (buf1, _buf2, buf3) = make_script(&kd[0], &i, None, param);

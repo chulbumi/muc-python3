@@ -2,7 +2,11 @@
 // Python: cmds/방설명.py
 
 fn cmd(ob, line) {
-    send_line(ob, "☞ 방 설명 설정 기능은 현재 구현 중입니다.");
+    if !require_admin(ob, 1000) {
+        send_line(ob, "☞ 무슨 말인지 모르겠어요. *^_^");
+        return;
+    }
+    begin_room_description(ob, "방 설명 작성을 마치시려면 '.' 를 입력하세요.\r\n:");
 }
 
 fn main(ob, line) {

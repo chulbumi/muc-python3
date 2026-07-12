@@ -4,7 +4,9 @@ fn main(ob, line) {
     if line.trim() == "" {
         let r = view_map_data(ob);
         if r["ok"] {
-            send_line(ob, r["text"]);
+            for row in split(r["text"], "\r\n") {
+                send_line(ob, row);
+            }
         } else {
             if r["err"] == "no_position" {
                 send_line(ob, "\x1b[1;31m위치 정보가 없습니다.\x1b[0;37m");

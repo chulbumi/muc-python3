@@ -1,45 +1,58 @@
-// 무리말.rhai - 무리/파티 채팅
-// Python: cmds/무리말.py
+// Python: cmds/무리말.py and Player.sendToParty
+
+fn party_prompt(person) {
+    if !person["show_prompt"] {
+        return "";
+    }
+    "\r\n\x1b[0;37;40m[ " + int_to_str(person["hp"]) + "/"
+        + int_to_str(person["max_hp"]) + ", " + int_to_str(person["mp"]) + "/"
+        + int_to_str(person["max_mp"]) + " ] "
+}
 
 fn cmd(ob, line) {
-    if is_empty(line) {
+    if length(line) == 0 {
         send_line(ob, "☞ 사용법: [내용] 무리말(;)");
         return;
     }
-
-    // 메시지 길이 제한
-    if len(line) > 160 {
+    if length(line) > 160 {
         send_line(ob, "☞ 너무 길어요. ^^");
         return;
     }
 
-    // TODO: noComm() 확인 - 현재 방에서 통신 가능한지
-    // 이 기능을 위한 별도 efun 필요
+    let position = get_my_position(ob);
+    if position["zone"] == "" {
+        return;
+    }
+    if has_room_property(position["zone"], position["room"], "모든통신금지") {
+        send_line(ob, "☞ 이지역에서는 어떠한 통신도 불가능합니다.");
+        return;
+    }
 
-    // 파티 소속 확인
-    let my_party = get_string(ob, "소속파티");
-    if my_party == "" {
+    let context = get_party_context();
+    let actor = context["self"];
+    let leader = context["party_leader"];
+    if leader["id"] == "" {
         send_line(ob, "☞ 당신이 속한 무리가 없어요. ^^");
         return;
     }
 
-    let my_name = get_string(ob, "이름");
-
-    // 파티장 여부에 따라 다른 프리픽스
-    let prefix;
-    if my_party == my_name {
-        prefix = "\x1b[1m\x1b[40m\x1b[32m◀\x1b[0m\x1b[40m\x1b[37m" + my_name + "\x1b[1m\x1b[40m\x1b[32m▶\x1b[0m\x1b[40m\x1b[37m ";
+    let message = "";
+    if leader["id"] == actor["id"] {
+        message = "\x1b[1m\x1b[40m\x1b[32m◀\x1b[0m\x1b[40m\x1b[37m"
+            + actor["name"] + "\x1b[1m\x1b[40m\x1b[32m▶\x1b[0m\x1b[40m\x1b[37m " + line;
+        send_line(ob, message);
     } else {
-        prefix = "\x1b[1m\x1b[40m\x1b[32m◁\x1b[0m\x1b[40m\x1b[37m" + my_name + "\x1b[1m\x1b[40m\x1b[32m▷\x1b[0m\x1b[40m\x1b[37m ";
+        message = "\x1b[1m\x1b[40m\x1b[32m◁\x1b[0m\x1b[40m\x1b[37m"
+            + actor["name"] + "\x1b[1m\x1b[40m\x1b[32m▷\x1b[0m\x1b[40m\x1b[37m " + line;
+        party_send_raw(ob, leader["id"], "\r\n" + message + "\r\n" + party_prompt(leader));
     }
 
-    let msg = prefix + line;
-
-    // 파티 메시지 전송
-    if send_party_message(ob, msg) {
-        // 성공 - send_party_message가 모든 파티 멤버에게 전송함
-    } else {
-        send_line(ob, "☞ 무리 메시지 전송에 실패했습니다.");
+    for member in context["party_members"] {
+        if member["id"] == actor["id"] {
+            send_line(ob, message);
+        } else {
+            party_send_raw(ob, member["id"], "\r\n" + message + "\r\n" + party_prompt(member));
+        }
     }
 }
 

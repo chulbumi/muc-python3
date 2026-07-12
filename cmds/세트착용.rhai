@@ -2,13 +2,16 @@
 // Python: cmds/세트착용.py
 
 fn cmd(ob, line) {
-    if line == "" || is_empty(line) {
-        send_line(ob, "☞ 명령: 세트착용 [세트이름]");
-        send_line(ob, "   (저장해둔 장비 세트를 한번에 착용)");
+    let set_name = get_string(ob, "세트기억");
+    if set_name == "" {
+        send_line(ob, "☞ 사용법: [세트기억] 후 [세트착용]");
         return;
     }
-    send_line(ob, "☞ 장비 세트 착용 기능은 현재 구현 중입니다.");
-    send_line(ob, "   (세트이름: '" + line + "')");
+    let count = 0;
+    for item_name in get_saved_set_items(ob, set_name) {
+        if item_equip(ob, item_name, 0) == "" { count += 1; }
+    }
+    if count == 0 { send_line(ob, "☞ 더이상 착용할 장비가 없어요."); }
 }
 
 fn main(ob, line) {

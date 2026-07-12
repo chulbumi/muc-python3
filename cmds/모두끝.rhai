@@ -4,11 +4,16 @@
 fn cmd(ob, line) {
     let admin_level = get_int(ob, "관리자등급");
     if admin_level < 2000 {
-        send_line(ob, "☞ 관리자만 사용할 수 있어요.");
+        send_line(ob, "☞ 무슨 말인지 모르겠어요. *^_^*");
         return;
     }
-    send_line(ob, "☞ 모든 플레이어를 종료시키는 기능은 현재 구현 중입니다.");
-    send_line(ob, "   (Client.players 접근 및 do_command 호출 필요)");
+    let self_name = get_attr(ob, "이름");
+    for player in get_all_online_players() {
+        let target = player["이름"];
+        if target != self_name {
+            admin_force_command(ob, target, "끝");
+        }
+    }
 }
 
 fn main(ob, line) {

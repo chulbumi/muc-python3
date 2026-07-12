@@ -18,8 +18,8 @@ fn main() {
     println!("Testing is_han function:");
     println!("{:<20} | expected | actual | match?", "=".repeat(60));
     println!(
-        "{:<20} | {:>8} | {:>6} | {}",
-        "input", "expected", "actual", "result"
+        "{:<20} | {:>8} | {:>6} | result",
+        "input", "expected", "actual"
     );
 
     for (input, expected) in test_cases {

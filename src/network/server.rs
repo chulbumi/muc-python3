@@ -2,6 +2,8 @@
 //!
 //! Provides an asynchronous TCP server using tokio for handling multiple client connections.
 
+#![allow(clippy::type_complexity)]
+
 use std::sync::Arc;
 use std::sync::Mutex;
 use tokio::net::TcpListener;

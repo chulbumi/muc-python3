@@ -38,6 +38,27 @@ pub fn get_skill_defense_head(skill_name: &str) -> String {
         .unwrap_or_default()
 }
 
+/// Reload the defense-prefix projection of `skill.json` after `MUGONG.load()`.
+pub fn reload_skill_defense_head_cache() -> Result<(), String> {
+    let source =
+        std::fs::read_to_string("data/config/skill.json").map_err(|error| error.to_string())?;
+    let root = serde_json::from_str::<JsonValue>(&source).map_err(|error| error.to_string())?;
+    let skills = root.as_object().ok_or_else(|| "skill.json".to_string())?;
+    let updated = skills
+        .iter()
+        .filter_map(|(name, skill)| {
+            skill
+                .get("방어상태머리말")
+                .and_then(JsonValue::as_str)
+                .map(|head| (name.clone(), head.to_string()))
+        })
+        .collect();
+    *SKILL_DEFENSE_HEAD_CACHE
+        .write()
+        .map_err(|error| error.to_string())? = updated;
+    Ok(())
+}
+
 /// 글로벌 데이터 캐시
 ///
 /// data/config/*.json 파일들의 데이터를 저장합니다.

@@ -5,12 +5,13 @@
 fn cmd(ob, line) {
     let admin_level = get_int(ob, "관리자등급");
     if admin_level < 1000 {
-        send_line(ob, "☞ 무슨 말인지 모르겠어요. *^^*");
+        send_line(ob, "☞ 무슨 말인지 모르겠어요. *^_^*");
         return;
     }
 
     // MUGONG 데이터의 모든 키 가져오기
-    let keys = get_global_keys("MUGONG");
+    // GlobalData stores data/config/skill.json under the file stem `skill`.
+    let keys = get_global_keys("skill");
     if len(keys) == 0 {
         send_line(ob, "☞ 무공 데이터가 없습니다.");
         return;

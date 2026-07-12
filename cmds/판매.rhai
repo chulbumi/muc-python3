@@ -2,7 +2,7 @@
 // 상인(물건구입)이 있는 방에서 [이름] [수량] 판매
 
 fn cmd(ob, line) {
-    if !require_arg(ob, line) { send_line(ob, "☞ 사용법: [아이템 이름] [수량] 판매"); return; }
+    if !require_arg(ob, line) { send_line(ob, "☞ 사용법: [물품이름] [수량] 판매"); return; }
     let args = line_args(line);
     let parsed = parse_order_name(args[0]);
     let order = parsed[0];
@@ -13,6 +13,19 @@ fn cmd(ob, line) {
     let percent = get_merchant_buy_percent(ob);
     if percent <= 0 {
         send_line(ob, "☞ 그런 물건을 살 상인이 없어요. ^_^");
+        return;
+    }
+
+    if trim(line) == "모두" {
+        let sold = item_sell_all(ob, percent);
+        if sold.len() == 0 {
+            send_line(ob, "☞ 그런 아이템이 소지품에 없어요.");
+            return;
+        }
+        for item in sold {
+            send_line(ob, "당신이 " + item["name"] + " 1개를 은전 "
+                + item["price"].to_string() + "개에 판매합니다.");
+        }
         return;
     }
 

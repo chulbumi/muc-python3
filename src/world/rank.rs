@@ -18,10 +18,23 @@ pub struct Rank {
     pub attr: HashMap<String, Vec<(i64, String)>>,
 }
 
+impl Default for Rank {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
 impl Rank {
     pub fn new() -> Self {
         Self {
             path: PathBuf::from(DEFAULT_PATH),
+            attr: HashMap::new(),
+        }
+    }
+
+    pub fn with_path(path: impl Into<PathBuf>) -> Self {
+        Self {
+            path: path.into(),
             attr: HashMap::new(),
         }
     }
@@ -63,7 +76,8 @@ impl Rank {
             arr.insert(0, (0, name.to_string()));
         } else {
             arr.push((value, name.to_string()));
-            arr.sort_by(|a, b| b.0.cmp(&a.0));
+            // Python `rank.sort(reverse=True)`는 (value, name) 튜플 전체를 내림차순 정렬한다.
+            arr.sort_by(|a, b| b.0.cmp(&a.0).then_with(|| b.1.cmp(&a.1)));
         }
         if arr.len() > 200 {
             arr.truncate(200);
@@ -115,8 +129,8 @@ impl Rank {
     pub fn clear(&mut self, ty: &str) -> bool {
         if ty.is_empty() {
             self.attr.clear();
-        } else if self.attr.remove(ty).is_some() {
-            // removed
+        } else if let Some(entries) = self.attr.get_mut(ty) {
+            entries.clear();
         } else {
             return false;
         }
@@ -156,4 +170,49 @@ pub fn rank_get_all(ty: &str) -> String {
 
 pub fn rank_clear(ty: &str) -> bool {
     get_rank().write().unwrap().clear(ty)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use std::time::{SystemTime, UNIX_EPOCH};
+
+    fn test_path() -> PathBuf {
+        let nonce = SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .unwrap()
+            .as_nanos();
+        std::env::temp_dir().join(format!("muc_rank_{}_{}.json", std::process::id(), nonce))
+    }
+
+    #[test]
+    fn clear_keeps_named_rank_like_python() {
+        let path = test_path();
+        let mut rank = Rank::with_path(&path);
+        rank.attr.insert(
+            "경험".to_string(),
+            vec![(10, "가".to_string()), (5, "나".to_string())],
+        );
+
+        assert!(rank.clear("경험"));
+        assert_eq!(rank.attr.get("경험"), Some(&Vec::new()));
+
+        let mut loaded = Rank::with_path(&path);
+        loaded.load();
+        assert_eq!(loaded.attr.get("경험"), Some(&Vec::new()));
+        let _ = std::fs::remove_file(path);
+    }
+
+    #[test]
+    fn equal_values_sort_by_name_descending_like_python_tuples() {
+        let path = test_path();
+        let mut rank = Rank::with_path(&path);
+        rank.write_rank("경험", "가", 10, 1);
+        rank.write_rank("경험", "나", 10, 1);
+        assert_eq!(
+            rank.attr.get("경험").unwrap(),
+            &vec![(10, "나".to_string()), (10, "가".to_string())]
+        );
+        let _ = std::fs::remove_file(path);
+    }
 }

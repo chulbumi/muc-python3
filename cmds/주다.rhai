@@ -2,8 +2,13 @@
 // Python: cmds/줘.py. request_give_silver, request_give_gold, request_give_item → GiveToPlayer
 
 fn cmd(ob, line) {
-    if !require_arg(ob, line) { send_line(ob, "☞ 사용법: [대상] [물품] [개수] 주다"); return; }
     let args = line_args(line);
+
+    if len(args) < 2 {
+        send_line(ob, "☞ 사용법: [대상] [물품] [개수] 주다");
+        return;
+    }
+
     let target = args[0];
     let thing = args[1];
     let cnt = if len(args) >= 3 { to_int(args[2]) } else { 1 };
@@ -34,6 +39,7 @@ fn cmd(ob, line) {
     let arr = parse_name_order(thing);
     let iname = arr[0];
     let iord = arr[1];
+
     if length(iname) == 0 {
         send_line(ob, "☞ 사용법: [대상] [물품] [개수] 주다");
         return;

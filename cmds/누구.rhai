@@ -37,7 +37,7 @@ fn cmd(ob, line) {
             }
         }
         let name = c["이름"];
-        line_buf = line_buf + "  " + fill_space(12, buf) + fill_space(10, name);
+        line_buf = line_buf + "  " + fill_space(12, buf) + " " + fill_space(10, name);
         cnt = cnt + 1;
         if cnt % 3 == 0 {
             lines.push(line_buf);
@@ -49,7 +49,7 @@ fn cmd(ob, line) {
     }
     let msg = join(lines, "\r\n");
     send_line(ob, "┌─────────────────────────────────────┐");
-    send_line(ob, "│\x1b[7m ◁     무       림       크       래       프       트      １-１      ▷ \x1b[0;37m│");
+    send_line(ob, "│\x1b[7m ◁     무       림       크       래       프       트      １-１      ▷\x1b[0;37m│");
     send_line(ob, "└─────────────────────────────────────┘");
     send_line(ob, msg);
     send_line(ob, " ──────────────────────────────────────");
@@ -59,6 +59,7 @@ fn cmd(ob, line) {
     } else {
         send_line(ob, " ★ 총 " + cnt_s + "명의 무림인이 활동하고 있습니다.");
     }
+    send_line(ob, "");
 }
 
 fn main(ob, line) {

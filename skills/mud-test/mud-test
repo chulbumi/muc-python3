@@ -2,14 +2,14 @@
 # MUD Test Skill - Bash Wrapper
 # This script provides a convenient interface to the MUD test functionality
 
-SCRIPT_DIR="/home/ubuntu/muc-python3/skills/mud-test"
-PROJECT_DIR="/home/ubuntu/muc-python3"
+SCRIPT_DIR="$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd)"
+PROJECT_DIR="$(cd -- "$SCRIPT_DIR/../.." && pwd)"
 
 # Default values
 PY_PORT=9900
 RUST_PORT=9999
 HOST="localhost"
-VERBOSE=""
+VERBOSE=0
 REPORT_FILE="$PROJECT_DIR/test_results.md"
 
 # Use socket-based test for Python server
@@ -39,7 +39,8 @@ show_help() {
 ║  Options:                                                        ║
 ║    -p, --py-port=N    Python server port (default: 9900)        ║
 ║    -r, --rust-port=N  Rust server port (default: 9999)         ║
-║    -h, --host=HOST    Server host (default: localhost)         ║
+║    --host=HOST        Server host (default: localhost)         ║
+║    -h, --help         Show this help message                   ║
 ║    -v, --verbose      Enable verbose output                    ║
 ║    -o, --report=FILE  Custom report file path                  ║
 ║                                                                  ║
@@ -54,11 +55,18 @@ show_help() {
 EOF
 }
 
+# Report an invalid invocation without silently falling back to defaults.
+usage_error() {
+    echo "Error: $1" >&2
+    echo "Run '$0 help' for usage." >&2
+    exit 2
+}
+
 # Parse arguments
 COMMAND="all"
 while [[ $# -gt 0 ]]; do
     case $1 in
-        help|--help|-help)
+        help|--help|-help|-h)
             show_help
             exit 0
             ;;
@@ -67,31 +75,61 @@ while [[ $# -gt 0 ]]; do
             shift
             ;;
         -p|--py-port)
+            [[ $# -ge 2 && -n "$2" ]] || usage_error "$1 requires a port"
             PY_PORT="$2"
             shift 2
             ;;
+        --py-port=*)
+            PY_PORT="${1#*=}"
+            [[ -n "$PY_PORT" ]] || usage_error "--py-port requires a port"
+            shift
+            ;;
         -r|--rust-port)
+            [[ $# -ge 2 && -n "$2" ]] || usage_error "$1 requires a port"
             RUST_PORT="$2"
             shift 2
             ;;
+        --rust-port=*)
+            RUST_PORT="${1#*=}"
+            [[ -n "$RUST_PORT" ]] || usage_error "--rust-port requires a port"
+            shift
+            ;;
         --host)
+            [[ $# -ge 2 && -n "$2" ]] || usage_error "$1 requires a host"
             HOST="$2"
             shift 2
             ;;
+        --host=*)
+            HOST="${1#*=}"
+            [[ -n "$HOST" ]] || usage_error "--host requires a host"
+            shift
+            ;;
         -v|--verbose)
-            VERBOSE="--verbose"
+            VERBOSE=1
             shift
             ;;
         -o|--report)
+            [[ $# -ge 2 && -n "$2" ]] || usage_error "$1 requires a file path"
             REPORT_FILE="$2"
             shift 2
             ;;
-        *)
-            # Unknown option, skip it
+        --report=*)
+            REPORT_FILE="${1#*=}"
+            [[ -n "$REPORT_FILE" ]] || usage_error "--report requires a file path"
             shift
+            ;;
+        *)
+            usage_error "unknown argument: $1"
             ;;
     esac
 done
+
+if ! [[ "$PY_PORT" =~ ^[0-9]+$ ]] || (( 10#$PY_PORT < 1 || 10#$PY_PORT > 65535 )); then
+    usage_error "invalid Python server port: $PY_PORT"
+fi
+if ! [[ "$RUST_PORT" =~ ^[0-9]+$ ]] || (( 10#$RUST_PORT < 1 || 10#$RUST_PORT > 65535 )); then
+    usage_error "invalid Rust server port: $RUST_PORT"
+fi
 
 # Show help if requested
 if [[ "$COMMAND" == "help" ]]; then
@@ -110,14 +148,22 @@ if [[ "$COMMAND" == "quick" || "$COMMAND" == "basic" || "$COMMAND" == "all" ]]; 
 
     # Test Python server with socket-based test
     echo "Testing Python server..."
-    python3 "$SOCKET_PYTHON" --host "$HOST" --port "$PY_PORT" --name 테스터 ${VERBOSE}
+    SOCKET_ARGS=(--host "$HOST" --port "$PY_PORT" --name 테스터)
+    if [[ $VERBOSE -eq 1 ]]; then
+        SOCKET_ARGS+=(--verbose)
+    fi
+    python3 "$SOCKET_PYTHON" "${SOCKET_ARGS[@]}"
     PY_STATUS=$?
 
     echo ""
     echo "Testing Rust server..."
     # Rust server uses original test script
     PYTHON_SCRIPT="$SCRIPT_DIR/mud-test.py"
-    python3 $PYTHON_SCRIPT $COMMAND --py-port=$PY_PORT --rust-port=$RUST_PORT --host=$HOST --report=$REPORT_FILE $VERBOSE
+    RUNNER_ARGS=("$COMMAND" "--py-port=$PY_PORT" "--rust-port=$RUST_PORT" "--host=$HOST" "--report=$REPORT_FILE")
+    if [[ $VERBOSE -eq 1 ]]; then
+        RUNNER_ARGS+=(--verbose)
+    fi
+    python3 "$PYTHON_SCRIPT" "${RUNNER_ARGS[@]}"
     RUST_STATUS=$?
 
     # Combine results
@@ -133,6 +179,10 @@ else
     # Other commands use original script
     PYTHON_SCRIPT="$SCRIPT_DIR/mud-test.py"
     cd "$PROJECT_DIR" || exit 1
-    python3 $PYTHON_SCRIPT $COMMAND --py-port=$PY_PORT --rust-port=$RUST_PORT --host=$HOST --report=$REPORT_FILE $VERBOSE
+    RUNNER_ARGS=("$COMMAND" "--py-port=$PY_PORT" "--rust-port=$RUST_PORT" "--host=$HOST" "--report=$REPORT_FILE")
+    if [[ $VERBOSE -eq 1 ]]; then
+        RUNNER_ARGS+=(--verbose)
+    fi
+    python3 "$PYTHON_SCRIPT" "${RUNNER_ARGS[@]}"
     exit $?
 fi

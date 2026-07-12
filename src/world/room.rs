@@ -136,6 +136,8 @@ pub struct RawRoomData {
     pub exits: Vec<String>,
     /// Mob IDs in this room (몹) — 방 입장 시에만 해당 몹 로드
     pub mob_ids: Vec<String>,
+    /// Python `설치리스트` entries. Room.create inserts their Boxes before mobs.
+    pub installed_box_count: usize,
 }
 
 /// Room structure representing a game room
@@ -161,6 +163,10 @@ pub struct Room {
     pub mob_ids: Vec<String>,
     /// Items in this room
     pub items: Vec<String>,
+    /// Count of installation-list Boxes in Python insertion order.
+    pub installed_box_count: usize,
+    /// Last Python-compatible `Room.update()` time in Unix milliseconds.
+    pub last_update_millis: i64,
     /// Level restriction (lower bound)
     pub level_limit: i64,
     /// Level restriction (upper bound)
@@ -185,6 +191,8 @@ impl Room {
             npcs: Vec::new(),
             mob_ids: Vec::new(),
             items: Vec::new(),
+            installed_box_count: 0,
+            last_update_millis: 0,
             level_limit: 0,
             level_upper: 0,
             safe_zone: false,
@@ -280,6 +288,8 @@ impl Room {
 pub struct RoomCache {
     /// Cached rooms indexed by zone:name
     rooms: HashMap<String, Arc<RwLock<Room>>>,
+    /// Successful (zone, room) load order, matching Python's ordered `Room.Zones` dictionaries.
+    loaded_rooms: Vec<(String, String)>,
     /// Data directory path
     data_dir: PathBuf,
 }
@@ -289,6 +299,7 @@ impl RoomCache {
     pub fn new() -> Self {
         Self {
             rooms: HashMap::new(),
+            loaded_rooms: Vec::new(),
             data_dir: PathBuf::from("data/map"),
         }
     }
@@ -297,6 +308,7 @@ impl RoomCache {
     pub fn with_data_dir<P: AsRef<Path>>(data_dir: P) -> Self {
         Self {
             rooms: HashMap::new(),
+            loaded_rooms: Vec::new(),
             data_dir: PathBuf::from(data_dir.as_ref()),
         }
     }
@@ -305,7 +317,6 @@ impl RoomCache {
     pub fn get_room(&mut self, zone: &str, name: &str) -> Result<Arc<RwLock<Room>>, RoomError> {
         // Check if zone has a difficulty suffix (e.g., "낙양성1" -> difficulty 1)
         let difficulty = difficulty_from_zone(zone);
-        let base_zone = base_zone_name(zone);
 
         // If zone has difficulty suffix, use difficulty-aware loading
         if difficulty > 0 {
@@ -322,6 +333,7 @@ impl RoomCache {
         // Load the room
         let room = self.load_room(zone, name)?;
         let room_arc = Arc::new(RwLock::new(room));
+        self.loaded_rooms.push((zone.to_string(), name.to_string()));
         self.rooms.insert(key, room_arc.clone());
         Ok(room_arc)
     }
@@ -336,6 +348,17 @@ impl RoomCache {
         }
         let key = format!("{}:{}", zone, name);
         self.rooms.get(&key).cloned()
+    }
+
+    /// Remove a loaded room from the runtime Room.Zones registry; its JSON
+    /// source remains on disk, matching Python's in-memory deletion.
+    pub fn remove_room(&mut self, zone: &str, name: &str) -> bool {
+        let key = format!("{}:{}", zone, name);
+        let removed = self.rooms.remove(&key).is_some();
+        if removed {
+            self.loaded_rooms.retain(|(z, r)| z != zone || r != name);
+        }
+        removed
     }
 
     /// Get a room with difficulty support
@@ -381,8 +404,46 @@ impl RoomCache {
         }
 
         let room_arc = Arc::new(RwLock::new(room));
+        let loaded_zone = if effective_difficulty > 0 {
+            format!("{}{}", base_zone, effective_difficulty)
+        } else {
+            zone.to_string()
+        };
+        self.loaded_rooms.push((loaded_zone, name.to_string()));
         self.rooms.insert(cache_key, room_arc.clone());
         Ok(room_arc)
+    }
+
+    /// Successfully loaded room identifiers in their insertion order for one zone.
+    pub fn loaded_room_names_in_zone(&self, zone: &str) -> Vec<String> {
+        self.loaded_rooms
+            .iter()
+            .filter(|(loaded_zone, _)| loaded_zone == zone)
+            .map(|(_, room)| room.clone())
+            .collect()
+    }
+
+    /// Loaded rooms in Python `Room.Zones` iteration order: zones retain the
+    /// order of their first room load, and rooms retain insertion order inside
+    /// each zone.
+    pub fn loaded_rooms_in_python_zone_order(&self) -> Vec<(String, String)> {
+        let mut zone_order = Vec::<String>::new();
+        for (zone, _) in &self.loaded_rooms {
+            if !zone_order.iter().any(|loaded| loaded == zone) {
+                zone_order.push(zone.clone());
+            }
+        }
+
+        let mut ordered = Vec::with_capacity(self.loaded_rooms.len());
+        for zone in zone_order {
+            ordered.extend(
+                self.loaded_rooms
+                    .iter()
+                    .filter(|(loaded_zone, _)| loaded_zone == &zone)
+                    .cloned(),
+            );
+        }
+        ordered
     }
 
     /// Get a room from cache with difficulty (immutable, won't load new rooms)
@@ -430,6 +491,7 @@ impl RoomCache {
         room.description = raw.description;
         room.properties = raw.properties;
         room.mob_ids = raw.mob_ids.clone();
+        room.installed_box_count = raw.installed_box_count;
 
         // Parse exits (zone needed for same-zone "동 35" 형식)
         room.exits = self.parse_exits(&raw.exits, &raw.zone)?;
@@ -519,6 +581,13 @@ impl RoomCache {
                     .collect()
             })
             .unwrap_or_default();
+        let installed_box_count = match map_info.get("설치리스트") {
+            Some(JsonValue::Array(values)) => {
+                values.iter().filter(|value| value.is_string()).count()
+            }
+            Some(JsonValue::String(value)) => value.chars().count(),
+            _ => 0,
+        };
 
         Ok(RawRoomData {
             properties,
@@ -527,6 +596,7 @@ impl RoomCache {
             zone,
             exits,
             mob_ids,
+            installed_box_count,
         })
     }
 
@@ -610,15 +680,12 @@ impl RoomCache {
                     .and_then(|s| s.to_str())
                     .ok_or_else(|| RoomError::ParseError("Invalid file name".to_string()))?;
 
-                // Load the room (will be cached)
-                eprintln!(
-                    "[RoomCache] Loading room: {}:{} from {:?}",
-                    zone, name, path
-                );
+                // Load the room (will be cached). Successful rooms are
+                // reported once in the zone summary below; per-room output
+                // makes startup logs unnecessarily noisy.
                 match self.get_room(zone, name) {
                     Ok(_) => {
                         count += 1;
-                        eprintln!("[RoomCache] Successfully loaded room {}:{}", zone, name);
                     }
                     Err(e) => {
                         eprintln!("[RoomCache] Failed to load room {}:{}: {:?}", zone, name, e);
@@ -639,6 +706,7 @@ impl RoomCache {
     /// Clear the cache
     pub fn clear(&mut self) {
         self.rooms.clear();
+        self.loaded_rooms.clear();
     }
 
     /// Get the number of cached rooms
@@ -859,7 +927,7 @@ pub fn format_exits_long(room: &Room) -> String {
     let ne = if has(Direction::NorthEast) {
         format!("{}{}{}", _ANSI_GREEN, "↗", _ANSI_RESET)
     } else {
-        "  ".to_string()
+        String::new()
     };
     let line1 = format!("{}{}{}\r\n", nw, n, ne);
 
@@ -874,7 +942,7 @@ pub fn format_exits_long(room: &Room) -> String {
     } else {
         "  ".to_string()
     };
-    let line2 = format!("{}○{}   〔{}〕쪽으로 이동할 수 있습니다.\r\n", w, e, str1);
+    let line2 = format!("{}○{} 〔{}〕쪽으로 이동할 수 있습니다.\r\n", w, e, str1);
 
     // 3줄: [남서↙][남▽][남동↘]
     let sw = if has(Direction::SouthWest) {

@@ -6,7 +6,7 @@
 //! Instead of copying map/mob files for each difficulty level,
 //! we use templates (static data) and instances (dynamic data with difficulty).
 
-/// Difficulty level type (0 = base, 1-7 = difficulty zones)
+/// Difficulty level type (0 = base, 1-9 = difficulty zones)
 pub type DifficultyLevel = u8;
 
 /// Difficulty configuration for stat multipliers and bonuses
@@ -47,8 +47,8 @@ impl DifficultyConfig {
                 str_multiplier: 2.0,
                 arm_multiplier: 2.0,
                 agi_multiplier: 2.0,
-                exp_multiplier: 1.5,
-                gold_multiplier: 1.5,
+                exp_multiplier: 2.0,
+                gold_multiplier: 2.0,
                 drop_bonus: 0.1,
             },
             2 => Self {
@@ -57,8 +57,8 @@ impl DifficultyConfig {
                 str_multiplier: 3.5,
                 arm_multiplier: 3.5,
                 agi_multiplier: 3.5,
-                exp_multiplier: 2.0,
-                gold_multiplier: 2.0,
+                exp_multiplier: 3.0,
+                gold_multiplier: 3.0,
                 drop_bonus: 0.2,
             },
             3 => Self {
@@ -67,8 +67,8 @@ impl DifficultyConfig {
                 str_multiplier: 5.0,
                 arm_multiplier: 5.0,
                 agi_multiplier: 5.0,
-                exp_multiplier: 3.0,
-                gold_multiplier: 3.0,
+                exp_multiplier: 4.0,
+                gold_multiplier: 4.0,
                 drop_bonus: 0.3,
             },
             4 => Self {
@@ -77,8 +77,8 @@ impl DifficultyConfig {
                 str_multiplier: 7.0,
                 arm_multiplier: 7.0,
                 agi_multiplier: 7.0,
-                exp_multiplier: 4.0,
-                gold_multiplier: 4.0,
+                exp_multiplier: 5.0,
+                gold_multiplier: 5.0,
                 drop_bonus: 0.4,
             },
             5 => Self {
@@ -87,8 +87,8 @@ impl DifficultyConfig {
                 str_multiplier: 10.0,
                 arm_multiplier: 10.0,
                 agi_multiplier: 10.0,
-                exp_multiplier: 5.0,
-                gold_multiplier: 5.0,
+                exp_multiplier: 6.0,
+                gold_multiplier: 6.0,
                 drop_bonus: 0.5,
             },
             6 => Self {
@@ -97,8 +97,8 @@ impl DifficultyConfig {
                 str_multiplier: 15.0,
                 arm_multiplier: 15.0,
                 agi_multiplier: 15.0,
-                exp_multiplier: 7.0,
-                gold_multiplier: 7.0,
+                exp_multiplier: 7.5,
+                gold_multiplier: 7.5,
                 drop_bonus: 0.6,
             },
             7 => Self {
@@ -110,6 +110,26 @@ impl DifficultyConfig {
                 exp_multiplier: 10.0,
                 gold_multiplier: 10.0,
                 drop_bonus: 0.8,
+            },
+            8 => Self {
+                level_bonus: 25_000,
+                hp_multiplier: 53.69,
+                str_multiplier: 12.5,
+                arm_multiplier: 12.5,
+                agi_multiplier: 12.5,
+                exp_multiplier: 13.5,
+                gold_multiplier: 13.5,
+                drop_bonus: 0.9,
+            },
+            9 => Self {
+                level_bonus: 30_000,
+                hp_multiplier: 85.9,
+                str_multiplier: 16.0,
+                arm_multiplier: 16.0,
+                agi_multiplier: 16.0,
+                exp_multiplier: 17.0,
+                gold_multiplier: 17.0,
+                drop_bonus: 1.0,
             },
             _ => Self::base(),
         }
@@ -192,7 +212,7 @@ impl Default for DifficultyConfig {
 /// * `zone_name` - Zone name (e.g., "낙양성", "낙양성1", "낙양성2")
 ///
 /// # Returns
-/// Difficulty level (0 for base zone, 1-7 for difficulty zones)
+/// Difficulty level (0 for base zone, 1-9 for difficulty zones)
 pub fn difficulty_from_zone(zone_name: &str) -> DifficultyLevel {
     // Try to extract trailing number from zone name
     // "낙양성" -> 0, "낙양성1" -> 1, "낙양성2" -> 2, etc.
@@ -209,7 +229,7 @@ pub fn difficulty_from_zone(zone_name: &str) -> DifficultyLevel {
     if num_str.is_empty() {
         0
     } else {
-        num_str.parse::<u8>().unwrap_or(0).min(7)
+        num_str.parse::<u8>().unwrap_or(0).min(9)
     }
 }
 
@@ -259,6 +279,15 @@ mod tests {
     }
 
     #[test]
+    fn reward_bonus_matches_python_body_difficulty_table() {
+        let expected = [100, 200, 300, 400, 500, 650, 900, 1250, 1600];
+        for (level, bonus) in (1_u8..=9).zip(expected) {
+            assert_eq!(DifficultyConfig::get(level).bonus_exp(100), bonus);
+            assert_eq!(DifficultyConfig::get(level).bonus_gold(100), bonus);
+        }
+    }
+
+    #[test]
     fn test_apply_hp() {
         let config = DifficultyConfig::get(2);
         assert_eq!(config.apply_hp(100), 500); // 100 * 5.0
@@ -270,7 +299,9 @@ mod tests {
         assert_eq!(difficulty_from_zone("낙양성1"), 1);
         assert_eq!(difficulty_from_zone("낙양성2"), 2);
         assert_eq!(difficulty_from_zone("낙양성7"), 7);
-        assert_eq!(difficulty_from_zone("낙양성8"), 7); // capped at 7
+        assert_eq!(difficulty_from_zone("낙양성8"), 8);
+        assert_eq!(difficulty_from_zone("낙양성9"), 9);
+        assert_eq!(difficulty_from_zone("낙양성10"), 9); // capped at 9
     }
 
     #[test]

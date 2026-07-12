@@ -1,5 +1,5 @@
 // 기부.rhai - 기부. Python: cmds/기부.py
-// 표두(표국무사)에게 은전 기부. find_target/find_mob_in_room 없음 → 사용법 + 조건 메시지.
+// 표두(표국무사) 검색은 Rust efun이 담당하고, 상태 변경 결과의 문구는 여기서 출력한다.
 
 fn cmd(ob, line) {
     if line == "" || is_empty(line) {

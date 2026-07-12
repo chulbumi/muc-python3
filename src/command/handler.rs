@@ -5,14 +5,58 @@
 use crate::command::registry::CommandRegistry;
 use crate::player::Body;
 use std::sync::Arc;
+use std::sync::Mutex;
+
+/// `암호변경.rhai`가 제공하는 Python 호환 대화형 출력.
+/// Rust는 상태 전이만 담당하고 문구·줄바꿈은 스크립트 값을 그대로 전달한다.
+#[derive(Debug, Clone, PartialEq)]
+pub struct PasswordChangeText {
+    pub wrong_password: String,
+    pub new_password_prompt: String,
+    pub confirm_prompt: String,
+    pub mismatch: String,
+    pub success: String,
+}
+
+/// `cmds/쪽지.rhai`가 제공하는 쪽지 편집 출력.
+/// Rust는 입력 상태와 저장만 담당하고 문구를 만들지 않는다.
+#[derive(Debug, Clone, PartialEq)]
+pub struct NoteEditText {
+    pub target_connected: String,
+    pub capacity_exceeded: String,
+    pub complete: String,
+    pub continue_prompt: String,
+}
+
+/// Python의 `ob._memoWho` 처럼 쪽지 작성 시작 시점에 로드한
+/// 오프라인 수신자 객체를 편집이 끝날 때까지 그대로 보존한다.
+#[derive(Debug, Clone)]
+pub struct NoteRecipientState {
+    pub target_name: String,
+    pub save_path: String,
+    pub body: Arc<Mutex<Body>>,
+}
+
+impl PartialEq for NoteRecipientState {
+    fn eq(&self, other: &Self) -> bool {
+        self.target_name == other.target_name
+            && self.save_path == other.save_path
+            && Arc::ptr_eq(&self.body, &other.body)
+    }
+}
 
 /// Multi-step input state (e.g. 암호변경: 이전암호 → 새암호 → 확인)
 #[derive(Debug, Clone, PartialEq)]
 pub enum PendingInput {
-    ChangePasswordOld,
-    ChangePasswordNew,
+    ChangePasswordOld {
+        text: PasswordChangeText,
+    },
+    ChangePasswordNew {
+        text: PasswordChangeText,
+    },
     ChangePasswordConfirm {
         new_password: String,
+        text: PasswordChangeText,
     },
     /// $엔터$: 다음 입력 시 try_mob_event_resume( mob_key, event_key, words, line_num, resume_func ) 호출.
     /// resume_func: Rhai wait_enter 재개용. Some("step1")이면 do_event_rhai에서 step1() 호출. Legacy면 None.
@@ -35,10 +79,22 @@ pub enum PendingInput {
         /// Rhai용 재개 op. None이면 legacy.
         script_resume_op: Option<String>,
     },
-    /// 쪽지 편집: 라인 누적, '.' 또는 10줄 시 저장 후 종료.
+    /// 쪽지 편집. Python은 줄 수가 아니라 `_memoBody` 문자열
+    /// 길이가 10 이상인지를 다음 입력 전에 확인한다.
     NoteEdit {
-        target_name: String,
-        title: String,
+        recipient: NoteRecipientState,
+        body: String,
+        text: NoteEditText,
+    },
+    /// 방설명.py의 write_lines: '.'까지 여러 줄을 받아 현재 방 설명을 갱신한다.
+    RoomDescription {
+        zone: String,
+        room: String,
+        lines: Vec<String>,
+    },
+    /// Python Player.write_edit: 임의 파일을 여러 줄 입력으로 작성한다.
+    FileEdit {
+        relative_path: String,
         lines: Vec<String>,
     },
 }
@@ -48,6 +104,9 @@ pub enum PendingInput {
 pub enum CommandResult {
     /// Command executed successfully
     Ok,
+    /// A private parse-command hook did not claim this input.  It is not a
+    /// player-visible result; the caller continues ordinary command lookup.
+    InternalNotHandled,
     /// Command execution failed with error message
     Error(String),
     /// Command needs more arguments
@@ -66,10 +125,22 @@ pub enum CommandResult {
     Shout(String),
     /// 공지(notice): 게임 접속 전체에 전송. 외침거부와 무관하게 전원에게. [공지] 이름 : 메시지.
     Notice(String),
-    /// 전음: 특정 대상에게 귓속말. (대상이름, 메시지). 전음거부·대상 검증은 handle에서.
-    Tell(String, String),
-    /// 셧다운: 서버 종료 요청. 전체 사용자에게 알리고 종료 시퀀스.
-    Shutdown,
+    /// `전음.py`/`반전음.py`가 만든 전달 자료.
+    ///
+    /// 대상 조회와 모든 문구·ANSI·줄바꿈·prompt 문자열은 Rhai가 정한다.
+    /// 네트워크 계층은 opaque 접속 토큰으로 수신자를 찾아 `_talker` 관계와
+    /// `talkHistory`를 갱신한 뒤 `recipient_output`을 그대로 전달한다.
+    Tell {
+        target_token: String,
+        sender_output: String,
+        recipient_output: String,
+        history_line: String,
+    },
+    /// Rhai `끝`/`종료`가 요청한 현재 접속 종료.
+    /// 사용자에게 보일 문구는 Rust가 만들지 않고 Rhai가 넘긴다.
+    Disconnect(String),
+    /// Rhai `리부팅`이 요청한 서버 중지. 사용자 출력은 없다.
+    Reboot,
     /// 감정표현: (to_self, to_room, to_target). to_target=(대상이름, buf2)이면 방 전송 시 대상 제외 후 대상에게 buf2 전송.
     EmotionToRoom(String, String, Option<(String, String)>),
     /// 다음 입력 대기 (암호변경 등). prompt 전송 후 pending_input 설정.
@@ -87,6 +158,9 @@ pub enum CommandResult {
     BroadcastToPlayers(Vec<String>, String),
     /// 스크립트 send_to_user에서 수집한 (이름, 메시지) 목록. handler에서 각자에게 전송.
     SendToUsers(Vec<(String, String)>),
+    /// Rhai가 현재 사용자에게 출력하면서 다른 사용자에게도 보낼 때의 결합 결과.
+    /// 모든 문구는 Rhai가 만들고 Rust는 전달만 한다.
+    OutputAndSendToUsers(String, Vec<(String, String)>),
     /// NPC 이벤트 스크립트 결과: 출력 라인들, $위치이동 시 (zone, room). 클라이언트에서 set_position 적용·방 검증.
     MobEvent {
         output_lines: Vec<String>,
@@ -110,8 +184,6 @@ pub enum CommandResult {
         lines: Vec<String>,
         use_rhai: bool,
     },
-    /// 쪽지: [이름] [제목] 후 편집 모드. 라인 단위 입력, '.' 또는 10줄이면 종료.
-    StartNoteEdit { target_name: String, title: String },
     /// 강제로그아웃: 관리자가 플레이어를 강제로 로그아웃시킴.
     Kick { target_name: String, reason: String },
     /// 계정정지: 관리자가 플레이어를 일정 기간 동안 접속 차단. duration은 초 단위.
@@ -128,6 +200,7 @@ impl CommandResult {
         matches!(
             self,
             CommandResult::Ok
+                | CommandResult::InternalNotHandled
                 | CommandResult::Output(_)
                 | CommandResult::Move(_)
                 | CommandResult::Combat
@@ -135,17 +208,18 @@ impl CommandResult {
                 | CommandResult::SayToRoom(_, _)
                 | CommandResult::Shout(_)
                 | CommandResult::Notice(_)
-                | CommandResult::Tell(_, _)
-                | CommandResult::Shutdown
+                | CommandResult::Tell { .. }
+                | CommandResult::Disconnect(_)
+                | CommandResult::Reboot
                 | CommandResult::EmotionToRoom(_, _, _)
                 | CommandResult::RequestInput { .. }
                 | CommandResult::GiveToPlayer { .. }
                 | CommandResult::BroadcastToPlayers(_, _)
                 | CommandResult::SendToUsers(_)
+                | CommandResult::OutputAndSendToUsers(_, _)
                 | CommandResult::MobEvent { .. }
                 | CommandResult::MobEventEnter { .. }
                 | CommandResult::StartScript { .. }
-                | CommandResult::StartNoteEdit { .. }
                 | CommandResult::Kick { .. }
                 | CommandResult::Ban { .. }
         )
@@ -222,14 +296,8 @@ impl CommandHandler {
 
         // Find the command
         if let Some(cmd_info) = self.registry.get(&resolved) {
-            // Check permission
-            let player_level = player.get_int("관리자등급");
-
-            if player_level < cmd_info.level as i64 {
-                return CommandResult::Error("권한이 없습니다.".to_string());
-            }
-
-            // Execute the command
+            // Python uses CmdObj.level for command-list metadata. Each
+            // command owns its actual guard, order and denial text.
             let handler = cmd_info.handler.clone();
             handler(player, args)
         } else {
@@ -446,13 +514,13 @@ mod tests {
     }
 
     #[test]
-    fn test_handle_command_permission_denied() {
+    fn command_metadata_level_does_not_invent_a_generic_permission_guard() {
         let registry = create_test_registry();
         let handler = CommandHandler::new(registry);
         let mut player = create_test_player();
 
         let result = handler.handle_command(&mut player, "admin", &[]);
-        assert!(!result.is_ok());
+        assert!(result.is_ok());
     }
 
     #[test]

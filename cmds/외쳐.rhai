@@ -19,6 +19,11 @@ fn cmd(ob, line) {
         send_line(ob, "☞ 운기조식중에 외치게 되면 기가 흐트러집니다.");
         return;
     }
+    let position = get_my_position(ob);
+    if has_room_property(position["zone"], position["room"], "모든통신금지") {
+        send_line(ob, "☞ 이지역에서는 어떠한 통신도 불가능합니다.");
+        return;
+    }
     let name = get_string(ob, "이름");
     let adm = get_int(ob, "관리자등급");
     let personality = get_string(ob, "성격");
@@ -32,6 +37,7 @@ fn cmd(ob, line) {
         "\x1b[32m외 침\x1b[37m"
     };
     let formatted = name + "(" + shout_type + ") : " + msg;
+    add_chat_history(local_time_hm() + formatted);
     for n in get_online_names() {
         if !user_refuses_shout(n) {
             send_to_user(n, formatted);

@@ -19,8 +19,10 @@ use std::sync::{Arc, Mutex, Weak};
 /// * `attr` - Persistent attributes stored as key-value pairs
 /// * `temp` - Temporary attributes that don't persist
 /// * `env` - Weak reference to parent object (prevents circular references)
-/// * `objs` - Child objects (non-stackable: 무기, 방어구, 개별인스턴스)
-/// * `inv_stack` - Stackable item counts: 인덱스(item key) -> 수량 (먹는것, 약 등)
+/// * `objs` - Child objects in insertion order. Python inventories keep every
+///   item here as an individual object, including repeated consumables.
+/// * `inv_stack` - Legacy Rust-only compressed inventory. New persistence and
+///   command code must materialize it into `objs`; Python has no such field.
 #[derive(Debug)]
 pub struct Object {
     /// Persistent attributes map
@@ -29,9 +31,9 @@ pub struct Object {
     pub temp: HashMap<String, Value>,
     /// Parent object (weak reference to prevent cycles)
     pub env: Option<Weak<Mutex<Object>>>,
-    /// Child objects (non-stackable only)
+    /// Child objects in Python-compatible insertion order
     pub objs: Vec<Arc<Mutex<Object>>>,
-    /// Stackable inventory: item key (인덱스) -> count. Save/load as 소지품_수량.
+    /// Legacy Rust-only compressed inventory retained for one-way migration.
     pub inv_stack: HashMap<String, i64>,
 }
 
@@ -41,6 +43,7 @@ impl Default for Object {
     }
 }
 
+#[allow(non_snake_case)]
 impl Object {
     /// Creates a new empty Object
     ///
@@ -193,7 +196,7 @@ impl Object {
     ///
     /// let mut obj = Object::new();
     /// obj.setTemp("temporary", 42);
-    /// assert_eq!(obj.getTemp("temporary"), 42);
+    /// assert_eq!(obj.getTemp("temporary"), muc_engine::object::Value::Int(42));
     /// ```
     pub fn setTemp(&mut self, key: &str, keydata: impl Into<Value>) {
         self.temp.insert(key.to_string(), keydata.into());
@@ -212,7 +215,7 @@ impl Object {
     ///
     /// let mut obj = Object::new();
     /// obj.setTemp("temp", "value");
-    /// assert_eq!(obj.getTemp("temp"), "value");
+    /// assert_eq!(obj.getTemp("temp").as_str(), Some("value"));
     /// ```
     pub fn getTemp(&self, key: &str) -> Value {
         self.temp
@@ -306,7 +309,7 @@ impl Object {
     /// let mut parent = Object::new();
     /// let child = Arc::new(Mutex::new(Object::new()));
     /// parent.append(child.clone());
-    /// parent.remove(child.clone());
+    /// parent.remove(&child);
     /// assert_eq!(parent.objs.len(), 0);
     /// ```
     pub fn remove(&mut self, obj: &Arc<Mutex<Object>>) {
@@ -424,7 +427,9 @@ impl Object {
         let mut map = std::collections::HashMap::new();
         for line in s.split('\n') {
             let w: Vec<&str> = line.split_whitespace().collect();
-            if w.len() >= 2 {
+            // Python Item.getOption ignores lines unless they contain exactly
+            // two tokens.
+            if w.len() == 2 {
                 if let Ok(v) = w[1].parse::<i64>() {
                     map.insert(w[0].to_string(), v);
                 }
@@ -646,7 +651,7 @@ impl Object {
     /// Creates a shallow clone of the object
     ///
     /// Note: env will be None in the clone, objs will be cloned as references
-    pub fn clone(&self) -> Self {
+    pub fn shallow_clone(&self) -> Self {
         Object {
             attr: self.attr.clone(),
             temp: self.temp.clone(),
@@ -689,7 +694,7 @@ impl Object {
 
 impl Clone for Object {
     fn clone(&self) -> Self {
-        self.clone()
+        self.shallow_clone()
     }
 }
 

@@ -214,6 +214,12 @@ impl ItemCache {
         self.items.get(key)
     }
 
+    /// Remove a loaded item template from the runtime registry. The source
+    /// JSON remains on disk, matching Python's Item.Items deletion semantics.
+    pub fn remove_item(&mut self, key: &str) -> bool {
+        self.items.remove(key).is_some()
+    }
+
     /// Find item by name ( searches through reaction names too)
     pub fn find_item_by_name(&self, name: &str) -> Option<&RawItemData> {
         // First try exact name match

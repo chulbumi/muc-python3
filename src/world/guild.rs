@@ -15,6 +15,12 @@ pub struct Guild {
     pub attr: HashMap<String, Map<String, Value>>,
 }
 
+impl Default for Guild {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
 impl Guild {
     pub fn new() -> Self {
         Self {
@@ -137,6 +143,188 @@ pub fn guild_remove(id: &str) -> bool {
     ok
 }
 
+/// Remove a guild and clear its membership from persisted player records.
+/// Python's administrator reset leaves no player attached to the deleted guild.
+pub fn guild_reset(id: &str) -> bool {
+    let removed = guild_remove(id);
+    if !removed {
+        return false;
+    }
+    let Ok(entries) = std::fs::read_dir("data/user") else {
+        return true;
+    };
+    for entry in entries.flatten() {
+        let path = entry.path();
+        if path.extension().and_then(|s| s.to_str()) != Some("json") {
+            continue;
+        }
+        let Ok(raw) = std::fs::read_to_string(&path) else {
+            continue;
+        };
+        let Ok(mut json) = serde_json::from_str::<Value>(&raw) else {
+            continue;
+        };
+        let Some(attrs) = json
+            .get_mut("사용자오브젝트")
+            .and_then(|v| v.get_mut("attr"))
+            .and_then(Value::as_object_mut)
+        else {
+            continue;
+        };
+        let belongs = attrs.get("소속").and_then(Value::as_str) == Some(id);
+        if belongs {
+            attrs.insert("소속".to_string(), Value::String(String::new()));
+            attrs.insert("직위".to_string(), Value::String(String::new()));
+            let _ = std::fs::write(
+                path,
+                serde_json::to_string_pretty(&json).unwrap_or_default(),
+            );
+        }
+    }
+    true
+}
+
 pub fn guild_save() -> bool {
     get_guild().read().unwrap().save()
+}
+
+/// Remove a member from the role list used by Python's GUILD object and update
+/// the persisted member count. Both legacy CRLF strings and JSON arrays are
+/// accepted because old character data uses both representations.
+pub fn guild_kick_member(id: &str, position: &str, member: &str) -> bool {
+    let mut guild = get_guild().write().unwrap();
+    let Some(attrs) = guild.attr.get_mut(id) else {
+        return false;
+    };
+    let key = format!("{}리스트", position);
+    let Some(value) = attrs.get_mut(&key) else {
+        return false;
+    };
+    let removed = match value {
+        Value::Array(items) => {
+            let before = items.len();
+            items.retain(|item| item.as_str() != Some(member));
+            before != items.len()
+        }
+        Value::String(raw) => {
+            let mut parts: Vec<String> = raw
+                .split(['\r', '\n', ','])
+                .filter(|s| !s.is_empty())
+                .map(str::to_string)
+                .collect();
+            let before = parts.len();
+            parts.retain(|item| item != member);
+            let changed = before != parts.len();
+            *raw = parts.join("\r\n");
+            changed
+        }
+        _ => false,
+    };
+    if !removed {
+        return false;
+    }
+    if let Some(count) = attrs.get_mut("방파원수") {
+        if let Some(n) = count.as_i64() {
+            *count = Value::String(n.saturating_sub(1).to_string());
+        } else if let Some(raw) = count.as_str().map(str::to_string) {
+            if let Ok(n) = raw.parse::<i64>() {
+                *count = Value::String(n.saturating_sub(1).to_string());
+            }
+        }
+    }
+    let _ = guild.save();
+    true
+}
+
+/// Move a member between role lists without changing the guild member count.
+pub fn guild_move_member_role(id: &str, from: &str, to: &str, member: &str) -> bool {
+    let mut guild = get_guild().write().unwrap();
+    let Some(attrs) = guild.attr.get_mut(id) else {
+        return false;
+    };
+    let remove_from = |value: &mut Value| -> bool {
+        match value {
+            Value::Array(items) => {
+                let before = items.len();
+                items.retain(|v| v.as_str() != Some(member));
+                before != items.len()
+            }
+            Value::String(raw) => {
+                let mut parts: Vec<_> = raw
+                    .split(['\r', '\n', ','])
+                    .filter(|s| !s.is_empty())
+                    .map(str::to_string)
+                    .collect();
+                let before = parts.len();
+                parts.retain(|v| v != member);
+                *raw = parts.join("\r\n");
+                before != parts.len()
+            }
+            _ => false,
+        }
+    };
+    let from_key = format!("{}리스트", from);
+    let to_key = format!("{}리스트", to);
+    let removed = attrs.get_mut(&from_key).map(remove_from).unwrap_or(false);
+    if !removed {
+        return false;
+    }
+    match attrs.entry(to_key) {
+        serde_json::map::Entry::Vacant(entry) => {
+            entry.insert(Value::String(member.to_string()));
+        }
+        serde_json::map::Entry::Occupied(mut entry) => match entry.get_mut() {
+            Value::Array(items) => items.push(Value::String(member.to_string())),
+            Value::String(raw) => {
+                if !raw.is_empty() {
+                    raw.push_str("\r\n");
+                }
+                raw.push_str(member);
+            }
+            _ => *entry.get_mut() = Value::String(member.to_string()),
+        },
+    }
+    let _ = guild.save();
+    true
+}
+
+/// Add a member to a guild role list, preserving the legacy list encoding.
+pub fn guild_add_member(id: &str, role: &str, member: &str) -> bool {
+    let mut guild = get_guild().write().unwrap();
+    let Some(attrs) = guild.attr.get_mut(id) else {
+        return false;
+    };
+    let key = format!("{}리스트", role);
+    let value = attrs
+        .entry(key)
+        .or_insert_with(|| Value::String(String::new()));
+    let exists = match value {
+        Value::Array(items) => items.iter().any(|v| v.as_str() == Some(member)),
+        Value::String(raw) => raw.split(['\r', '\n', ',']).any(|v| v == member),
+        _ => false,
+    };
+    if exists {
+        return false;
+    }
+    match value {
+        Value::Array(items) => items.push(Value::String(member.to_string())),
+        Value::String(raw) => {
+            if !raw.is_empty() {
+                raw.push_str("\r\n");
+            }
+            raw.push_str(member);
+        }
+        _ => return false,
+    }
+    let count = attrs
+        .entry("방파원수".to_string())
+        .or_insert_with(|| Value::String("0".to_string()));
+    let n = count
+        .as_str()
+        .and_then(|s| s.parse::<i64>().ok())
+        .or_else(|| count.as_i64())
+        .unwrap_or(0);
+    *count = Value::String(n.saturating_add(1).to_string());
+    let _ = guild.save();
+    true
 }

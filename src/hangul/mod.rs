@@ -103,7 +103,7 @@ fn has_rieul_jongung(c: char) -> bool {
 ///
 /// 마지막 문자가 한글이고 받침이 있으면 true, 아니면 false
 fn has_final_consonant(word: &str) -> bool {
-    word.chars().last().map_or(false, has_jongung)
+    word.chars().last().is_some_and(has_jongung)
 }
 
 /// 단어의 마지막 문자가 ㄹ 받침인지 확인합니다.
@@ -116,7 +116,7 @@ fn has_final_consonant(word: &str) -> bool {
 ///
 /// 마지막 문자가 한글이고 ㄹ 받침이면 true, 아니면 false
 fn has_rieul_final(word: &str) -> bool {
-    word.chars().last().map_or(false, has_rieul_jongung)
+    word.chars().last().is_some_and(has_rieul_jongung)
 }
 
 /// 이/가 조사를 선택합니다.
@@ -453,6 +453,7 @@ pub fn post_position_all(line: &str) -> String {
     cur
 }
 
+#[allow(clippy::items_after_test_module)]
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -671,8 +672,9 @@ mod tests {
 /// use muc_engine::hangul::ends_with_consonant;
 ///
 /// assert!(ends_with_consonant("책")); // 책 ends with ㄱ (has 받침)
-/// assert!(!ends_with_consonant("책상")); // 상 ends with no 받침
+/// assert!(ends_with_consonant("책상")); // 상 ends with ㅇ (has 받침)
 /// assert!(!ends_with_consonant(""));  // empty string
+/// assert!(!ends_with_consonant("가")); // 가 has no 받침
 /// ```
 pub fn ends_with_consonant(word: &str) -> bool {
     if word.is_empty() {
@@ -684,9 +686,9 @@ pub fn ends_with_consonant(word: &str) -> bool {
         // Check if it's a Korean syllable
         if last_char >= HANGUL_SYLLABLE_START && last_char <= HANGUL_SYLLABLE_END {
             // Calculate if it has 받침
-            // Unicode formula: (syllable - AC00) / 28 / 21
-            let offset = (last_char as u32 - HANGUL_SYLLABLE_START as u32) as u32;
-            let jongung_index = offset / 28; // 종성 인덱스
+            // Unicode formula: (syllable - AC00) % 28
+            let offset = last_char as u32 - HANGUL_SYLLABLE_START as u32;
+            let jongung_index = offset % 28; // 종성 인덱스 (0 = no 받침, 1-27 = has 받침)
 
             jongung_index > 0 // 0 means no 받침, 1-27 means has 받침
         } else {

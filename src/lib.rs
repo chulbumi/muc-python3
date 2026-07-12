@@ -19,6 +19,7 @@
 //! - 핫리로드 지원 (스크립트 수정 시 즉시 반영)
 //! - 333개 단위 테스트 통과
 
+pub mod book;
 pub mod combat;
 pub mod command;
 pub mod data;

@@ -1,86 +1,109 @@
-// 무공.rhai - 무공 보기/사용
-// Python: cmds/무공.py
-//
-// 사용법:
-//   무공 - 배운 무공 목록 표시
-//   무공 [스킬명] [대상] - 무공 사용
+// Python cmds/무공.py의 출력/대상 선택을 그대로 구성한다.
 
-fn cmd(ob, line) {
-    // 인자가 없으면 무공 목록 표시
-    if is_empty(line) {
-        show_skill_list(ob);
-        return;
-    }
-
-    // 관리자가 다른 사람의 무공을 볼 수 있음
-    if require_admin(ob, 1000) {
-        let words = line_args(line);
-        if len(words) >= 1 {
-            let target_name = words[0];
-            // TODO: 다른 플레이어의 무공 보기 기능 구현 필요
-            let target = get_player_by_name(target_name);
-            if !target.is_unit() {
-                send_line(ob, "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━");
-                send_line(ob, "◁ " + target_name + "의 무공 ▷");
-                show_other_skill_list(ob, target);
-                return;
-            }
+fn learned_skill_level(entries, skill_name) {
+    for entry in entries {
+        if entry["name"] == skill_name {
+            return entry["level"];
         }
     }
-
-    // 무공 사용
-    use_skill_command(ob, line);
+    return -1;
 }
 
-fn show_skill_list(ob) {
-    send_line(ob, "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━");
-    send_line(ob, "◁ 당신의 무공 ▷");
-    send_line(ob, "───────────────────────────────────────");
+fn build_skill_message(view) {
+    let categories = [
+        "초급", "중급", "상급", "고급", "특급",
+        "절정", "초절정", "회복", "방어", "기타"
+    ];
+    let msg = "";
+    let first_category = true;
 
-    let skills = get_skill_list(ob);
+    for category in categories {
+        let configured = get_murim_config_list(category + "무공");
+        if len(configured) == 0 {
+            continue;
+        }
+        if !first_category {
+            msg += "\r\n";
+        }
+        first_category = false;
+        msg += "\x1b[1m\x1b[40m\x1b[32m▷ " + category
+            + "무공\x1b[0m\x1b[40m\x1b[37m";
 
-    if len(skills) == 0 {
-        send_line(ob, "☞ 깨우친 무공이 없습니다.");
-    } else {
         let count = 0;
-        for skill in skills {
-            let skill_name = to_string(skill);
-            let level = get_skill_level(ob, skill_name);
-            let buf = skill_name + "(" + to_string(level) + "성)";
-            send_line(ob, " ◇ " + buf);
+        for configured_name in configured {
+            let skill_name = trim(configured_name.to_string());
+            if skill_name == "" {
+                continue;
+            }
+            let level = learned_skill_level(view["skills"], skill_name);
+            if level < 0 {
+                continue;
+            }
+            if count == 0 || count % 3 == 0 {
+                msg += "\r\n";
+            }
+            let cell = skill_name + "(" + level.to_string() + "성)";
+            msg += " ◇ " + fill_space_euc_kr(20, cell) + " ";
             count += 1;
         }
     }
-
-    send_line(ob, "───────────────────────────────────────");
-    send_line(ob, "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━");
+    msg
 }
 
-fn show_other_skill_list(ob, target) {
-    // TODO: get_skill_list는 다른 플레이어에게는 사용 불가
-    // player_has_skill 등을 사용하여 구현 필요
-    send_line(ob, "☞ 다른 플레이어의 무공 보기 기능은 구현 중입니다.");
+fn build_secret_message(view) {
+    let msg = "";
+    let training = view["secret_training"];
+    if training != "" {
+        msg = "\x1b[1m\x1b[33m" + training
+            + "\x1b[0m\x1b[40m\x1b[37m(수련중)";
+    }
+
+    let count = 0;
+    for secret_name in view["secret_names"] {
+        if count == 0 {
+            if msg != "" {
+                msg += "\r\n";
+            }
+        } else if count % 3 == 0 {
+            msg += "\r\n";
+        }
+        msg += " ◇ " + fill_space_euc_kr(20, secret_name.to_string()) + " ";
+        count += 1;
+    }
+    msg
 }
 
-fn use_skill_command(ob, line) {
-    let words = line_args(line);
-    if len(words) == 0 {
-        send_line(ob, "☞ 사용법: 무공 [스킬명] 또는 무공 [스킬명] [대상]");
+fn cmd(ob, line) {
+    let view = get_mugong_view(ob, line);
+    if !view["ok"] {
+        send_line(ob, "☞ 당신의 안광으로는 그런것을 볼수 없다네");
         return;
     }
 
-    let skill_name = words[0];
-    let target = if len(words) >= 2 { words[1] } else { "" };
-
-    // 무공 사용
-    let result = use_skill(ob, skill_name, target);
-
-    if result != "" {
-        send_line(ob, "☞ " + result);
+    send_line(ob, "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━");
+    let title = if view["self"] {
+        "◁ 당신의 무공 ▷"
     } else {
-        // 성공 메시지는 use_skill에서 처리
-        send_line(ob, "당신은 " + skill_name + "을(를) 시전합니다!");
+        "◁ " + view["name"] + "의 무공 ▷"
+    };
+    send_line(ob, "\x1b[0m\x1b[47m\x1b[30m" + fill_space(71, title)
+        + "\x1b[0m\x1b[40m\x1b[37m");
+    send_line(ob, "───────────────────────────────────────");
+
+    if !view["has_skill_list"] {
+        send_line(ob, "☞ 깨우친 무공이 없습니다.");
+    } else {
+        send_line(ob, build_skill_message(view));
     }
+    send_line(ob, "───────────────────────────────────────");
+
+    send_line(ob, "\x1b[1m\x1b[40m\x1b[32m▷ 비전\x1b[0m\x1b[40m\x1b[37m");
+    if view["secret_training"] == "" && len(view["secret_names"]) == 0 {
+        send_line(ob, "☞ 오의를 깨우친 무공이 없습니다.");
+    } else {
+        send_line(ob, build_secret_message(view));
+    }
+    send_line(ob, "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━");
 }
 
 fn main(ob, line) {

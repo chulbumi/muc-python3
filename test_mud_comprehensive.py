@@ -37,6 +37,7 @@ import re
 import json
 import sys
 import os
+from pathlib import Path
 from datetime import datetime
 from typing import Optional, Dict, List, Tuple, Any
 from dataclasses import dataclass, field, asdict
@@ -61,6 +62,7 @@ class TestConfig:
     rust_port: int = 9999
     num_characters: int = 2
     base_password: str = "test1234"
+    character_name: str = "비교테스터"
     encoding: str = "utf-8"
     connection_timeout: int = 15
     command_timeout: int = 5
@@ -165,19 +167,18 @@ class MUDConnection:
         self.host = config.host
         self.port = port
         # 한글만 사용하는 이름으로 변경 (서버가 한글+영어 혼합을 거부함)
-        # Python/Rust 각각 다른 이름 사용 (파일 공용 방지)
-        # Python은 socket 사용 (DOUMI 캐릭터 생성), Rust는 telnetlib 사용
-        if server_type == ServerType.PYTHON:
-            default_name = "테스터"
-        else:
-            default_name = "러스트테스터"
+        # 양쪽 서버에 동일한 비교 캐릭터를 사용한다. 서로 다른 캐릭터를
+        # 쓰면 위치·능력치·인벤토리 차이가 출력 차이로 잘못 집계된다.
+        # 양쪽 모두 raw socket 사용. 두 서버 모두 줄 기반 TCP 입력을 받고
+        # telnet 협상 차이를 비교 결과에 섞지 않도록 동일한 transport를 쓴다.
+        default_name = self.config.character_name
         # 두 서버 모두 UTF-8 사용
         self.encoding = "utf-8"
         self.character_name = character_name or default_name
         self.password = config.base_password
 
-        # Python 서버는 socket 직접 사용 (DOUMI 캐릭터 생성)
-        self.use_socket = (server_type == ServerType.PYTHON)
+        # Python/Rust 모두 socket 직접 사용
+        self.use_socket = True
         self.tn: Optional[telnetlib.Telnet] = None
         self.sock: Optional[socket.socket] = None
         self.connected = False
@@ -196,7 +197,7 @@ class MUDConnection:
                 print(f"[{self.server_type.value}] Connecting to {self.host}:{self.port}...")
 
             if self.use_socket:
-                # Python 서버: socket 직접 사용
+                # 양쪽 서버: socket 직접 사용
                 self.sock = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
                 self.sock.connect((self.host, self.port))
                 self.sock.settimeout(self.config.command_timeout)
@@ -261,13 +262,17 @@ class MUDConnection:
             # Socket 기반 읽기 (여러 번 시도)
             if not self.sock:
                 return ""
+
             try:
                 timeout = timeout or self.config.command_timeout
-                self.sock.settimeout(timeout)
+                deadline = time.time() + timeout
                 all_data = ""
-                # 여러 번 recv 시도
-                for _ in range(5):
+                # 전체 호출에 하나의 deadline을 적용한다. 반복 recv마다
+                # timeout을 재설정하면 배너가 없는 연결에서 5배 이상
+                # 지연되어 Rust 로그인 비교가 정체된다.
+                while time.time() < deadline:
                     try:
+                        self.sock.settimeout(max(0.05, min(0.5, deadline - time.time())))
                         data = self.sock.recv(4096)
                         if not data:
                             break
@@ -316,6 +321,27 @@ class MUDConnection:
                     print(f"[{self.server_type.value}] Read error: {e}")
                 return ""
 
+    def discard_pending_output(self) -> None:
+        """Drop login/banner bytes so the first command has a clean boundary."""
+        if self.use_socket and self.sock:
+            # Login can enqueue the room view slightly after the login
+            # acknowledgement. Keep draining until several short reads are
+            # quiet, otherwise it contaminates the first command result.
+            quiet = 0
+            for _ in range(12):
+                if self._read_output(timeout=0.25):
+                    quiet = 0
+                else:
+                    quiet += 1
+                    if quiet >= 3:
+                        break
+        elif self.tn:
+            try:
+                self.tn.read_very_eager()
+            except Exception:
+                pass
+        self.buffer = ""
+
     def _wait_for_prompt(self, prompt_patterns: List[str], timeout: int = 5) -> bool:
         """
         Wait for a prompt pattern to appear in the output.
@@ -327,16 +353,27 @@ class MUDConnection:
         Returns:
             True if prompt found, False otherwise
         """
+        for pattern in prompt_patterns:
+            if pattern in self.buffer:
+                return True
+
         start_time = time.time()
 
         while time.time() - start_time < timeout:
             try:
-                data = self.tn.read_some()
-                if data:
-                    self.buffer += data.decode(self.encoding, errors='ignore')
-                    for pattern in prompt_patterns:
-                        if pattern in self.buffer:
-                            return True
+                if self.use_socket:
+                    remaining = max(0.0, timeout - (time.time() - start_time))
+                    output = self._read_output(timeout=min(0.2, remaining))
+                elif self.tn:
+                    data = self.tn.read_some()
+                    output = data.decode(self.encoding, errors='ignore') if data else ""
+                else:
+                    return False
+
+                if output:
+                    self.buffer += output
+                    if any(pattern in self.buffer for pattern in prompt_patterns):
+                        return True
             except Exception:
                 pass
             time.sleep(0.1)
@@ -359,7 +396,7 @@ class MUDConnection:
                 return False
             try:
                 cmd_bytes = command.encode(self.encoding) + b'\r\n'
-                self.sock.send(cmd_bytes)
+                self.sock.sendall(cmd_bytes)
                 return True
             except Exception as e:
                 if self.config.verbose:
@@ -552,30 +589,35 @@ class MUDConnection:
         if not self._send(command):
             return ""
 
-        # Wait for response with polling
-        output = ""
-        start_read = time.time()
+        # Python uses a raw socket while Rust uses telnetlib.  Read from the
+        # transport that was actually connected; using self.tn for Python
+        # silently turned every real socket response into an empty result.
+        if self.use_socket:
+            output = self._read_output(timeout=wait_time)
+        else:
+            output = ""
+            start_read = time.time()
 
-        while time.time() - start_read < wait_time:
+            while time.time() - start_read < wait_time:
+                try:
+                    # Try to read data with a short timeout
+                    data = self.tn.read_until(b'\n', timeout=0.5)
+                    if data:
+                        output += data.decode(self.encoding, errors='ignore')
+                    else:
+                        # No more data with timeout, break
+                        break
+                except Exception:
+                    # No data available yet, continue waiting
+                    time.sleep(0.1)
+                    continue
+
+            # Read any remaining buffered data
             try:
-                # Try to read data with a short timeout
-                data = self.tn.read_until(b'\n', timeout=0.5)
-                if data:
-                    output += data.decode(self.encoding, errors='ignore')
-                else:
-                    # No more data with timeout, break
-                    break
+                more = self.tn.read_very_eager().decode(self.encoding, errors='ignore')
+                output += more
             except Exception:
-                # No data available yet, continue waiting
-                time.sleep(0.1)
-                continue
-
-        # Read any remaining buffered data
-        try:
-            more = self.tn.read_very_eager().decode(self.encoding, errors='ignore')
-            output += more
-        except Exception:
-            pass
+                pass
 
         execution_time = time.time() - start_time
 
@@ -727,7 +769,11 @@ def test_combat(conn: MUDConnection) -> List[TestResult]:
 
     for cmd, description in combat_commands:
         start_time = time.time()
-        output = conn.execute_command(cmd, wait_time=1.5)
+        # 도망's command response is immediate; waiting for a full heartbeat
+        # window makes Python and Rust include different asynchronous recovery
+        # prompts in an otherwise identical command result.
+        wait_time = 0.5 if cmd == "도망" else 1.5
+        output = conn.execute_command(cmd, wait_time=wait_time)
         execution_time = time.time() - start_time
 
         result = TestResult(
@@ -1093,8 +1139,8 @@ class MUDTestRunner:
         self.py_conn: Optional[MUDConnection] = None
         self.rust_conn: Optional[MUDConnection] = None
 
-    def run_all_tests(self) -> None:
-        """Run all test scenarios."""
+    def run_all_tests(self) -> bool:
+        """Run all test scenarios and report whether the run succeeded."""
         print("=" * 70)
         print("MUD Server Comprehensive Test Suite")
         print("=" * 70)
@@ -1107,7 +1153,8 @@ class MUDTestRunner:
         # Connect to servers
         if not self._connect_servers():
             print("Failed to connect to one or more servers")
-            return
+            self._cleanup()
+            return False
 
         # Run test scenarios
         test_scenarios = [
@@ -1118,12 +1165,14 @@ class MUDTestRunner:
             ("NPC Dialogue", test_npc_dialogue),
         ]
 
+        scenarios_succeeded = True
         for scenario_name, test_func in test_scenarios:
             print(f"\n{'=' * 70}")
             print(f"Running: {scenario_name}")
             print('=' * 70)
 
-            self._run_test_scenario(scenario_name, test_func)
+            if not self._run_test_scenario(scenario_name, test_func):
+                scenarios_succeeded = False
 
         # Finalize report
         self.report.test_end = datetime.now().isoformat()
@@ -1135,7 +1184,9 @@ class MUDTestRunner:
         # Cleanup
         self._cleanup()
 
-    def run_specific_test(self, test_name: str) -> None:
+        return scenarios_succeeded and self.report.failed_tests == 0
+
+    def run_specific_test(self, test_name: str) -> bool:
         """
         Run a specific test scenario.
 
@@ -1153,7 +1204,7 @@ class MUDTestRunner:
         if test_name not in test_map:
             print(f"Unknown test: {test_name}")
             print(f"Available tests: {', '.join(test_map.keys())}")
-            return
+            return False
 
         scenario_name, test_func = test_map[test_name]
 
@@ -1162,13 +1213,18 @@ class MUDTestRunner:
         print("=" * 70)
 
         self._check_servers()
-        self._connect_servers()
-        self._run_test_scenario(scenario_name, test_func)
+        if not self._connect_servers():
+            print("Failed to connect to one or more servers")
+            self._cleanup()
+            return False
+        scenario_succeeded = self._run_test_scenario(scenario_name, test_func)
 
         self.report.test_end = datetime.now().isoformat()
         self._finalize_report()
         generate_report(self.report, self.config)
         self._cleanup()
+
+        return scenario_succeeded and self.report.failed_tests == 0
 
     def _check_servers(self) -> None:
         """Check if servers are accessible."""
@@ -1191,6 +1247,20 @@ class MUDTestRunner:
 
         print()
 
+    def _reset_comparison_fixture(self) -> None:
+        """Put the shared deterministic comparison character at the start room."""
+        path = Path(__file__).parent / "data" / "user" / "비교테스터.json"
+        try:
+            data = json.loads(path.read_text(encoding="utf-8"))
+            user = data.get("사용자오브젝트", {})
+            start = user.get("귀환지맵") or "낙양성:42"
+            user["위치"] = start
+            user["현재방"] = start
+            path.write_text(json.dumps(data, ensure_ascii=False, indent=4) + "\n", encoding="utf-8")
+        except (OSError, ValueError, TypeError) as exc:
+            if self.config.verbose:
+                print(f"[fixture] reset skipped: {exc}")
+
     def _connect_servers(self) -> bool:
         """
         Connect to both servers.
@@ -1198,17 +1268,20 @@ class MUDTestRunner:
         Returns:
             True if both connections successful, False otherwise
         """
+        self._reset_comparison_fixture()
+
         # Connect to Python server
         print("Connecting to Python server...")
         self.py_conn = MUDConnection(
             self.config,
             ServerType.PYTHON,
             self.config.py_port,
-            f"테스터파이썬"
+            "비교테스터"
         )
 
         if self.py_conn.connect():
             if self.py_conn.login_or_create():
+                self.py_conn.discard_pending_output()
                 print("  Python server: Connected and logged in")
             else:
                 print("  Python server: Connected but login failed")
@@ -1221,11 +1294,12 @@ class MUDTestRunner:
             self.config,
             ServerType.RUST,
             self.config.rust_port,
-            f"테스터러스트"
+            "비교테스터"
         )
 
         if self.rust_conn.connect():
             if self.rust_conn.login_or_create():
+                self.rust_conn.discard_pending_output()
                 print("  Rust server: Connected and logged in")
             else:
                 print("  Rust server: Connected but login failed")
@@ -1234,10 +1308,10 @@ class MUDTestRunner:
 
         print()
 
-        # Check if at least one server is connected
-        return (self.py_conn.logged_in or self.rust_conn.logged_in)
+        # A comparison run is valid only when both sides are logged in.
+        return self.py_conn.logged_in and self.rust_conn.logged_in
 
-    def _run_test_scenario(self, scenario_name: str, test_func) -> None:
+    def _run_test_scenario(self, scenario_name: str, test_func) -> bool:
         """
         Run a test scenario on both servers.
 
@@ -1247,6 +1321,7 @@ class MUDTestRunner:
         """
         py_results = []
         rust_results = []
+        succeeded = True
 
         # Run on Python server
         if self.py_conn and self.py_conn.logged_in:
@@ -1257,6 +1332,9 @@ class MUDTestRunner:
                 print(f"  Completed {len(py_results)} tests")
             except Exception as e:
                 print(f"  Error: {e}")
+                succeeded = False
+        else:
+            succeeded = False
 
         # Run on Rust server
         if self.rust_conn and self.rust_conn.logged_in:
@@ -1267,6 +1345,9 @@ class MUDTestRunner:
                 print(f"  Completed {len(rust_results)} tests")
             except Exception as e:
                 print(f"  Error: {e}")
+                succeeded = False
+        else:
+            succeeded = False
 
         # Compare results
         if py_results and rust_results:
@@ -1281,6 +1362,8 @@ class MUDTestRunner:
             for comp in comparisons:
                 if not comp.match:
                     print(f"  - '{comp.command}': Outputs differ")
+
+        return succeeded and bool(py_results) and bool(rust_results)
 
     def _finalize_report(self) -> None:
         """Finalize the test report."""
@@ -1429,6 +1512,8 @@ def parse_arguments() -> TestConfig:
             config.rust_port = int(arg.split("=", 1)[1])
         elif arg.startswith("--chars="):
             config.num_characters = int(arg.split("=", 1)[1])
+        elif arg.startswith("--name="):
+            config.character_name = arg.split("=", 1)[1]
         elif arg.startswith("--report="):
             config.report_path = arg.split("=", 1)[1]
         elif arg.startswith("--test="):
@@ -1457,10 +1542,10 @@ def main() -> int:
 
     try:
         if config.test_type == 'all':
-            runner.run_all_tests()
+            succeeded = runner.run_all_tests()
         else:
-            runner.run_specific_test(config.test_type)
-        return 0
+            succeeded = runner.run_specific_test(config.test_type)
+        return 0 if succeeded else 1
     except KeyboardInterrupt:
         print("\n\nTest interrupted by user")
         runner._cleanup()

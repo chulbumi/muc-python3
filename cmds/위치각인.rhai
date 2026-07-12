@@ -7,6 +7,11 @@ fn cmd(ob, line) {
         return;
     }
     if line == "비학천룡" {
+        let guards = get_inventory_guards(ob);
+        if len(guards) != 0 && guards[0]["name"] != "비학천룡" {
+            send_line(ob, "☞ 비학천룡이 없습니다.");
+            return;
+        }
         let pos = get_my_position(ob);
         let s = pos["zone"] + ":" + int_to_str(pos["room"]);
         set_value(ob, "위치각인", s);

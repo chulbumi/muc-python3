@@ -4,11 +4,10 @@
 fn cmd(ob, line) {
     let admin_level = get_int(ob, "관리자등급");
     if admin_level < 2000 {
-        send_line(ob, "☞ 관리자만 사용할 수 있어요.");
+        send_line(ob, "☞ 무슨 말인지 모르겠어요. *^_^*");
         return;
     }
-    send_line(ob, "☞ 오브젝트 저장 기능은 현재 구현 중입니다.");
-    send_line(ob, "   (월드 상태의 모든 오브젝트를 파일로 저장)");
+    send_line(ob, save_object_python(ob, line));
 }
 
 fn main(ob, line) {

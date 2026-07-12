@@ -115,17 +115,17 @@ class MUDTestSkill:
             runner = MUDTestRunner(self.config)
 
             if test_type == "all":
-                runner.run_all_tests()
+                succeeded = runner.run_all_tests()
             elif test_type == "quick":
-                self._run_quick_test(runner)
+                succeeded = self._run_quick_test(runner)
             elif test_type == "status":
                 return self._check_server_status()
             elif test_type == "report":
                 return self._show_last_report()
             else:
-                runner.run_specific_test(test_type)
+                succeeded = runner.run_specific_test(test_type)
 
-            return 0
+            return 0 if succeeded else 1
 
         except KeyboardInterrupt:
             print("\n\nTest interrupted by user")
@@ -136,7 +136,7 @@ class MUDTestSkill:
             traceback.print_exc()
             return 1
 
-    def _run_quick_test(self, runner: MUDTestRunner) -> None:
+    def _run_quick_test(self, runner: MUDTestRunner) -> bool:
         """
         Run a quick comparison test with essential commands only.
 
@@ -148,7 +148,8 @@ class MUDTestSkill:
         runner._check_servers()
         if not runner._connect_servers():
             print("Failed to connect to servers")
-            return
+            runner._cleanup()
+            return False
 
         # Quick test commands
         quick_commands = [
@@ -209,6 +210,11 @@ class MUDTestSkill:
                     print(f"  {py_res.command}: Python={py_len}b, Rust={rust_len}b [NO OUTPUT]")
 
         runner._cleanup()
+        return (
+            bool(py_results)
+            and bool(rust_results)
+            and all(result.success for result in py_results + rust_results)
+        )
 
     def _check_server_status(self) -> int:
         """

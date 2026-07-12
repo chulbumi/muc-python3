@@ -1,8 +1,7 @@
 // 방파파문.rhai - 방파 파문 (방주가 멤버를 추방)
 // Python: cmds/방파파문.py
-// NOTE: 현재 guild_leave efun은 호출자 본인만 탈퇴 가능
-//       대상을 파문시키는 기능은 guild_kick efun이 필요하며
-//       현재는 미구현 상태로 메시지 표시
+// guild_kick_member updates the guild roster and queues an online attribute
+// update; it does not disconnect the target player.
 
 fn cmd(ob, line) {
     if is_empty(line) {
@@ -28,13 +27,12 @@ fn cmd(ob, line) {
         return;
     }
 
-    // TODO: 대상이 같은 방파 소속인지 확인
-    // TODO: guild_kick efun이 필요함
-    // 현재는 대상을 파문시킬 수 있는 efun이 없음
-
-    send_line(ob, "☞ " + line + " 님을 방파에서 파문시킵니다.");
-    send_line(ob, "☞ (현재 대상 파문 기능은 추가 efun이 필요합니다)");
-    send_line(ob, "☞ 임시조치: " + line + " 님에게 탈퇴 명령을 사용하도록 안내하세요");
+    let result = guild_kick_member(ob, line);
+    if result == "wrong_guild" { send_line(ob, "☞ 당신의 소속이 아닙니다."); return; }
+    if result != "ok" { send_line(ob, "☞ 그런 무림인은 아애 존재하지 않습니다."); return; }
+    let msg = han_iga(get_attr(ob, "이름")) + " " + han_obj(line) + " 방파에서 파문시킴을 선포합니다.";
+    send_to_player(line, "\r\n당신은 파문되었습니다.");
+    send_broadcast_to_guild(ob, msg);
 }
 
 fn main(ob, line) {

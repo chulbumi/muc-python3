@@ -26,7 +26,6 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     println!("  - Broadcast to all connected clients");
     println!();
     println!("Connect with: telnet localhost {}", port);
-    println!("Type 'quit' to disconnect");
     println!("========================================");
     println!();
 

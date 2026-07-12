@@ -47,7 +47,7 @@ class SocketMUDTest:
             return False
         try:
             cmd_bytes = command.encode(self.encoding) + b'\r\n'
-            self.sock.send(cmd_bytes)
+            self.sock.sendall(cmd_bytes)
             return True
         except Exception as e:
             print(f"Send error: {e}")
@@ -179,7 +179,7 @@ class SocketMUDTest:
         return total_bytes > 0
 
 
-def main():
+def main() -> int:
     import argparse
 
     parser = argparse.ArgumentParser(description='Socket MUD Test')
@@ -191,8 +191,8 @@ def main():
     args = parser.parse_args()
 
     test = SocketMUDTest(args.host, args.port)
-    test.run_test(args.name)
+    return 0 if test.run_test(args.name) else 1
 
 
 if __name__ == '__main__':
-    main()
+    sys.exit(main())

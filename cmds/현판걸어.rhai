@@ -32,16 +32,20 @@ fn cmd(ob, line) {
         return;
     }
 
-    let admin_level = get_attr(ob, "관리자등급");
-    if to_int(admin_level) < 1000 {
-        send_line(ob, "☞ 방파 생성에는 관리자 등급 1000 이상이 필요합니다.");
+    if get_room_attr(ob, "방파자리") == "" || get_room_attr(ob, "방파주인") != "" {
+        send_line(ob, "☞ 이곳엔 현판을 걸 수 없습니다.");
         return;
     }
-
-    // TODO: 방 위치 확인 (현판을 걸 수 있는 곳인지)
-    // TODO: 은전 확인 (10,000,000은전 이상 필요)
-    // TODO: 중복 방파이름 확인
-    // TODO: 방들의 '방파주인' 속성 설정
+    if get_attr(ob, "방파금지") != "" || to_int(get_attr(ob, "은전")) < get_murim_config_int("방파세울은전") {
+        send_line(ob, "☞ 방파를 세우는데는 은전 10,000,000개 이상이 필요합니다.");
+        return;
+    }
+    let guilds = guild_list();
+    let i = 0;
+    while i < len(guilds) {
+        if guild_get(guilds[i], "이름") == guild_name { send_line(ob, "☞ 존재하는 방파이름입니다."); return; }
+        i = i + 1;
+    }
 
     // guild_create efun 호출
     let result = guild_create(ob, guild_name);
@@ -60,9 +64,11 @@ fn cmd(ob, line) {
 
     send_line(ob, "\x1b[" + color + "m[" + nickname + "]\x1b[0m \x1b[1;36m" + my_name + "\x1b[0;37m 방파 \x1b[1m『" + guild_name + "』\x1b[0m을 창설했습니다.");
 
-    // TODO: 보관함 아이템 지급
-    // TODO: 은전 차감
-    // TODO: 전체 공지
+    set_obj_attr(ob, "방", "방파주인", guild_name);
+    item_create(ob, "보관함");
+    set_attr(ob, "은전", to_int(get_attr(ob, "은전")) - get_murim_config_int("방파세울은전"));
+    send_line(ob, "당신이 현판을 세우는데 은전 " + get_murim_config_int("방파세울은전") + "개를 사용합니다.");
+    send_notice(ob, guild_name + " 방파가 창설되었습니다.");
 }
 
 fn main(ob, line) {

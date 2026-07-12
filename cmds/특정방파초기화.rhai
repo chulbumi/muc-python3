@@ -3,11 +3,23 @@
 
 fn cmd(ob, line) {
     let admin_level = get_int(ob, "관리자등급");
-    if admin_level < 1000 {
-        send_line(ob, "☞ 무슨 말인지 모르겠어요. *^^*");
+    if admin_level < 2000 {
+        send_line(ob, "☞ 무슨 말인지 모르겠어요. *^_^*");
         return;
     }
-    send_line(ob, "☞ 특정 방파 초기화 기능은 현재 구현 중입니다.");
+    if is_empty(line) {
+        send_line(ob, "초기화할 방파를 입력하세요.");
+        return;
+    }
+    if !guild_has(line) {
+        send_line(ob, "* 그런 방파가 없습니다.");
+        return;
+    }
+    if guild_reset(line) {
+        send_line(ob, "* 방파가 초기화되었습니다.");
+    } else {
+        send_line(ob, "* 방파 초기화에 실패했습니다.");
+    }
 }
 
 fn main(ob, line) {
