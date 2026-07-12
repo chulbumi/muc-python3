@@ -41,7 +41,7 @@ fn cmd(ob, line) {
         send_line(ob, "☞ 알림 : 체력약 개수 부족");
     }
     if alias_has(ob, "체력약") && alias_has(ob, "체력") && alias_has(ob, "연속복용")
-        && alias_get(ob, "체력약") == result["name"] && alias_get(ob, "연속복용") == "켜기"
+        && alias_get(ob, "연속복용") == "켜기"
         && result["hp"] != 0 && get_int(ob, "체력") < to_int(alias_get(ob, "체력")) {
         queue_self_command(ob, line + " 먹어");
     }

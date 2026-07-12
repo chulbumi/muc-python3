@@ -11,8 +11,10 @@ fn cmd(ob, line) {
         return;
     }
     let result = book_borrow(ob, to_int(line));
-    if result == "" { send_line(ob, "☞ 대여가 완료 되었습니다."); }
-    else { send_line(ob, result); }
+    if result == "ok" { send_line(ob, "☞ 대여가 완료 되었습니다."); }
+    else if result == "borrowed" { send_line(ob, "☞ 현재 대여중 입니다."); }
+    else if result == "persist_failed" { send_line(ob, "☞ 대여 할 수 없습니다."); }
+    else { send_line(ob, "☞ 대여 가능한 물품이 없습니다."); }
 }
 
 fn main(ob, line) {

@@ -235,6 +235,8 @@ pub struct MobInstance {
     pub combat_dex: i64,
     /// Python Mob.moveTime, stored independently for each cloned mob.
     pub last_move_millis: i64,
+    /// Runtime-only arbitrary attributes set by Python-compatible admin commands.
+    pub runtime_attrs: HashMap<String, crate::object::Value>,
 }
 
 /// One temporary skill effect on a mob instance.
@@ -329,6 +331,7 @@ impl MobInstance {
             active_attack_skill: None,
             combat_dex: 0,
             last_move_millis: 0,
+            runtime_attrs: HashMap::new(),
         }
     }
 
@@ -579,6 +582,8 @@ impl MobInstance {
 pub struct MobCache {
     /// Cached mob data indexed by zone:filename
     mobs: HashMap<String, RawMobData>,
+    /// Python `Mob.Mobs` insertion order, used by global administrative scans.
+    mob_order: Vec<String>,
     /// Active mob instances indexed by zone:room
     instances: HashMap<String, Vec<MobInstance>>,
     /// Rooms whose Python `Room.create()` mob placement has run already.
@@ -646,6 +651,7 @@ impl MobCache {
     pub fn new() -> Self {
         Self {
             mobs: HashMap::new(),
+            mob_order: Vec::new(),
             instances: HashMap::new(),
             initialized_rooms: HashSet::new(),
             data_dir: PathBuf::from("data/mob"),
@@ -656,6 +662,7 @@ impl MobCache {
     pub fn with_data_dir<P: AsRef<Path>>(data_dir: P) -> Self {
         Self {
             mobs: HashMap::new(),
+            mob_order: Vec::new(),
             instances: HashMap::new(),
             initialized_rooms: HashSet::new(),
             data_dir: PathBuf::from(data_dir.as_ref()),
@@ -667,6 +674,9 @@ impl MobCache {
     /// `load_mob`.
     #[cfg(test)]
     pub(crate) fn insert_mob_data(&mut self, key: String, data: RawMobData) {
+        if !self.mobs.contains_key(&key) {
+            self.mob_order.push(key.clone());
+        }
         self.mobs.insert(key, data);
     }
 
@@ -687,9 +697,10 @@ impl MobCache {
     }
 
     pub fn item_holders(&self, item_key: &str) -> Vec<(String, String)> {
-        self.mobs
+        self.mob_order
             .iter()
-            .filter_map(|(key, mob)| {
+            .filter_map(|key| {
+                let mob = self.mobs.get(key)?;
                 let held = mob.items_for_sale.iter().any(|(item, _)| item == item_key)
                     || mob.use_items.iter().any(|(item, _, _, _)| item == item_key);
                 if held {
@@ -705,6 +716,9 @@ impl MobCache {
     /// runtime deletion; the source JSON file is intentionally preserved).
     pub fn remove_mob(&mut self, key: &str) -> bool {
         let removed = self.mobs.remove(key).is_some();
+        if removed {
+            self.mob_order.retain(|loaded| loaded != key);
+        }
         self.instances.retain(|_, mobs| {
             mobs.retain(|mob| mob.mob_key != key);
             !mobs.is_empty()
@@ -797,6 +811,7 @@ impl MobCache {
         let data = self.parse_mob_data(mob_info)?;
 
         // Cache it
+        self.mob_order.push(key.clone());
         self.mobs.insert(key, data.clone());
 
         Ok(data)

@@ -3499,6 +3499,8 @@ async fn handle_single_game_command(
         Option<i64>,
         Option<(String, usize, usize)>,
         Option<(String, i64)>,
+        bool,
+        bool,
     )> = None; // (giver_addr, zone, room, target_name, giver_name, give_silver, give_gold, give_item, give_item_stack)
     let mut shout_to_broadcast: Option<String> = None;
     let mut notice_to_broadcast: Option<String> = None;
@@ -3694,6 +3696,25 @@ async fn handle_single_game_command(
                 );
                 details.insert("소속".into(), Dynamic::from(p.body.get_string("소속")));
                 details.insert("투명상태".into(), Dynamic::from(p.body.get_int("투명상태")));
+                details.insert(
+                    "관리자등급".into(),
+                    Dynamic::from(p.body.get_int("관리자등급")),
+                );
+                for key in [
+                    "힘", "은전", "레벨", "최고체력", "최고내공", "민첩성", "맷집",
+                    "명중", "회피", "필살", "운", "나이",
+                ] {
+                    details.insert(key.into(), Dynamic::from(p.body.get_int(key)));
+                }
+                details.insert(
+                    "공격력".into(),
+                    Dynamic::from(i64::from(p.body.get_attack_power())),
+                );
+                details.insert(
+                    "숙련도차이".into(),
+                    Dynamic::from(p.body.get_mastery_diff()),
+                );
+                details.insert("방어력".into(), Dynamic::from(i64::from(p.body.get_armor())));
                 details.insert("host".into(), Dynamic::from(client_addr.ip().to_string()));
                 details.insert(
                     "설정상태".into(),
@@ -4227,6 +4248,8 @@ async fn handle_single_game_command(
                         give_gold,
                         give_item,
                         give_item_stack,
+                        deduct_from_giver,
+                        bypass_item_limits,
                     }) => {
                         give_pending = Some((
                             addr,
@@ -4238,6 +4261,8 @@ async fn handle_single_game_command(
                             give_gold,
                             give_item,
                             give_item_stack,
+                            deduct_from_giver,
+                            bypass_item_limits,
                         ));
                         String::new()
                     }
@@ -4630,6 +4655,8 @@ async fn handle_single_game_command(
         give_gold,
         give_item,
         give_item_stack,
+        deduct_from_giver,
+        bypass_item_limits,
     )) = give_pending.take()
     {
         use std::sync::Mutex;
@@ -4647,12 +4674,14 @@ async fn handle_single_game_command(
             {
                 let mut clients = broadcaster.clients.lock();
                 if let Some(giver) = clients.get_mut(&giver_addr).and_then(|c| c.player_mut()) {
-                    if let Some(amt) = give_silver {
-                        let have = giver.body.get_int("은전");
-                        giver.body.set("은전", (have - amt).max(0));
-                    } else if let Some(amt) = give_gold {
-                        let have = giver.body.get_int("금전");
-                        giver.body.set("금전", (have - amt).max(0));
+                    if deduct_from_giver {
+                        if let Some(amt) = give_silver {
+                            let have = giver.body.get_int("은전");
+                            giver.body.set("은전", (have - amt).max(0));
+                        } else if let Some(amt) = give_gold {
+                            let have = giver.body.get_int("금전");
+                            giver.body.set("금전", (have - amt).max(0));
+                        }
                     }
                     // give_item: 아래 별도 블록에서 giver+target 동시에 처리 (출력안함/줄수없음/무게/수량한계 검사)
                 }
@@ -4662,7 +4691,8 @@ async fn handle_single_game_command(
             // 접속 lifecycle이 아니므로 Broadcaster의 (name, addr) 인덱스는 그대로 유지한다.
             if give_item.is_some() {
                 if let Some((ref name, order, count)) = give_item {
-                    const MAX_ITEMS: usize = 300;
+                    let max_items = crate::script::get_murim_config_int("사용자아이템갯수")
+                        .max(0) as usize;
                     let mut clients = broadcaster.clients.lock();
                     match (clients.remove(&giver_addr), clients.remove(&taddr)) {
                         (None, target_opt) => {
@@ -4685,7 +4715,8 @@ async fn handle_single_game_command(
                                     let giver_body = &mut gp.body;
                                     let target_body = &mut tp.body;
                                     // 관리자는 무게/수량 제한 없음
-                                    let target_is_admin = target_body.get_int("관리자등급") >= 1000;
+                                    let target_is_admin = bypass_item_limits
+                                        || target_body.get_int("관리자등급") >= 1000;
                                     let mut n = 0usize;
                                     let mut running_weight: i64 = 0;
                                     for obj in &giver_body.object.objs {
@@ -4702,14 +4733,18 @@ async fn handle_single_game_command(
                                         if !ok || o.getBool("inUse") {
                                             continue;
                                         }
-                                        if o.checkAttr("아이템속성", "출력안함") {
+                                        if !bypass_item_limits
+                                            && o.checkAttr("아이템속성", "출력안함")
+                                        {
                                             continue;
                                         }
                                         n += 1;
                                         if n < order {
                                             continue;
                                         }
-                                        if o.checkAttr("아이템속성", "줄수없음") {
+                                        if !bypass_item_limits
+                                            && o.checkAttr("아이템속성", "줄수없음")
+                                        {
                                             if to_move.is_empty() {
                                                 give_item_error = Some((
                                                     "☞ 그 물건은 줄 수 없어요. ^^".to_string(),
@@ -4736,7 +4771,7 @@ async fn handle_single_game_command(
                                                 break;
                                             }
                                             if target_body.get_item_count() + to_move.len() + 1
-                                                > MAX_ITEMS
+                                                > max_items
                                             {
                                                 if to_move.is_empty() {
                                                     let iga = crate::hangul::han_iga(&target_name);
@@ -4759,6 +4794,17 @@ async fn handle_single_game_command(
                                             // object identity with
                                             // target.insert(obj), i.e. prepend.
                                             target_body.object.objs.insert(0, arc.clone());
+                                            if let Ok(item) = arc.lock() {
+                                                if item.checkAttr("아이템속성", "단일아이템") {
+                                                    let index = item.getString("인덱스");
+                                                    if !index.is_empty() {
+                                                        let _ = crate::oneitem::oneitem_have(
+                                                            &index,
+                                                            &target_name,
+                                                        );
+                                                    }
+                                                }
+                                            }
                                         }
                                     }
                                     clients.insert(giver_addr, giver);
@@ -4775,7 +4821,8 @@ async fn handle_single_game_command(
                     }
                 }
             } else if let Some((ref key, cnt)) = give_item_stack {
-                const MAX_ITEMS: usize = 300;
+                let max_items = crate::script::get_murim_config_int("사용자아이템갯수")
+                    .max(0) as usize;
                 let cnt_u = cnt as usize;
                 let w = get_item_weight_by_key(key);
                 let mut clients = broadcaster.clients.lock();
@@ -4823,7 +4870,7 @@ async fn handle_single_game_command(
                                     Some(format!("\r\n\x1b[1m{}\x1b[0;37m{} 줄려는 \x1b[36m{}\x1b[37m 무거워서 받지 못합니다.", giver_name, iga, go)),
                                 ));
                                 } else if !target_is_admin
-                                    && target_body.get_item_count() + cnt_u > MAX_ITEMS
+                                    && target_body.get_item_count() + cnt_u > max_items
                                 {
                                     let iga = crate::hangul::han_iga(&target_name);
                                     let disp = get_item_display_name(key);
@@ -4916,28 +4963,30 @@ async fn handle_single_game_command(
                     }
                 }
                 let iga = crate::hangul::han_iga(&giver_name);
+                let giver_a = format!("\x1b[1m{}\x1b[0;37m", giver_name);
+                let target_a = format!("\x1b[1m{}\x1b[0;37m", target_name);
                 let (to_self, to_target, to_room) = if let Some(amt) = give_silver {
                     (
-                        format!("당신이 {}에게 은전 {}개를 줍니다.", target_name, amt),
+                        format!("당신이 {}에게 은전 {}개를 줍니다.", target_a, amt),
                         format!(
                             "\r\n{}{} 당신에게 은전 {}개를 줍니다.",
-                            giver_name, iga, amt
+                            giver_a, iga, amt
                         ),
                         format!(
                             "{}{} {}에게 은전 {}개를 줍니다.",
-                            giver_name, iga, target_name, amt
+                            giver_a, iga, target_a, amt
                         ),
                     )
                 } else if let Some(amt) = give_gold {
                     (
-                        format!("당신이 {}에게 금전 {}개를 줍니다.", target_name, amt),
+                        format!("당신이 {}에게 금전 {}개를 줍니다.", target_a, amt),
                         format!(
                             "\r\n{}{} 당신에게 금전 {}개를 줍니다.",
-                            giver_name, iga, amt
+                            giver_a, iga, amt
                         ),
                         format!(
                             "{}{} {}에게 금전 {}개를 줍니다.",
-                            giver_name, iga, target_name, amt
+                            giver_a, iga, target_a, amt
                         ),
                     )
                 } else if c == 0 {
@@ -4970,12 +5019,12 @@ async fn handle_single_game_command(
                         if c == 1 {
                             format!(
                                 "{}{} {}에게 \x1b[36m{}\x1b[37m 줍니다.",
-                                giver_name, iga, target_name, post
+                                giver_a, iga, target_a, post
                             )
                         } else {
                             format!(
                                 "{}{} {}에게 \x1b[36m{}\x1b[37m {}개를 줍니다.",
-                                giver_name, iga, target_name, name_multi, c
+                                giver_a, iga, target_a, name_multi, c
                             )
                         },
                     )

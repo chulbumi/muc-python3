@@ -3,6 +3,11 @@
 
 fn cmd(ob, line) {
     if !require_admin(ob, 2000) { send_line(ob, "☞ 무슨 말인지 모르겠어요. *^_^*"); return; }
+    let requested = trim(line);
+    if requested == "" {
+        send_line(ob, "☞ 사용법: [제외할방향] 맵");
+        return;
+    }
     let pos = get_my_position(ob);
     if length(pos["zone"]) == 0 {
         send_line(ob, "\r\n* 아무것도 보이지 않습니다.\r\n");
@@ -11,11 +16,6 @@ fn cmd(ob, line) {
     let exits = get_exits_string(pos["zone"], pos["room"]);
     if length(exits) == 0 || (len(exits) >= 10 && substring(exits, 0, 10) == "  ○  어느 쪽으로도") {
         send_line(ob, "☞ 아무것도 보이지 않습니다.");
-        return;
-    }
-    let requested = trim(line);
-    if requested == "" {
-        send_line(ob, "☞ 사용법: [제외할방향] 맵");
         return;
     }
     // Python checks the raw `env.exitList` entry, not a substring of the

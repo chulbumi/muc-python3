@@ -1,4 +1,5 @@
-// 부셔.rhai - 아이템 부수기 (Python: cmds/부셔.py)
+// Python `cmds/부셔.py`: 파괴 가능 소지품을 제거하고 같은 방에 알린다.
+
 fn cmd(ob, line) {
     if !require_arg(ob, line) { send_line(ob, "☞ 사용법: [물품이름] [수량] 부숴"); return; }
     let args = line_args(line);
@@ -6,20 +7,30 @@ fn cmd(ob, line) {
     let count = if count < 1 { 1 } else { if count > 100 { 100 } else { count } };
     let parsed = parse_order_name(args[0]);
     let order = parsed[0];
-    let name = parsed[1];
-    let c = if order != 1 { 1 } else { count };
-    let n = item_destroy_busha(ob, name, order, c);
-    if n == -1 {
+    let requested = if order != 1 { 1 } else { count };
+    let result = item_break_detail(ob, parsed[1], order, requested);
+    if result["status"] == "unbreakable" {
         send_line(ob, "☞ 부셔지지 않네요. ^^");
         return;
     }
-    if n == 0 {
+    if result["status"] != "ok" {
         send_line(ob, "☞ 그런 아이템이 소지품에 없어요.");
         return;
     }
-    send_line(ob, format_item_action_self(name, "부셔버립니다.", n));
+    let name = result["name"].to_string();
+    let removed = result["count"].to_int();
+    let item_text = if removed == 1 {
+        "\x1b[36m" + name + han_eul(name) + "\x1b[37m"
+    } else {
+        "\x1b[36m" + name + "\x1b[37m " + removed.to_string() + "개를"
+    };
+    send_line(ob, "당신이 " + item_text + " 부셔버립니다.");
+    let own_name = get_string(ob, "이름");
+    let room_text = "\x1b[1m" + own_name + "\x1b[0;37m" + han_iga(own_name)
+        + " " + item_text + " 부셔버립니다.";
+    for player in get_room_players(ob) {
+        if player != own_name { send_to_user(player, room_text); }
+    }
 }
 
-fn main(ob, line) {
-    cmd(ob, line);
-}
+fn main(ob, line) { cmd(ob, line); }

@@ -1,38 +1,31 @@
-// 비교.rhai - 비교 명령어 (아이템 정보 비교)
-// Python: cmds/비교.py
+// Python `cmds/비교.py`: 같은 방 플레이어/몹과 예상 전투 횟수를 비교한다.
 
 fn cmd(ob, line) {
-    if is_empty(line) {
-        send_line(ob, "☞ 사용법: [아이템1] [아이템2] 비교");
+    if line == "" {
+        send_line(ob, "☞ 사용법: [대상] 비교");
         return;
     }
-    let words = line_args(line);
-    if len(words) < 2 {
-        send_line(ob, "☞ 사용법: [아이템1] [아이템2] 비교");
+    let result = compare_combat_target(ob, line);
+    if result["status"] == "invalid" || result["status"] == "self" {
+        send_line(ob, "자신의 상태를 통탄해 합니다. @_@");
         return;
     }
-    let w1 = trim(words[0]);
-    let w2 = trim(words[1]);
-    let d1 = get_item_data(w1);
-    let d2 = get_item_data(w2);
-    if type_of(d1) != "map" {
-        send_line(ob, "☞ '" + w1 + "' 아이템 정보를 찾을 수 없습니다.");
+    if result["status"] == "hidden" {
+        send_line(ob, "☞ 그런 비교대상이 없어요. ^^");
         return;
     }
-    if type_of(d2) != "map" {
-        send_line(ob, "☞ '" + w2 + "' 아이템 정보를 찾을 수 없습니다.");
+    if result["status"] == "refused" {
+        send_line(ob, "☞ 진정한 승부란 비무를 통해서 알 수 있는 것 이지");
         return;
     }
-    let n1 = d1["이름"];
-    let n2 = d2["이름"];
-    let a1 = d1["공격력"];
-    let a2 = d2["공격력"];
-    let d1v = d1["방어력"];
-    let d2v = d2["방어력"];
-    send_line(ob, "■ " + w1 + " : " + n1 + " (공격 " + a1 + " / 방어 " + d1v + ")");
-    send_line(ob, "■ " + w2 + " : " + n2 + " (공격 " + a2 + " / 방어 " + d2v + ")");
+    let name = result["name"].to_string();
+    send_line(ob, "━━━━━━━━━━━━━━━");
+    send_line(ob, "▶ \x1b[1m" + name + "\x1b[0;37m" + han_wa(name) + "의 상대비교");
+    send_line(ob, "───────────────");
+    send_line(ob, "☞ 당신의 승률 오차ː" + result["mine"].to_string());
+    send_line(ob, "☞ 상대의 승률 오차ː" + result["other"].to_string());
+    send_line(ob, "☞ 승  률 오차 결과ː" + (result["mine"].to_int() - result["other"].to_int()).to_string());
+    send_line(ob, "━━━━━━━━━━━━━━━");
 }
 
-fn main(ob, line) {
-    cmd(ob, line);
-}
+fn main(ob, line) { cmd(ob, line); }

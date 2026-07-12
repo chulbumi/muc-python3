@@ -143,12 +143,78 @@ pub fn guild_remove(id: &str) -> bool {
     ok
 }
 
+fn clear_room_guild_owner(map_root: &std::path::Path, location: &str) -> Vec<String> {
+    let Some((zone, room)) = location.split_once(':') else {
+        return Vec::new();
+    };
+    let path = map_root.join(zone).join(format!("{room}.json"));
+    let Ok(raw) = std::fs::read_to_string(&path) else {
+        return Vec::new();
+    };
+    let Ok(mut root) = serde_json::from_str::<Value>(&raw) else {
+        return Vec::new();
+    };
+    let Some(info) = root.get_mut("맵정보").and_then(Value::as_object_mut) else {
+        return Vec::new();
+    };
+    let entrances = match info.get("방파입구") {
+        Some(Value::Array(values)) => values
+            .iter()
+            .filter_map(Value::as_str)
+            .map(str::to_string)
+            .collect(),
+        Some(Value::String(value)) => value
+            .split("\r\n")
+            .filter(|entry| !entry.is_empty())
+            .map(str::to_string)
+            .collect(),
+        _ => Vec::new(),
+    };
+    info.remove("방파주인");
+    if let Ok(serialized) = serde_json::to_string_pretty(&root) {
+        let _ = std::fs::write(path, serialized);
+    }
+    entrances
+}
+
+fn clear_guild_rooms(map_root: &std::path::Path, home: &str) -> Vec<(String, String)> {
+    let Some((zone, _)) = home.split_once(':') else {
+        return Vec::new();
+    };
+    let entrances = clear_room_guild_owner(map_root, home);
+    let mut cleared = Vec::new();
+    if let Some((home_zone, home_room)) = home.split_once(':') {
+        cleared.push((home_zone.to_string(), home_room.to_string()));
+    }
+    for entrance in entrances {
+        let location = if entrance.contains(':') {
+            entrance
+        } else {
+            format!("{zone}:{entrance}")
+        };
+        clear_room_guild_owner(map_root, &location);
+        if let Some((entry_zone, entry_room)) = location.split_once(':') {
+            cleared.push((entry_zone.to_string(), entry_room.to_string()));
+        }
+    }
+    cleared
+}
+
 /// Remove a guild and clear its membership from persisted player records.
 /// Python's administrator reset leaves no player attached to the deleted guild.
 pub fn guild_reset(id: &str) -> bool {
+    let home = get_guild().read().unwrap().get_string(id, "방파맵");
     let removed = guild_remove(id);
     if !removed {
         return false;
+    }
+    if !home.is_empty() {
+        let cleared = clear_guild_rooms(std::path::Path::new("data/map"), &home);
+        if let Ok(mut world) = crate::world::get_world_state().write() {
+            for (zone, room) in cleared {
+                world.room_cache.remove_room(&zone, &room);
+            }
+        }
     }
     let Ok(entries) = std::fs::read_dir("data/user") else {
         return true;
@@ -327,4 +393,61 @@ pub fn guild_add_member(id: &str, role: &str, member: &str) -> bool {
     *count = Value::String(n.saturating_add(1).to_string());
     let _ = guild.save();
     true
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn reset_room_cleanup_removes_owner_from_home_and_relative_or_absolute_entrances() {
+        let root = std::env::temp_dir().join(format!(
+            "muc-guild-rooms-{}-{}",
+            std::process::id(),
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap()
+                .as_nanos()
+        ));
+        for (zone, room, entrances) in [
+            ("시험존", "1", serde_json::json!(["2", "다른존:3"])),
+            ("시험존", "2", serde_json::json!([])),
+            ("다른존", "3", serde_json::json!([])),
+        ] {
+            let dir = root.join(zone);
+            std::fs::create_dir_all(&dir).unwrap();
+            std::fs::write(
+                dir.join(format!("{room}.json")),
+                serde_json::to_string_pretty(&serde_json::json!({
+                    "맵정보": {
+                        "이름": "시험방",
+                        "방파주인": "시험방파",
+                        "방파입구": entrances
+                    }
+                }))
+                .unwrap(),
+            )
+            .unwrap();
+        }
+
+        let cleared = clear_guild_rooms(&root, "시험존:1");
+        assert_eq!(
+            cleared,
+            vec![
+                ("시험존".to_string(), "1".to_string()),
+                ("시험존".to_string(), "2".to_string()),
+                ("다른존".to_string(), "3".to_string())
+            ]
+        );
+        for path in [
+            root.join("시험존/1.json"),
+            root.join("시험존/2.json"),
+            root.join("다른존/3.json"),
+        ] {
+            let json: Value =
+                serde_json::from_str(&std::fs::read_to_string(path).unwrap()).unwrap();
+            assert!(json["맵정보"].get("방파주인").is_none());
+        }
+        let _ = std::fs::remove_dir_all(root);
+    }
 }

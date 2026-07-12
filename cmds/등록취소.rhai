@@ -11,7 +11,10 @@ fn cmd(ob, line) {
         return;
     }
     let result = book_cancel(ob, to_int(line));
-    if result == "" { send_line(ob, "☞ 등록 취소 되었습니다."); } else { send_line(ob, result); }
+    if result == "ok" { send_line(ob, "☞ 등록 취소 되었습니다."); }
+    else if result == "not_owner" { send_line(ob, "☞ 자신이 등록한 물품이 아닙니다."); }
+    else if result == "borrowed" { send_line(ob, "☞ 대여 중입니다."); }
+    else { send_line(ob, "☞ 등록 취소 가능한 물품이 없습니다."); }
 }
 
 fn main(ob, line) {

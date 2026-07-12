@@ -98,6 +98,7 @@ pub(crate) use party::{
 };
 
 use encoding::{EncoderTrap, Encoding};
+use rand::Rng;
 use rhai::{Dynamic, Engine, Scope};
 use std::cell::RefCell;
 use std::collections::HashMap;
@@ -1378,6 +1379,281 @@ pub(crate) fn current_body_position(body: &Body) -> Option<(String, String)> {
         }
     }
     None
+}
+
+fn book_catalog_path(_body: &Body) -> String {
+    #[cfg(test)]
+    {
+        let configured = _body.get_string("__시험도서목록경로");
+        if !configured.is_empty() {
+            return configured;
+        }
+    }
+    "data/config/book.json".to_string()
+}
+
+fn rewrite_room_exits(
+    zone: &str,
+    room: &str,
+    edit: impl FnOnce(&mut Vec<String>) -> String,
+) -> String {
+    let path = format!("data/map/{zone}/{room}.json");
+    let Ok(text) = std::fs::read_to_string(&path) else {
+        return "missing".to_string();
+    };
+    let Ok(mut root) = serde_json::from_str::<serde_json::Value>(&text) else {
+        return "missing".to_string();
+    };
+    let Some(raw) = root
+        .get_mut("맵정보")
+        .and_then(|value| value.get_mut("출구"))
+    else {
+        return "missing".to_string();
+    };
+    let mut exits = match raw {
+        serde_json::Value::Array(values) => values
+            .iter()
+            .filter_map(|value| value.as_str().map(ToString::to_string))
+            .collect(),
+        serde_json::Value::String(value) => value
+            .split("\r\n")
+            .filter(|entry| !entry.is_empty())
+            .map(ToString::to_string)
+            .collect(),
+        _ => return "missing".to_string(),
+    };
+    let status = edit(&mut exits);
+    if status == "missing" {
+        return status;
+    }
+    *raw = serde_json::Value::Array(
+        exits
+            .into_iter()
+            .map(serde_json::Value::String)
+            .collect(),
+    );
+    if std::fs::write(&path, serde_json::to_string_pretty(&root).unwrap_or(text)).is_err() {
+        return "missing".to_string();
+    }
+    status
+}
+
+fn python_coerce_attribute(existing: Option<&Value>, raw: &str) -> Result<Value, ()> {
+    match existing {
+        Some(Value::Int(_)) => raw.parse::<i64>().map(Value::Int).map_err(|_| ()),
+        Some(Value::Float(_)) => raw.parse::<f64>().map(Value::Float).map_err(|_| ()),
+        Some(Value::String(_)) => Ok(Value::String(raw.to_string())),
+        None => Ok(raw.into()),
+    }
+}
+
+fn python_set_admin_target(body: &mut Body, target: &str, key: &str, raw: &str) -> String {
+    let Some((zone, room)) = current_body_position(body) else {
+        return "missing".into();
+    };
+    if target == "방" {
+        get_world_state()
+            .write()
+            .unwrap()
+            .get_room_attrs_mut(&zone, &room)
+            .insert(key.to_string(), raw.to_string());
+        return "ok".into();
+    }
+    if target == body.get_name() || target == "나" {
+        let value = match python_coerce_attribute(body.object.attr.get(key), raw) {
+            Ok(value) => value,
+            Err(()) => return "invalid".into(),
+        };
+        body.set(key, value);
+        return "ok".into();
+    }
+
+    let room_objects = get_world_state()
+        .read()
+        .ok()
+        .map(|world| world.get_room_objs(&zone, &room).to_vec())
+        .unwrap_or_default();
+    for object in room_objects {
+        let Ok(mut object) = object.lock() else { continue };
+        if object.getName() != target
+            && !object
+                .getString("반응이름")
+                .split("\r\n")
+                .any(|alias| alias == target)
+        {
+            continue;
+        }
+        let value = match python_coerce_attribute(object.attr.get(key), raw) {
+            Ok(value) => value,
+            Err(()) => return "invalid".into(),
+        };
+        object.set(key, value);
+        return "ok".into();
+    }
+
+    let mob_id = get_world_state().read().ok().and_then(|world| {
+        world
+            .mob_cache
+            .get_all_mobs_in_room(&zone, &room)
+            .into_iter()
+            .find_map(|mob| {
+                let data = world.get_mob_data(&mob.mob_key)?;
+                (mob.name == target
+                    || data.name == target
+                    || data.reaction_names.iter().any(|alias| alias == target))
+                    .then_some(mob.instance_id)
+            })
+    });
+    if let Some(mob_id) = mob_id {
+        let mut world = get_world_state().write().unwrap();
+        let Some(mobs) = world.mob_cache.get_all_mobs_in_room_mut(&zone, &room) else {
+            return "missing".into();
+        };
+        let Some(mob) = mobs.iter_mut().find(|mob| mob.instance_id == mob_id) else {
+            return "missing".into();
+        };
+        let existing = match key {
+            "이름" => Some(Value::String(mob.name.clone())),
+            "체력" => Some(Value::Int(mob.hp)),
+            "최고체력" => Some(Value::Int(mob.max_hp)),
+            "내공" => Some(Value::Int(mob.mp)),
+            "최고내공" => Some(Value::Int(mob.max_mp)),
+            "은전" => Some(Value::Int(mob.gold)),
+            "레벨" => Some(Value::Int(mob.level)),
+            "힘" => Some(Value::Int(mob.strength)),
+            "맷집" => Some(Value::Int(mob.arm)),
+            "민첩성" => Some(Value::Int(mob.agility)),
+            _ => mob.runtime_attrs.get(key).cloned(),
+        };
+        let value = match python_coerce_attribute(existing.as_ref(), raw) {
+            Ok(value) => value,
+            Err(()) => return "invalid".into(),
+        };
+        match (key, &value) {
+            ("이름", Value::String(value)) => mob.name = value.clone(),
+            ("체력", Value::Int(value)) => mob.hp = *value,
+            ("최고체력", Value::Int(value)) => mob.max_hp = *value,
+            ("내공", Value::Int(value)) => mob.mp = *value,
+            ("최고내공", Value::Int(value)) => mob.max_mp = *value,
+            ("은전", Value::Int(value)) => mob.gold = *value,
+            ("레벨", Value::Int(value)) => mob.level = *value,
+            ("힘", Value::Int(value)) => mob.strength = *value,
+            ("맷집", Value::Int(value)) => mob.arm = *value,
+            ("민첩성", Value::Int(value)) => mob.agility = *value,
+            _ => {
+                mob.runtime_attrs.insert(key.to_string(), value);
+            }
+        }
+        return "ok".into();
+    }
+
+    // Python falls back from env.findObjName() to the player's inventory.
+    for object in &body.object.objs {
+        let Ok(mut object) = object.lock() else { continue };
+        if object.getName() != target
+            && !object
+                .getString("반응이름")
+                .split("\r\n")
+                .any(|alias| alias == target)
+        {
+            continue;
+        }
+        let value = match python_coerce_attribute(object.attr.get(key), raw) {
+            Ok(value) => value,
+            Err(()) => return "invalid".into(),
+        };
+        object.set(key, value);
+        return "ok".into();
+    }
+    "missing".into()
+}
+
+fn destroy_item_result(status: &str, name: String, count: i64) -> rhai::Map {
+    let mut result = rhai::Map::new();
+    result.insert("status".into(), Dynamic::from(status.to_string()));
+    result.insert("name".into(), Dynamic::from(name));
+    result.insert("count".into(), Dynamic::from(count));
+    result
+}
+
+fn destroy_inventory_for_command(
+    body: &mut Body,
+    wanted: &str,
+    order: i64,
+    count: i64,
+    break_mode: bool,
+) -> rhai::Map {
+    let order = order.max(1) as usize;
+    let count = count.clamp(1, 100) as usize;
+    if !break_mode && order == 1 {
+        if let Some(key) = find_item_key_by_name(wanted) {
+            if is_stackable(&key) {
+                let have = *body.object.inv_stack.get(&key).unwrap_or(&0);
+                let removed = (count as i64).clamp(0, have);
+                if removed > 0 {
+                    if let Some(value) = body.object.inv_stack.get_mut(&key) {
+                        *value -= removed;
+                        if *value <= 0 {
+                            body.object.inv_stack.remove(&key);
+                        }
+                    }
+                    let name = object_from_item_json(&key)
+                        .and_then(|(item, _)| item.lock().ok().map(|item| item.getName()))
+                        .unwrap_or_else(|| wanted.to_string());
+                    let _ = save_body_to_json(body, &format!("data/user/{}.json", body.get_name()));
+                    return destroy_item_result("ok", name, removed);
+                }
+            }
+        }
+    }
+
+    let mut matched = 0usize;
+    let mut selected: Vec<Arc<Mutex<Object>>> = Vec::new();
+    let mut last_name = String::new();
+    for item in &body.object.objs {
+        let Ok(object) = item.lock() else { continue };
+        let aliases = reaction_names(&object.getString("반응이름"));
+        if object.getName() != wanted && !aliases.iter().any(|alias| alias == wanted) {
+            continue;
+        }
+        if object.getBool("inUse")
+            || (break_mode && object.checkAttr("아이템속성", "출력안함"))
+        {
+            continue;
+        }
+        matched += 1;
+        if matched < order {
+            continue;
+        }
+        if break_mode && object.checkAttr("아이템속성", "부수지못함") {
+            if selected.is_empty() {
+                return destroy_item_result("unbreakable", String::new(), 0);
+            }
+            continue;
+        }
+        last_name = object.getName();
+        selected.push(item.clone());
+        if selected.len() >= count {
+            break;
+        }
+    }
+    if selected.is_empty() {
+        return destroy_item_result("missing", String::new(), 0);
+    }
+    for item in &selected {
+        if let Ok(object) = item.lock() {
+            if object.checkAttr("아이템속성", "단일아이템") {
+                let index = object.getString("인덱스");
+                if !index.is_empty() {
+                    let _ = crate::oneitem::oneitem_destroy(&index);
+                }
+            }
+        }
+        body.object.remove(item);
+    }
+    let removed = selected.len() as i64;
+    let _ = save_body_to_json(body, &format!("data/user/{}.json", body.get_name()));
+    destroy_item_result("ok", last_name, removed)
 }
 
 // ============================================================
@@ -4663,6 +4939,19 @@ pub fn create_engine_with_body_and_output(
             len as i64
         },
     );
+    let body_ptr_destroy_detail = body_ptr;
+    engine.register_fn(
+        "item_destroy_detail",
+        move |_ob: &mut rhai::Map, name: &str, order: i64, count: i64| -> rhai::Map {
+            destroy_inventory_for_command(
+                unsafe { &mut *body_ptr_destroy_detail },
+                name,
+                order,
+                count,
+                false,
+            )
+        },
+    );
 
     // Python `분해.py`: merchant-gated decomposition of optioned weapons/armor.
     // The script owns all messages; this efun performs only the ordered state change.
@@ -4786,6 +5075,19 @@ pub fn create_engine_with_body_and_output(
                 body.object.remove(&arc);
             }
             len as i64
+        },
+    );
+    let body_ptr_break_detail = body_ptr;
+    engine.register_fn(
+        "item_break_detail",
+        move |_ob: &mut rhai::Map, name: &str, order: i64, count: i64| -> rhai::Map {
+            destroy_inventory_for_command(
+                unsafe { &mut *body_ptr_break_detail },
+                name,
+                order,
+                count,
+                true,
+            )
         },
     );
 
@@ -5225,6 +5527,94 @@ pub fn create_engine_with_body_and_output(
         },
     );
 
+    let body_ptr_merchant_exists = body_ptr;
+    engine.register_fn("room_has_merchant", move |_ob: &mut rhai::Map| -> bool {
+        let body = unsafe { &*body_ptr_merchant_exists };
+        let Some((zone, room)) = current_body_position(body) else {
+            return false;
+        };
+        get_world_state()
+            .read()
+            .ok()
+            .map(|world| {
+                world.get_mobs_in_room(&zone, &room).into_iter().any(|mob| {
+                    world.get_mob_data(&mob.mob_key).is_some_and(|data| {
+                        !data.items_for_sale.is_empty() || data.buy_percent > 0
+                    })
+                })
+            })
+            .unwrap_or(false)
+    });
+
+    // Python 기부.py: deposit carried silver into the same-room 표두.
+    let body_ptr_donate = body_ptr;
+    engine.register_fn(
+        "donate_to_guard",
+        move |_ob: &mut rhai::Map, requested: i64| -> Dynamic {
+            let body = unsafe { &mut *body_ptr_donate };
+            let mut result = rhai::Map::new();
+            let Some((zone, room)) = current_body_position(body) else {
+                result.insert("status".into(), Dynamic::from("no_guard"));
+                return Dynamic::from(result);
+            };
+            let mut world = get_world_state().write().unwrap();
+            let guard_id = world
+                .mob_cache
+                .get_mobs_in_room(&zone, &room)
+                .into_iter()
+                .find(|mob| {
+                    mob.name == "표두"
+                        || world.mob_cache.get_mob(&mob.mob_key).is_some_and(|data| {
+                            data.reaction_names.iter().any(|name| name == "표두")
+                        })
+                })
+                .map(|mob| mob.instance_id);
+            let Some(guard_id) = guard_id else {
+                result.insert("status".into(), Dynamic::from("no_guard"));
+                return Dynamic::from(result);
+            };
+            if requested <= 0 {
+                result.insert("status".into(), Dynamic::from("invalid_amount"));
+                return Dynamic::from(result);
+            }
+            let amount = requested.min(body.get_int("은전"));
+            let Some(mobs) = world.mob_cache.get_all_mobs_in_room_mut(&zone, &room) else {
+                result.insert("status".into(), Dynamic::from("no_guard"));
+                return Dynamic::from(result);
+            };
+            let guard = mobs.iter_mut().find(|mob| mob.instance_id == guard_id).unwrap();
+            let guard_key = guard.mob_key.clone();
+            guard.gold = guard.gold.saturating_add(amount);
+            let total = guard.gold;
+            body.set("은전", body.get_int("은전").saturating_sub(amount));
+            drop(world);
+
+            let _ = save_body_to_json(body, &format!("data/user/{}.json", body.get_name()));
+            if let Some((mob_zone, mob_id)) = guard_key.split_once(':') {
+                let path = std::path::Path::new("data/mob")
+                    .join(mob_zone)
+                    .join(format!("{mob_id}.json"));
+                if let Ok(raw) = std::fs::read_to_string(&path) {
+                    if let Ok(mut root) = serde_json::from_str::<serde_json::Value>(&raw) {
+                        if let Some(info) = root
+                            .get_mut("몹정보")
+                            .and_then(serde_json::Value::as_object_mut)
+                        {
+                            info.insert("은전".into(), serde_json::Value::Number(total.into()));
+                            if let Ok(serialized) = serde_json::to_string_pretty(&root) {
+                                let _ = std::fs::write(path, format!("{serialized}\n"));
+                            }
+                        }
+                    }
+                }
+            }
+            result.insert("status".into(), Dynamic::from("ok"));
+            result.insert("amount".into(), Dynamic::from(amount));
+            result.insert("total".into(), Dynamic::from(total));
+            Dynamic::from(result)
+        },
+    );
+
     // Python 수령.py: withdraw a daily donation from the same-room 표두.
     // User-visible messages remain in Rhai; this efun owns only validation,
     // mutable mob silver and player state.
@@ -5389,7 +5779,145 @@ pub fn create_engine_with_body_and_output(
                 m.insert("total_cost".into(), Dynamic::from(0i64));
                 return Dynamic::from(m);
             }
-            let cnt = count.clamp(1, 50);
+            if let Some((guard_template, _)) = object_from_item_json(&item_key) {
+                let is_guard = guard_template
+                    .lock()
+                    .is_ok_and(|item| item.getString("종류") == "호위");
+                if is_guard {
+                    drop(w);
+                    let guard = guard_template.lock().unwrap();
+                    let faction = guard.getString("구매속성");
+                    let personality = body.get_string("성격");
+                    if personality != "기인" && personality != "선인" {
+                        if faction == "사파" && personality != faction {
+                            m.insert("err".into(), Dynamic::from("guard_evil_only"));
+                            return Dynamic::from(m);
+                        }
+                        if faction == "정파" && personality != faction {
+                            m.insert("err".into(), Dynamic::from("guard_right_only"));
+                            return Dynamic::from(m);
+                        }
+                    }
+                    let conditions = attr_string_list(&guard.getString("구매조건"));
+                    if conditions.is_empty() {
+                        m.insert("err".into(), Dynamic::from("guard_unavailable"));
+                        return Dynamic::from(m);
+                    }
+                    let guard_name = guard.getName();
+                    let guard_level = guard.getInt("구매레벨");
+                    let mut same_count = 0i64;
+                    let mut max_level = 0i64;
+                    for item in &body.object.objs {
+                        if let Ok(item) = item.lock() {
+                            if item.getString("종류") != "호위" {
+                                continue;
+                            }
+                            if item.getName() == guard_name {
+                                same_count += 1;
+                            }
+                            max_level = max_level.max(item.getInt("구매레벨"));
+                        }
+                    }
+                    if guard_level < max_level {
+                        m.insert("err".into(), Dynamic::from("guard_level"));
+                        return Dynamic::from(m);
+                    }
+                    let limit = attr_string_list(&guard.getString("아이템속성"))
+                        .into_iter()
+                        .find_map(|attribute| {
+                            let words: Vec<_> = attribute.split_whitespace().collect();
+                            (words.first() == Some(&"소지한계"))
+                                .then(|| words.get(1)?.parse::<i64>().ok())
+                                .flatten()
+                        })
+                        .unwrap_or(0);
+                    if same_count >= limit {
+                        m.insert("err".into(), Dynamic::from("guard_limit"));
+                        return Dynamic::from(m);
+                    }
+                    let herb = |item: &Object| {
+                        matches!(
+                            item.getString("인덱스").as_str(),
+                            "합성1" | "합성2" | "합성3" | "합성4" | "합성5"
+                                | "합성6" | "합성7" | "합성8" | "합성9"
+                        )
+                    };
+                    let herb_count = body
+                        .object
+                        .objs
+                        .iter()
+                        .filter(|item| item.lock().is_ok_and(|item| herb(&item)))
+                        .count() as i64;
+                    let named_count = |wanted: &str| {
+                        body.object
+                            .objs
+                            .iter()
+                            .filter(|item| item.lock().is_ok_and(|item| item.getName() == wanted))
+                            .count() as i64
+                    };
+                    let mut consume_name = String::new();
+                    let mut consume_count = 0i64;
+                    for condition in conditions {
+                        let words: Vec<_> = condition.split_whitespace().collect();
+                        if words.len() == 2 {
+                            let needed = words[1].parse::<i64>().unwrap_or(0);
+                            let available = if words[0] == "약초" {
+                                herb_count
+                            } else {
+                                named_count(words[0])
+                            };
+                            if available >= needed {
+                                consume_name = words[0].to_string();
+                                consume_count = needed;
+                                break;
+                            }
+                        } else if words.len() == 3
+                            && named_count(words[0]) >= 1
+                            && herb_count >= words[2].parse::<i64>().unwrap_or(0)
+                        {
+                            consume_name = words[1].to_string();
+                            consume_count = words[2].parse::<i64>().unwrap_or(0);
+                            break;
+                        }
+                    }
+                    if consume_name.is_empty() {
+                        m.insert("err".into(), Dynamic::from("guard_unavailable"));
+                        return Dynamic::from(m);
+                    }
+                    drop(guard);
+                    let mut removed = 0i64;
+                    let mut materials = Vec::new();
+                    for item in &body.object.objs {
+                        let matches = item.lock().is_ok_and(|item| {
+                            if consume_name == "약초" {
+                                herb(&item)
+                            } else {
+                                item.getName() == consume_name
+                            }
+                        });
+                        if matches {
+                            materials.push(item.clone());
+                            removed += 1;
+                            if removed >= consume_count {
+                                break;
+                            }
+                        }
+                    }
+                    for item in materials {
+                        body.object.remove(&item);
+                    }
+                    body.object.objs.insert(0, guard_template);
+                    let path = format!("data/user/{}.json", body.get_name());
+                    let _ = save_body_to_json(body, &path);
+                    m.insert("err".into(), Dynamic::from(String::new()));
+                    m.insert("bought".into(), Dynamic::from(1_i64));
+                    m.insert("display_name".into(), Dynamic::from(guard_name));
+                    m.insert("total_cost".into(), Dynamic::from(0_i64));
+                    m.insert("guard".into(), Dynamic::from(true));
+                    return Dynamic::from(m);
+                }
+            }
+            let cnt = count.clamp(1, 200);
             let max_items = get_murim_config_int("사용자아이템갯수").max(0) as usize;
             for _ in 0..cnt {
                 if body.get_item_count() >= max_items {
@@ -5432,6 +5960,7 @@ pub fn create_engine_with_body_and_output(
             m.insert("bought".into(), Dynamic::from(bought));
             m.insert("display_name".into(), Dynamic::from(display_name.clone()));
             m.insert("total_cost".into(), Dynamic::from(total_cost));
+            m.insert("guard".into(), Dynamic::from(false));
             Dynamic::from(m)
         },
     );
@@ -5484,31 +6013,54 @@ pub fn create_engine_with_body_and_output(
                     }
                 }
             }
-            let mut n = 0usize;
-            let mut to_remove: Vec<Arc<Mutex<Object>>> = Vec::new();
+            let matches = |object: &Object, wanted: &str| {
+                object.getName() == wanted
+                    || reaction_names(&object.getString("반응이름"))
+                        .iter()
+                        .any(|alias| alias == wanted)
+            };
+            let matching: Vec<_> = body
+                .object
+                .objs
+                .iter()
+                .filter(|item| item.lock().is_ok_and(|item| matches(&item, name)))
+                .cloned()
+                .collect();
+            let Some(first) = matching.get(order - 1).cloned() else {
+                return vec![
+                    Dynamic::from(0_i64),
+                    Dynamic::from(0_i64),
+                    Dynamic::from(String::new()),
+                    Dynamic::from("no_item"),
+                ];
+            };
+            {
+                let first = first.lock().unwrap();
+                if first.getBool("inUse") || first.checkAttr("아이템속성", "출력안함") {
+                    return vec![
+                        Dynamic::from(0_i64),
+                        Dynamic::from(0_i64),
+                        Dynamic::from(String::new()),
+                        Dynamic::from("no_item"),
+                    ];
+                }
+                if first.checkAttr("아이템속성", "팔지못함") {
+                    return vec![
+                        Dynamic::from(0_i64),
+                        Dynamic::from(0_i64),
+                        Dynamic::from(String::new()),
+                        Dynamic::from("cant_sell"),
+                    ];
+                }
+            }
+            let mut to_remove: Vec<Arc<Mutex<Object>>> = vec![first];
             let mut total = 0i64;
             let mut display_name = String::new();
-            for obj in &body.object.objs {
-                if let Ok(o) = obj.lock() {
-                    let nm = o.getName();
-                    let rn = o.getString("반응이름");
-                    let match_ = nm == name || (!rn.is_empty() && rn.contains(name));
-                    if !match_ || o.getBool("inUse") || o.checkAttr("아이템속성", "출력안함")
-                    {
-                        continue;
-                    }
-                    n += 1;
-                    if n < order {
-                        continue;
-                    }
-                    if o.checkAttr("아이템속성", "팔지못함") {
-                        return vec![
-                            Dynamic::from(0i64),
-                            Dynamic::from(0i64),
-                            Dynamic::from(String::new()),
-                            Dynamic::from("cant_sell".to_string()),
-                        ];
-                    }
+            let mut processed = 0usize;
+            while processed < to_remove.len() && processed < count {
+                let current = to_remove[processed].clone();
+                {
+                    let o = current.lock().unwrap();
                     let mut price = (o.getInt("판매가격") * percent) / 100;
                     if let Some(options) = o.get_option() {
                         price = (price as f64 * (options.len() as f64 * 1.3)) as i64;
@@ -5517,30 +6069,40 @@ pub fn create_engine_with_body_and_output(
                     if display_name.is_empty() {
                         display_name = o.getName();
                     }
-                } else {
-                    continue;
                 }
-                to_remove.push(obj.clone());
-                if to_remove.len() >= count {
+                processed += 1;
+                if order != 1 || processed >= count {
                     break;
                 }
-            }
-            let err = if to_remove.is_empty() {
-                "no_item".to_string()
-            } else {
-                for arc in &to_remove {
-                    body.object.remove(arc);
+                let next = body.object.objs.iter().find(|candidate| {
+                    !to_remove.iter().any(|selected| Arc::ptr_eq(selected, candidate))
+                        && candidate.lock().is_ok_and(|item| matches(&item, name))
+                });
+                let Some(next) = next else { break };
+                if next.lock().is_ok_and(|item| item.getBool("inUse")) {
+                    break;
                 }
-                body.set("은전", body.get_int("은전") + total);
-                let path = format!("data/user/{}.json", body.get_name());
-                let _ = save_body_to_json(body, &path);
-                String::new()
-            };
+                to_remove.push(next.clone());
+            }
+            for arc in &to_remove {
+                if let Ok(item) = arc.lock() {
+                    if item.checkAttr("아이템속성", "단일아이템") {
+                        let index = item.getString("인덱스");
+                        if !index.is_empty() {
+                            let _ = crate::oneitem::oneitem_destroy(&index);
+                        }
+                    }
+                }
+                body.object.remove(arc);
+            }
+            body.set("은전", body.get_int("은전") + total);
+            let path = format!("data/user/{}.json", body.get_name());
+            let _ = save_body_to_json(body, &path);
             vec![
                 Dynamic::from(to_remove.len() as i64),
                 Dynamic::from(total),
                 Dynamic::from(display_name),
-                Dynamic::from(err),
+                Dynamic::from(String::new()),
             ]
         },
     );
@@ -5587,6 +6149,14 @@ pub fn create_engine_with_body_and_output(
                     }
                     (item.getName(), price)
                 };
+                if let Ok(item) = arc.lock() {
+                    if item.checkAttr("아이템속성", "단일아이템") {
+                        let index = item.getString("인덱스");
+                        if !index.is_empty() {
+                            let _ = crate::oneitem::oneitem_destroy(&index);
+                        }
+                    }
+                }
                 body.object.remove(&arc);
                 total = total.saturating_add(price);
                 let mut event = rhai::Map::new();
@@ -5729,6 +6299,10 @@ pub fn create_engine_with_body_and_output(
     engine.register_fn("get_online_names", get_online_names);
     engine.register_fn("get_connected_player_names", get_connected_player_names);
     engine.register_fn("user_refuses_shout", user_refuses_shout);
+    engine.register_fn(
+        "config_text_is_enabled",
+        |config: &str, key: &str| -> bool { config_is_enabled(config, key) },
+    );
 
     // Python `Player.adultCH` is a separate ordered global membership list,
     // not an alias for all online users. The network layer installs only
@@ -6397,6 +6971,25 @@ pub fn create_engine_with_body_and_output(
                 .unwrap_or_default()
         },
     );
+    let body_ptr_named_count = body_ptr;
+    engine.register_fn(
+        "inventory_named_count",
+        move |_ob: &mut rhai::Map, wanted: &str| -> i64 {
+            let body = unsafe { &*body_ptr_named_count };
+            let mut count = body
+                .object
+                .objs
+                .iter()
+                .filter(|item| item.lock().is_ok_and(|item| item.getName() == wanted))
+                .count() as i64;
+            for (key, stacked) in &body.object.inv_stack {
+                if get_item_info(key).is_some_and(|(name, _, _, _)| name == wanted) {
+                    count += *stacked;
+                }
+            }
+            count
+        },
+    );
 
     let body_ptr_alias_set = body_ptr;
     engine.register_fn(
@@ -6457,6 +7050,143 @@ pub fn create_engine_with_body_and_output(
             .temp_mut()
             .insert(SAVE_ALL_REQUEST.to_string(), Value::Int(1));
     });
+
+    let body_ptr_space_attr = body_ptr;
+    engine.register_fn(
+        "admin_set_space_value",
+        move |_ob: &mut rhai::Map, line: &str| -> String {
+            let body = unsafe { &mut *body_ptr_space_attr };
+            let input = line.trim_start();
+            let Some(first_end) = input.find(char::is_whitespace) else {
+                return "usage".into();
+            };
+            let target = &input[..first_end];
+            let rest = input[first_end..].trim_start();
+            let Some(second_end) = rest.find(char::is_whitespace) else {
+                return "usage".into();
+            };
+            let key = &rest[..second_end];
+            let raw = rest[second_end..].trim_start();
+            if target.is_empty() || key.is_empty() || raw.is_empty() {
+                return "usage".into();
+            }
+            if raw.chars().count() > 50 {
+                return "too_long".into();
+            }
+            python_set_admin_target(body, target, key, raw)
+        },
+    );
+
+    // Python `값값`: comma-separated room target assignment with existing-type coercion.
+    let body_ptr_comma_attr = body_ptr;
+    engine.register_fn(
+        "admin_set_comma_value",
+        move |_ob: &mut rhai::Map, line: &str| -> String {
+            let body = unsafe { &mut *body_ptr_comma_attr };
+            let words: Vec<&str> = line.splitn(3, ',').collect();
+            if line.is_empty() || words.len() < 3 {
+                return "usage".into();
+            }
+            let (target, key, raw) = (words[0], words[1], words[2]);
+            if raw.chars().count() > 20 {
+                return "too_long".into();
+            }
+            let Some((zone, room)) = current_body_position(body) else {
+                return "missing".into();
+            };
+
+            // Python Room.findObjName sees players as room objects. The executing
+            // player can therefore be selected by name as well.
+            if target == body.get_name() {
+                let value = match python_coerce_attribute(body.object.attr.get(key), raw) {
+                    Ok(value) => value,
+                    Err(()) => return "invalid".into(),
+                };
+                body.set(key, value);
+                return "ok".into();
+            }
+
+            let room_objects = get_world_state()
+                .read()
+                .ok()
+                .map(|world| world.get_room_objs(&zone, &room).to_vec())
+                .unwrap_or_default();
+            for object in room_objects {
+                let Ok(mut object) = object.lock() else { continue };
+                if object.getName() != target
+                    && !object
+                        .getString("반응이름")
+                        .split("\r\n")
+                        .any(|alias| alias == target)
+                {
+                    continue;
+                }
+                let value = match python_coerce_attribute(object.attr.get(key), raw) {
+                    Ok(value) => value,
+                    Err(()) => return "invalid".into(),
+                };
+                object.set(key, value);
+                return "ok".into();
+            }
+
+            let mob_id = get_world_state().read().ok().and_then(|world| {
+                world
+                    .mob_cache
+                    .get_all_mobs_in_room(&zone, &room)
+                    .into_iter()
+                    .find_map(|mob| {
+                        let data = world.get_mob_data(&mob.mob_key)?;
+                        (mob.name == target
+                            || data.name == target
+                            || data.reaction_names.iter().any(|alias| alias == target))
+                            .then_some(mob.instance_id)
+                    })
+            });
+            let Some(mob_id) = mob_id else {
+                return "missing".into();
+            };
+            let mut world = get_world_state().write().unwrap();
+            let Some(mobs) = world.mob_cache.get_all_mobs_in_room_mut(&zone, &room) else {
+                return "missing".into();
+            };
+            let Some(mob) = mobs.iter_mut().find(|mob| mob.instance_id == mob_id) else {
+                return "missing".into();
+            };
+            let existing = match key {
+                "이름" => Some(Value::String(mob.name.clone())),
+                "체력" => Some(Value::Int(mob.hp)),
+                "최고체력" => Some(Value::Int(mob.max_hp)),
+                "내공" => Some(Value::Int(mob.mp)),
+                "최고내공" => Some(Value::Int(mob.max_mp)),
+                "은전" => Some(Value::Int(mob.gold)),
+                "레벨" => Some(Value::Int(mob.level)),
+                "힘" => Some(Value::Int(mob.strength)),
+                "맷집" => Some(Value::Int(mob.arm)),
+                "민첩성" => Some(Value::Int(mob.agility)),
+                _ => mob.runtime_attrs.get(key).cloned(),
+            };
+            let value = match python_coerce_attribute(existing.as_ref(), raw) {
+                Ok(value) => value,
+                Err(()) => return "invalid".into(),
+            };
+            match (key, &value) {
+                ("이름", Value::String(value)) => mob.name = value.clone(),
+                ("체력", Value::Int(value)) => mob.hp = *value,
+                ("최고체력", Value::Int(value)) => mob.max_hp = *value,
+                ("내공", Value::Int(value)) => mob.mp = *value,
+                ("최고내공", Value::Int(value)) => mob.max_mp = *value,
+                ("은전", Value::Int(value)) => mob.gold = *value,
+                ("레벨", Value::Int(value)) => mob.level = *value,
+                ("힘", Value::Int(value)) => mob.strength = *value,
+                ("맷집", Value::Int(value)) => mob.arm = *value,
+                ("민첩성", Value::Int(value)) => mob.agility = *value,
+                _ => {
+                    mob.runtime_attrs.insert(key.to_string(), value);
+                }
+            }
+            "ok".into()
+        },
+    );
 
     // set_obj_attr(ob, target, key, val): 기능만. 대상에 속성 설정. 성공 true. 오류 메시지는 Rhai에서 send_line.
     let body_ptr_soa = body_ptr;
@@ -6708,8 +7438,8 @@ pub fn create_engine_with_body_and_output(
         },
     );
 
-    // exit_hide(ob, name): 기능만. 출구숨김. 성공 true. 오류 메시지는 Rhai에서 send_line.
-    engine.register_fn("exit_hide", move |ob: &mut rhai::Map, name: &str| -> bool {
+    // Python 출구숨김은 같은 명령으로 숨김/드러냄을 토글하고 방 파일을 저장한다.
+    engine.register_fn("exit_hide", move |ob: &mut rhai::Map, name: &str| -> String {
         let name_body = ob
             .get("이름")
             .and_then(|v| v.clone().into_string().ok())
@@ -6719,18 +7449,38 @@ pub fn create_engine_with_body_and_output(
                 .map(|p| (p.zone.clone(), p.room.clone()))
         }) {
             Some(x) => x,
-            None => return false,
+            None => return "missing".into(),
         };
-        let mut w = match get_world_state().write() {
-            Ok(g) => g,
-            Err(_) => return false,
-        };
-        let room_arc = match w.room_cache.get_room(&zone, &room.to_string()) {
-            Ok(r) => r,
-            Err(_) => return false,
-        };
-        let ok = room_arc.write().unwrap().set_exit_hidden(name, true);
-        ok
+        let status = rewrite_room_exits(&zone, &room, |exits| {
+            for exit in exits {
+                let Some((raw_name, destination)) = exit.split_once(char::is_whitespace) else {
+                    continue;
+                };
+                if raw_name.trim_end_matches('$') != name {
+                    continue;
+                }
+                let hidden = raw_name.ends_with('$');
+                *exit = format!(
+                    "{}{} {}",
+                    name,
+                    if hidden { "" } else { "$" },
+                    destination.trim()
+                );
+                return if hidden { "shown" } else { "hidden" }.to_string();
+            }
+            "missing".to_string()
+        });
+        if status != "missing" {
+            if let Ok(mut world) = get_world_state().write() {
+                if let Ok(room_arc) = world.room_cache.get_room(&zone, &room) {
+                    let _ = room_arc
+                        .write()
+                        .unwrap()
+                        .set_exit_hidden(name, status == "hidden");
+                }
+            }
+        }
+        status
     });
 
     // exit_show(ob, name): 출구 드러냄. 성공 true.
@@ -6774,6 +7524,23 @@ pub fn create_engine_with_body_and_output(
                 Some(x) => x,
                 None => return false,
             };
+            let status = rewrite_room_exits(&zone, &room, |exits| {
+                let before = exits.len();
+                exits.retain(|exit| {
+                    exit.split_whitespace()
+                        .next()
+                        .map(|raw| raw.trim_end_matches('$') != name)
+                        .unwrap_or(true)
+                });
+                if exits.len() < before {
+                    "removed".to_string()
+                } else {
+                    "missing".to_string()
+                }
+            });
+            if status == "missing" {
+                return false;
+            }
             let mut w = match get_world_state().write() {
                 Ok(g) => g,
                 Err(_) => return false,
@@ -6802,6 +7569,22 @@ pub fn create_engine_with_body_and_output(
                 Some(x) => x,
                 None => return false,
             };
+            let destination = format!("{zone}:{room}");
+            let status = rewrite_room_exits(&zone, &room, |exits| {
+                for exit in exits {
+                    let Some(raw_name) = exit.split_whitespace().next() else {
+                        continue;
+                    };
+                    if raw_name.trim_end_matches('$') == name {
+                        *exit = format!("{raw_name} {destination}");
+                        return "updated".to_string();
+                    }
+                }
+                "missing".to_string()
+            });
+            if status == "missing" {
+                return false;
+            }
             let mut w = match get_world_state().write() {
                 Ok(g) => g,
                 Err(_) => return false,
@@ -6856,6 +7639,195 @@ pub fn create_engine_with_body_and_output(
     engine.register_fn("rank_get_num", rank_get_num);
     engine.register_fn("rank_get_all", rank_get_all);
     engine.register_fn("rank_clear", rank_clear);
+    engine.register_fn("live_rank_entries", move |attribute: &str| -> rhai::Array {
+        let online = get_precomputed_all_online();
+        let mut entries: Vec<(usize, String, i64)> = online
+            .into_iter()
+            .enumerate()
+            .filter_map(|(index, value)| {
+                let map = value.try_cast::<rhai::Map>()?;
+                let name = map.get("이름")?.clone().into_string().ok()?;
+                if name.is_empty() {
+                    return None;
+                }
+                let admin = map
+                    .get("관리자등급")
+                    .and_then(|value| value.as_int().ok())
+                    .unwrap_or(0);
+                if admin != 0 {
+                    return None;
+                }
+                let value = map
+                    .get(attribute)
+                    .and_then(|value| {
+                        value.as_int().ok().or_else(|| value.to_string().parse::<i64>().ok())
+                    })
+                    .unwrap_or(0);
+                (value != 0).then_some((index, name, value))
+            })
+            .collect();
+        entries.sort_by(|left, right| {
+            right
+                .2
+                .cmp(&left.2)
+                .then_with(|| left.0.cmp(&right.0))
+        });
+        entries
+            .into_iter()
+            .take(30)
+            .map(|(_, name, value)| {
+                let mut entry = rhai::Map::new();
+                entry.insert("name".into(), Dynamic::from(name));
+                entry.insert("value".into(), Dynamic::from(value));
+                Dynamic::from(entry)
+            })
+            .collect()
+    });
+    let body_ptr_compare = body_ptr;
+    engine.register_fn(
+        "compare_combat_target",
+        move |_ob: &mut rhai::Map, input: &str| -> Dynamic {
+            let body = unsafe { &*body_ptr_compare };
+            let finish = |status: &str, name: String, mine: i64, other: i64| {
+                let mut result = rhai::Map::new();
+                result.insert("status".into(), Dynamic::from(status.to_string()));
+                result.insert("name".into(), Dynamic::from(name));
+                result.insert("mine".into(), Dynamic::from(mine));
+                result.insert("other".into(), Dynamic::from(other));
+                Dynamic::from(result)
+            };
+            if input == body.get_name() {
+                return finish("self", String::new(), 0, 0);
+            }
+            let Some((zone, room)) = current_body_position(body) else {
+                return finish("invalid", String::new(), 0, 0);
+            };
+            let random_damage = |base: i64| {
+                let base = base.max(1);
+                let low = base * 80 / 100;
+                let high = base * 120 / 100;
+                rand::thread_rng().gen_range(low..=high).max(1)
+            };
+            let player_base = |target_arm: i64, target_armor: i64| {
+                body.get_str() * 2 + body.get_max_mp() / 5
+                    + i64::from(body.get_attack_power())
+                    - body.get_mastery_diff()
+                    - target_arm
+                    - target_armor
+            };
+            if get_world_state()
+                .read()
+                .ok()
+                .is_some_and(|world| {
+                    world.get_room_objs(&zone, &room).iter().any(|item| {
+                        item.lock().is_ok_and(|item| {
+                            item.getName() == input
+                                || reaction_names(&item.getString("반응이름"))
+                                    .iter()
+                                    .any(|alias| alias == input)
+                        })
+                    })
+                })
+            {
+                return finish("invalid", String::new(), 0, 0);
+            }
+            let mob_target = get_world_state().read().ok().and_then(|world| {
+                world
+                    .mob_cache
+                    .get_all_mobs_in_room(&zone, &room)
+                    .into_iter()
+                    .find_map(|mob| {
+                        let data = world.get_mob_data(&mob.mob_key)?;
+                        (mob.name == input
+                            || data.name == input
+                            || data.reaction_names.iter().any(|alias| alias == input))
+                            .then_some((mob.clone(), data.clone()))
+                    })
+            });
+            if let Some((mob, data)) = mob_target {
+                if data.mob_type == 7 {
+                    return finish("hidden", String::new(), 0, 0);
+                }
+                if config_is_enabled(&body.get_string("설정상태"), "비교거부") {
+                    return finish("refused", String::new(), 0, 0);
+                }
+                let (mob_attack, mob_armor) = data.use_items.iter().fold(
+                    (0_i64, 0_i64),
+                    |(attack, armor), (key, _, _, _)| {
+                        let info = std::fs::read_to_string(format!("data/item/{key}.json"))
+                            .ok()
+                            .and_then(|raw| serde_json::from_str::<serde_json::Value>(&raw).ok())
+                            .and_then(|root| root.get("아이템정보").cloned());
+                        let Some(info) = info else { return (attack, armor) };
+                        (
+                            attack
+                                + info
+                                    .get("공격력")
+                                    .or_else(|| info.get("타격"))
+                                    .and_then(serde_json::Value::as_i64)
+                                    .unwrap_or(0),
+                            armor
+                                + info
+                                    .get("방어력")
+                                    .and_then(serde_json::Value::as_i64)
+                                    .unwrap_or(0),
+                        )
+                    },
+                );
+                let my_damage = random_damage(player_base(mob.arm, mob_armor));
+                let mob_damage = random_damage(
+                    mob.strength * 2 + mob_attack
+                        - body.get_arm()
+                        - i64::from(body.get_armor()),
+                );
+                return finish(
+                    "ok",
+                    mob.name,
+                    body.get_max_hp() / mob_damage,
+                    mob.hp / my_damage,
+                );
+            }
+            let target = get_precomputed_all_online().into_iter().find_map(|value| {
+                let map = value.try_cast::<rhai::Map>()?;
+                let name = map.get("이름")?.clone().into_string().ok()?;
+                let same_room = map.get("zone")?.to_string() == zone
+                    && map.get("room")?.to_string() == room;
+                (same_room && (name == input || name.starts_with(input)))
+                    .then_some((name, map))
+            });
+            let Some((target_name, target)) = target else {
+                return finish("invalid", String::new(), 0, 0);
+            };
+            let target_config = target
+                .get("설정상태")
+                .map(Dynamic::to_string)
+                .unwrap_or_default();
+            if config_is_enabled(&body.get_string("설정상태"), "비교거부")
+                || config_is_enabled(&target_config, "비교거부")
+            {
+                return finish("refused", String::new(), 0, 0);
+            }
+            let get = |key: &str| {
+                target
+                    .get(key)
+                    .and_then(|value| value.as_int().ok())
+                    .unwrap_or(0)
+            };
+            let my_damage = random_damage(player_base(get("맷집"), get("방어력")));
+            let target_damage = random_damage(
+                get("힘") * 2 + get("최고내공") / 5 + get("공격력")
+                    - get("숙련도차이")
+                    - body.get_arm()
+                    - i64::from(body.get_armor()),
+            );
+            finish(
+                "ok",
+                target_name,
+                body.get_max_hp() / target_damage,
+                get("최고체력") / my_damage,
+            )
+        },
+    );
 
     // password_hash(plain): 평문을 SHA-512 해시 16진수 문자열로. 암호 저장/암호변경용.
     engine.register_fn("password_hash", |plain: &str| -> String {
@@ -7288,6 +8260,8 @@ pub fn create_engine_with_body_and_output(
                     give_gold: None,
                     give_item: None,
                     give_item_stack: None,
+                    deduct_from_giver: true,
+                    bypass_item_limits: false,
                 });
             }
             String::new()
@@ -7317,6 +8291,58 @@ pub fn create_engine_with_body_and_output(
                     give_gold: Some(give),
                     give_item: None,
                     give_item_stack: None,
+                    deduct_from_giver: true,
+                    bypass_item_limits: false,
+                });
+            }
+            String::new()
+        },
+    );
+
+    // Python 관리자 `줘줘`: 지급자의 잔액을 차감하지 않고 대상에게 화폐를 생성한다.
+    let spec_grant_silver = spec.clone();
+    let body_ptr_grant_silver = body_ptr;
+    engine.register_fn(
+        "request_grant_silver",
+        move |_ob: &mut rhai::Map, target: &str, amount: i64| -> String {
+            if amount < 1 {
+                return "usage".into();
+            }
+            let body = unsafe { &*body_ptr_grant_silver };
+            if let Ok(mut result) = spec_grant_silver.lock() {
+                *result = Some(CommandResult::GiveToPlayer {
+                    target_name: target.to_string(),
+                    giver_name: body.get_name(),
+                    give_silver: Some(amount),
+                    give_gold: None,
+                    give_item: None,
+                    give_item_stack: None,
+                    deduct_from_giver: false,
+                    bypass_item_limits: false,
+                });
+            }
+            String::new()
+        },
+    );
+    let spec_grant_gold = spec.clone();
+    let body_ptr_grant_gold = body_ptr;
+    engine.register_fn(
+        "request_grant_gold",
+        move |_ob: &mut rhai::Map, target: &str, amount: i64| -> String {
+            if amount < 1 {
+                return "usage".into();
+            }
+            let body = unsafe { &*body_ptr_grant_gold };
+            if let Ok(mut result) = spec_grant_gold.lock() {
+                *result = Some(CommandResult::GiveToPlayer {
+                    target_name: target.to_string(),
+                    giver_name: body.get_name(),
+                    give_silver: None,
+                    give_gold: Some(amount),
+                    give_item: None,
+                    give_item_stack: None,
+                    deduct_from_giver: false,
+                    bypass_item_limits: false,
                 });
             }
             String::new()
@@ -7350,6 +8376,8 @@ pub fn create_engine_with_body_and_output(
                                 give_gold: None,
                                 give_item: None,
                                 give_item_stack: Some((key.clone(), cnt)),
+                                deduct_from_giver: true,
+                                bypass_item_limits: false,
                             });
                         }
                         return String::new();
@@ -7369,6 +8397,39 @@ pub fn create_engine_with_body_and_output(
                     give_gold: None,
                     give_item: Some((item_name.to_string(), order, cnt_u)),
                     give_item_stack: None,
+                    deduct_from_giver: true,
+                    bypass_item_limits: false,
+                });
+            }
+            String::new()
+        },
+    );
+    let spec_admin_give_item = spec.clone();
+    let body_ptr_admin_give_item = body_ptr;
+    engine.register_fn(
+        "request_admin_give_item",
+        move |_ob: &mut rhai::Map,
+              target: &str,
+              item_name: &str,
+              order: i64,
+              count: i64|
+              -> String {
+            let body = unsafe { &*body_ptr_admin_give_item };
+            let order = order.max(1) as usize;
+            let count = if order > 1 { 1 } else { count.clamp(1, 100) as usize };
+            if body.object.findObjInven(item_name, order).is_none() {
+                return "no_item".into();
+            }
+            if let Ok(mut result) = spec_admin_give_item.lock() {
+                *result = Some(CommandResult::GiveToPlayer {
+                    target_name: target.to_string(),
+                    giver_name: body.get_name(),
+                    give_silver: None,
+                    give_gold: None,
+                    give_item: Some((item_name.to_string(), order, count)),
+                    give_item_stack: None,
+                    deduct_from_giver: true,
+                    bypass_item_limits: true,
                 });
             }
             String::new()
@@ -7376,6 +8437,36 @@ pub fn create_engine_with_body_and_output(
     );
 
     // item_equip(ob, name, order): 기능만. ""=성공, "usage"|"no_item"|"not_equippable"|"slot_used". 오류 메시지는 Rhai에서.
+    let body_ptr_give_view = body_ptr;
+    engine.register_fn(
+        "give_item_presentation",
+        move |_ob: &mut rhai::Map, name: &str, order: i64| -> rhai::Map {
+            let body = unsafe { &*body_ptr_give_view };
+            let mut result = rhai::Map::new();
+            let mut matched = 0i64;
+            for item in &body.object.objs {
+                let Ok(item) = item.lock() else { continue };
+                let aliases = reaction_names(&item.getString("반응이름"));
+                if item.getName() != name && !aliases.iter().any(|alias| alias == name) {
+                    continue;
+                }
+                matched += 1;
+                if matched < order.max(1) {
+                    continue;
+                }
+                let actual = item.getName();
+                result.insert("found".into(), Dynamic::from(true));
+                result.insert("name".into(), Dynamic::from(actual.clone()));
+                result.insert("post".into(), Dynamic::from(format!("{}{}", actual, han_eul(&actual))));
+                return result;
+            }
+            result.insert("found".into(), Dynamic::from(false));
+            result.insert("name".into(), Dynamic::from(String::new()));
+            result.insert("post".into(), Dynamic::from(String::new()));
+            result
+        },
+    );
+
     // 아이템 착용 시 모든 속성 보너스가 플레이어에게 적용됨
     let body_ptr_equip_view = body_ptr;
     engine.register_fn(
@@ -8732,6 +9823,24 @@ pub fn create_engine_with_body_and_output(
             arr
         },
     );
+    let body_ptr_give_player = body_ptr;
+    engine.register_fn(
+        "find_give_player",
+        move |_ob: &mut rhai::Map, input: &str| -> String {
+            let body = unsafe { &*body_ptr_give_player };
+            let Some((zone, room)) = current_body_position(body) else {
+                return String::new();
+            };
+            let world = get_world_state().read().unwrap();
+            world
+                .get_players_in_room(&zone, &room)
+                .iter()
+                .rev()
+                .find(|name| name.as_str() == input || name.starts_with(input))
+                .cloned()
+                .unwrap_or_default()
+        },
+    );
 
     // get_room_mobs(ob) - 현재 방의 몹 목록 (실제 구현)
     let body_ptr_room_mobs = body_ptr;
@@ -9243,6 +10352,8 @@ pub fn create_engine_with_body_and_output(
                     give_gold: None,
                     give_item: None,
                     give_item_stack: None,
+                    deduct_from_giver: true,
+                    bypass_item_limits: false,
                 });
             }
             String::new()
@@ -9409,6 +10520,8 @@ pub fn create_engine_with_body_and_output(
                     give_gold: None,
                     give_item: None,
                     give_item_stack: None,
+                    deduct_from_giver: true,
+                    bypass_item_limits: false,
                 });
             }
 
@@ -9483,6 +10596,8 @@ pub fn create_engine_with_body_and_output(
                     give_gold: None,
                     give_item: give_non_stack,
                     give_item_stack: give_stack,
+                    deduct_from_giver: true,
+                    bypass_item_limits: false,
                 });
             }
 
@@ -10196,8 +11311,11 @@ pub fn create_engine_with_body_and_output(
 
     // JSON catalogue operations. These efuns own only persistence/state,
     // while Rhai owns text.
-    engine.register_fn("book_entries", |_ob: &mut rhai::Map| -> rhai::Array {
-        let Ok(entries) = crate::book::load("data/config/book.json") else {
+    let body_ptr_book_entries = body_ptr;
+    engine.register_fn("book_entries", move |_ob: &mut rhai::Map| -> rhai::Array {
+        let body = unsafe { &*body_ptr_book_entries };
+        let catalog_path = book_catalog_path(body);
+        let Ok(entries) = crate::book::load(&catalog_path) else {
             return rhai::Array::new();
         };
         entries
@@ -10236,22 +11354,23 @@ pub fn create_engine_with_body_and_output(
         "book_borrow",
         move |_ob: &mut rhai::Map, number: i64| -> String {
             let body = unsafe { &mut *body_ptr_book };
+            let catalog_path = book_catalog_path(body);
             if number < 1 {
-                return "☞ 대여 가능한 물품이 없습니다.".into();
+                return "unavailable".into();
             }
-            let Ok(mut entries) = crate::book::load("data/config/book.json") else {
-                return "☞ 대여 가능한 물품이 없습니다.".into();
+            let Ok(mut entries) = crate::book::load(&catalog_path) else {
+                return "unavailable".into();
             };
             let idx = number as usize - 1;
             let Some(entry) = entries.get_mut(idx) else {
-                return "☞ 대여 가능한 물품이 없습니다.".into();
+                return "unavailable".into();
             };
             if !crate::book::dict_get_bool(entry, "대여가능") {
-                return "☞ 현재 대여중 입니다.".into();
+                return "borrowed".into();
             }
             let key = crate::book::dict_get_string(entry, "인덱스");
             let Some((item, _)) = object_from_item_json(&key) else {
-                return "☞ 대여 가능한 물품이 없습니다.".into();
+                return "unavailable".into();
             };
             if let Ok(mut obj) = item.lock() {
                 if let Some(attributes) = crate::book::dict_get(entry, "attr") {
@@ -10260,18 +11379,18 @@ pub fn create_engine_with_body_and_output(
                 obj.set("고유번호", crate::book::dict_get_string(entry, "고유번호"));
             }
             if crate::book::mark_borrowed(
-                "data/config/book.json",
+                &catalog_path,
                 number as usize,
                 &body.get_name(),
             )
             .is_err()
             {
-                return "☞ 대여 할 수 없습니다.".into();
+                return "persist_failed".into();
             }
             body.object.objs.push(item);
             let path = format!("data/user/{}.json", body.get_name());
             let _ = save_body_to_json(body, &path);
-            String::new()
+            "ok".into()
         },
     );
 
@@ -10358,6 +11477,7 @@ pub fn create_engine_with_body_and_output(
         "book_register",
         move |_ob: &mut rhai::Map, item_name: &str| -> String {
             let body = unsafe { &mut *body_ptr_book_register };
+            let catalog_path = book_catalog_path(body);
             let Some((pos, key, name, attributes)) =
                 body.object.objs.iter().enumerate().find_map(|(i, arc)| {
                     let obj = arc.lock().ok()?;
@@ -10371,10 +11491,10 @@ pub fn create_engine_with_body_and_output(
                         })
                 })
             else {
-                return "☞ 그런 아이템이 소지품에 없어요.".into();
+                return "no_item".into();
             };
             if key.is_empty() {
-                return "☞ 등록할 수 없습니다.".into();
+                return "cannot_register".into();
             }
             let Some((kind, cannot_give, item_id)) = body.object.objs[pos].lock().ok().map(|o| {
                 (
@@ -10383,13 +11503,13 @@ pub fn create_engine_with_body_and_output(
                     o.getString("고유번호"),
                 )
             }) else {
-                return "☞ 등록할 수 없습니다.".into();
+                return "cannot_register".into();
             };
             if kind != "무기" || cannot_give || !item_id.is_empty() {
-                return "☞ 등록할 수 없습니다.".into();
+                return "cannot_register".into();
             }
             if crate::book::register_item(
-                "data/config/book.json",
+                &catalog_path,
                 &key,
                 &name,
                 &body.get_name(),
@@ -10397,12 +11517,12 @@ pub fn create_engine_with_body_and_output(
             )
             .is_err()
             {
-                return "☞ 등록할 수 없습니다.".into();
+                return "cannot_register".into();
             }
             body.object.objs.remove(pos);
             let path = format!("data/user/{}.json", body.get_name());
             let _ = save_body_to_json(body, &path);
-            String::new()
+            "ok".into()
         },
     );
 
@@ -10411,22 +11531,36 @@ pub fn create_engine_with_body_and_output(
         "book_return",
         move |_ob: &mut rhai::Map, item_name: &str| -> String {
             let body = unsafe { &mut *body_ptr_book_return };
+            let catalog_path = book_catalog_path(body);
             let Some((pos, item_id)) = body.object.objs.iter().enumerate().find_map(|(i, arc)| {
                 let obj = arc.lock().ok()?;
                 (obj.getName() == item_name || obj.getString("반응이름").contains(item_name))
                     .then(|| (i, obj.getString("고유번호")))
             }) else {
-                return "☞ 그런 아이템이 소지품에 없어요.".into();
+                return "no_item".into();
             };
-            if item_id.is_empty()
-                || crate::book::mark_returned("data/config/book.json", &item_id).is_err()
+            if item_id.is_empty() {
+                return "not_returnable".into();
+            }
+            let Ok(entries) = crate::book::load(&catalog_path) else {
+                return "catalog_unavailable".into();
+            };
+            if entries.is_empty() {
+                return "catalog_unavailable".into();
+            }
+            if !entries
+                .iter()
+                .any(|entry| crate::book::dict_get_string(entry, "고유번호") == item_id)
             {
-                return "☞ 반납 할 수 없습니다.".into();
+                return "cannot_return".into();
+            }
+            if crate::book::mark_returned(&catalog_path, &item_id).is_err() {
+                return "cannot_return".into();
             }
             body.object.objs.remove(pos);
             let path = format!("data/user/{}.json", body.get_name());
             let _ = save_body_to_json(body, &path);
-            String::new()
+            "ok".into()
         },
     );
 
@@ -10435,18 +11569,38 @@ pub fn create_engine_with_body_and_output(
         "book_cancel",
         move |_ob: &mut rhai::Map, number: i64| -> String {
             let body = unsafe { &mut *body_ptr_book_cancel };
+            let catalog_path = book_catalog_path(body);
+            if number < 1 {
+                return "unavailable".into();
+            }
+            let Ok(entries) = crate::book::load(&catalog_path) else {
+                return "unavailable".into();
+            };
+            let Some(candidate) = entries.get(number as usize - 1) else {
+                return "unavailable".into();
+            };
+            if crate::book::dict_get_string(candidate, "등록자") != body.get_name() {
+                return "not_owner".into();
+            }
+            if !crate::book::dict_get_bool(candidate, "대여가능") {
+                return "borrowed".into();
+            }
+            let key = crate::book::dict_get_string(candidate, "인덱스");
+            if object_from_item_json(&key).is_none() {
+                return "unavailable".into();
+            }
             let Ok(entry) = crate::book::remove_entry(
-                "data/config/book.json",
-                number.max(1) as usize,
+                &catalog_path,
+                number as usize,
                 &body.get_name(),
-                body.get_int("관리자등급"),
+                0,
                 true,
             ) else {
-                return "☞ 등록 취소 가능한 물품이 없습니다.".into();
+                return "unavailable".into();
             };
             let key = crate::book::dict_get_string(&entry, "인덱스");
             let Some((item, _)) = object_from_item_json(&key) else {
-                return "☞ 등록 취소 가능한 물품이 없습니다.".into();
+                return "unavailable".into();
             };
             if let Ok(mut obj) = item.lock() {
                 if let Some(attributes) = crate::book::dict_get(&entry, "attr") {
@@ -10457,7 +11611,7 @@ pub fn create_engine_with_body_and_output(
             body.object.objs.push(item);
             let path = format!("data/user/{}.json", body.get_name());
             let _ = save_body_to_json(body, &path);
-            String::new()
+            "ok".into()
         },
     );
     let body_ptr_book_delete = body_ptr;
@@ -10465,91 +11619,176 @@ pub fn create_engine_with_body_and_output(
         "book_delete",
         move |_ob: &mut rhai::Map, number: i64| -> String {
             let body = unsafe { &mut *body_ptr_book_delete };
+            let catalog_path = book_catalog_path(body);
+            if number < 1 {
+                return "unavailable".into();
+            }
+            let Ok(entries) = crate::book::load(&catalog_path) else {
+                return "unavailable".into();
+            };
+            let Some(candidate) = entries.get(number as usize - 1) else {
+                return "unavailable".into();
+            };
+            if body.get_int("관리자등급") < 1000
+                && crate::book::dict_get_string(candidate, "등록자") != body.get_name()
+            {
+                return "not_owner".into();
+            }
             if crate::book::remove_entry(
-                "data/config/book.json",
-                number.max(1) as usize,
+                &catalog_path,
+                number as usize,
                 &body.get_name(),
                 body.get_int("관리자등급"),
                 false,
             )
             .is_ok()
             {
-                String::new()
+                "ok".into()
             } else {
-                "☞ 등록 취소 가능한 물품이 없습니다.".into()
+                "unavailable".into()
             }
         },
     );
     let body_ptr_save_object = body_ptr;
     engine.register_fn(
         "save_object_python",
-        move |_ob: &mut rhai::Map, line: &str| -> String {
+        move |_ob: &mut rhai::Map, line: &str| -> rhai::Map {
             let body = unsafe { &mut *body_ptr_save_object };
+            let result = |status: &str, path: String| {
+                let mut map = rhai::Map::new();
+                map.insert("status".into(), Dynamic::from(status.to_string()));
+                map.insert("path".into(), Dynamic::from(path));
+                map
+            };
             if line.trim().is_empty() {
                 let Some((zone, room)) = current_body_position(body) else {
-                    return "☞ 그런 대상이 없어요!".into();
+                    return result("missing", String::new());
                 };
                 let path = format!("data/map/{zone}/{room}.json");
                 let Ok(text) = std::fs::read_to_string(&path) else {
-                    return "* 파일 열기를 실패하였습니다.".into();
+                    return result("open_failed", String::new());
                 };
                 let Ok(root) = serde_json::from_str::<serde_json::Value>(&text) else {
-                    return "* 파일 열기를 실패하였습니다.".into();
+                    return result("open_failed", String::new());
                 };
-                let Some(info) = root.get("맵정보").and_then(|v| v.as_object()) else {
-                    return "* 파일 열기를 실패하였습니다.".into();
-                };
-                let _ = info;
+                if root.get("맵정보").and_then(|v| v.as_object()).is_none() {
+                    return result("open_failed", String::new());
+                }
                 if std::fs::write(&path, serde_json::to_string_pretty(&root).unwrap_or(text))
                     .is_err()
                 {
-                    return "* 파일 열기를 실패하였습니다.".into();
+                    return result("open_failed", String::new());
                 }
-                return format!("* {} 저장되었습니다.", path);
+                return result("ok", path);
             }
-            let Some((_, item)) = body.object.objs.iter().enumerate().find_map(|(i, arc)| {
-                let o = arc.lock().ok()?;
-                (o.getName() == line).then(|| (i, arc.clone()))
-            }) else {
-                return "☞ 그런 대상이 없어요!".into();
+
+            let Some((zone, room)) = current_body_position(body) else {
+                return result("missing", String::new());
             };
-            let Ok(obj) = item.lock() else {
-                return "☞ 저장할 수 없어요!".into();
-            };
-            let key = obj.getString("인덱스");
-            if key.is_empty() {
-                return "☞ 저장할 수 없어요!".into();
-            }
-            let path = format!("data/item/{}.json", key);
-            let mut info = serde_json::Map::new();
-            for k in obj.attr.keys() {
-                let value = obj.getString(k);
-                if obj.temp.contains_key(&format!("_python_json_array:{k}")) {
-                    info.insert(
-                        k.clone(),
-                        serde_json::Value::Array(
-                            value
-                                .split('\n')
-                                .map(|s| serde_json::Value::String(s.to_string()))
-                                .collect(),
-                        ),
-                    );
-                } else if let Ok(i) = value.parse::<i64>() {
-                    info.insert(k.clone(), serde_json::Value::Number(i.into()));
-                } else {
-                    info.insert(k.clone(), serde_json::Value::String(value));
+            let mob_target = get_world_state().read().ok().and_then(|world| {
+                world
+                    .mob_cache
+                    .get_all_mobs_in_room(&zone, &room)
+                    .into_iter()
+                    .find_map(|mob| {
+                        let data = world.get_mob_data(&mob.mob_key)?;
+                        (mob.name == line
+                            || data.name == line
+                            || data.desc1 == line
+                            || data.reaction_names.iter().any(|alias| alias == line))
+                            .then(|| (mob.clone(), data.clone()))
+                    })
+            });
+            if let Some((mob, data)) = mob_target {
+                let Some((mob_zone, filename)) = mob.mob_key.split_once(':') else {
+                    return result("cannot_save", String::new());
+                };
+                let path = format!("data/mob/{mob_zone}/{filename}.json");
+                let Ok(text) = std::fs::read_to_string(&path) else {
+                    return result("open_failed", String::new());
+                };
+                let Ok(mut root) = serde_json::from_str::<serde_json::Value>(&text) else {
+                    return result("open_failed", String::new());
+                };
+                let Some(info) = root.get_mut("몹정보").and_then(|value| value.as_object_mut())
+                else {
+                    return result("open_failed", String::new());
+                };
+                for (key, value) in &data.attributes {
+                    info.insert(key.clone(), value.clone());
                 }
+                info.insert("이름".into(), serde_json::Value::String(mob.name));
+                for (key, value) in [
+                    ("체력", mob.hp),
+                    ("최고체력", mob.max_hp),
+                    ("내공", mob.mp),
+                    ("최고내공", mob.max_mp),
+                    ("은전", mob.gold),
+                    ("레벨", mob.level),
+                    ("힘", mob.strength),
+                    ("맷집", mob.arm),
+                    ("민첩성", mob.agility),
+                ] {
+                    info.insert(key.into(), serde_json::Value::Number(value.into()));
+                }
+                for (key, value) in mob.runtime_attrs {
+                    let value = match value {
+                        Value::Int(value) => serde_json::Value::Number(value.into()),
+                        Value::Float(value) => serde_json::Number::from_f64(value)
+                            .map(serde_json::Value::Number)
+                            .unwrap_or(serde_json::Value::Null),
+                        Value::String(value) => serde_json::Value::String(value),
+                    };
+                    info.insert(key, value);
+                }
+                if std::fs::write(&path, serde_json::to_string_pretty(&root).unwrap_or(text))
+                    .is_err()
+                {
+                    return result("open_failed", String::new());
+                }
+                return result("ok", path);
             }
-            let out = serde_json::json!({"아이템정보": info});
-            if std::fs::write(
-                &path,
-                serde_json::to_string_pretty(&out).unwrap_or_default(),
-            )
-            .is_err()
+
+            let matches = |object: &Object| {
+                object.getName() == line
+                    || reaction_names(&object.getString("반응이름"))
+                        .iter()
+                        .any(|alias| alias == line)
+            };
+            let room_items = get_world_state()
+                .read()
+                .ok()
+                .map(|world| world.get_room_objs(&zone, &room).to_vec())
+                .unwrap_or_default();
+            let item = room_items
+                .into_iter()
+                .find(|item| item.lock().is_ok_and(|object| matches(&object)))
+                .or_else(|| {
+                    body.object
+                        .objs
+                        .iter()
+                        .find(|item| item.lock().is_ok_and(|object| matches(&object)))
+                        .cloned()
+                });
+            let Some(item) = item else {
+                return result("missing", String::new());
+            };
+            let Ok(object) = item.lock() else {
+                return result("cannot_save", String::new());
+            };
+            let key = object.getString("인덱스");
+            if key.is_empty() || key.contains('/') || key.contains('\\') {
+                return result("cannot_save", String::new());
+            }
+            let path = format!("data/item/{key}.json");
+            let out = serde_json::json!({
+                "아이템정보": inventory_compat::item_attributes_to_json(&object)
+            });
+            if std::fs::write(&path, serde_json::to_string_pretty(&out).unwrap_or_default()).is_err()
             {
-                return "* 파일 열기를 실패하였습니다.".into();
+                return result("open_failed", String::new());
             }
-            format!("* {} 저장되었습니다.", path)
+            result("ok", path)
         },
     );
     let body_ptr_install = body_ptr;
@@ -11056,20 +12295,59 @@ pub fn create_engine_with_body_and_output(
     let body_ptr_goas = body_ptr;
     engine.register_fn(
         "get_obj_attrs",
-        move |_ob: &mut rhai::Map, target: &str| -> rhai::Array {
+        move |_ob: &mut rhai::Map, target: &str| -> Dynamic {
             let body = unsafe { &*body_ptr_goas };
             let name = body.get_name();
             let mut attrs: Vec<(String, String)> = Vec::new();
+            let mut found = false;
+            let json_text = |value: &serde_json::Value| -> String {
+                match value {
+                    serde_json::Value::String(value) => value.clone(),
+                    serde_json::Value::Array(values) => values
+                        .iter()
+                        .map(|value| {
+                            value
+                                .as_str()
+                                .map(str::to_string)
+                                .unwrap_or_else(|| value.to_string())
+                        })
+                        .collect::<Vec<_>>()
+                        .join("\r\n"),
+                    serde_json::Value::Null => String::new(),
+                    value => value.to_string(),
+                }
+            };
             if target.is_empty() || target == "방" {
                 if let Ok(w) = get_world_state().read() {
                     if let Some(pos) = w.get_player_position(&name) {
+                        let path = format!("data/map/{}/{}/", pos.zone, pos.room);
+                        let path = path.trim_end_matches('/').to_string() + ".json";
+                        if let Ok(raw) = std::fs::read_to_string(path) {
+                            if let Ok(root) = serde_json::from_str::<serde_json::Value>(&raw) {
+                                if let Some(info) = root.get("맵정보").and_then(|v| v.as_object()) {
+                                    found = true;
+                                    attrs.extend(info.iter().map(|(key, value)| {
+                                        (key.clone(), json_text(value))
+                                    }));
+                                }
+                            }
+                        }
                         let room_key = format!("{}:{}", pos.zone, pos.room);
                         if let Some(room) = w.room_attrs.get(&room_key) {
-                            attrs.extend(room.iter().map(|(k, v)| (k.clone(), v.clone())));
+                            found = true;
+                            for (key, value) in room {
+                                if let Some(existing) = attrs.iter_mut().find(|(name, _)| name == key)
+                                {
+                                    existing.1 = value.clone();
+                                } else {
+                                    attrs.push((key.clone(), value.clone()));
+                                }
+                            }
                         }
                     }
                 }
             } else if target == "나" || target == name {
+                found = true;
                 attrs.extend(body.object.attr.iter().map(|(k, v)| {
                     let value = match v {
                         crate::object::Value::Int(n) => n.to_string(),
@@ -11079,10 +12357,108 @@ pub fn create_engine_with_body_and_output(
                     (k.clone(), value)
                 }));
             } else {
+                let position = current_body_position(body);
+                if let Some((zone, room)) = position.as_ref() {
+                    let floor = get_world_state()
+                        .read()
+                        .ok()
+                        .map(|world| world.get_room_objs(zone, room).to_vec())
+                        .unwrap_or_default();
+                    for arc in floor {
+                        let Ok(obj) = arc.lock() else { continue };
+                        if obj.getName() == target
+                            || reaction_names(&obj.getString("반응이름"))
+                                .iter()
+                                .any(|alias| alias == target)
+                        {
+                            found = true;
+                            attrs.extend(obj.attr.iter().map(|(key, value)| {
+                                let value = match value {
+                                    Value::Int(value) => value.to_string(),
+                                    Value::Float(value) => value.to_string(),
+                                    Value::String(value) => value.clone(),
+                                };
+                                (key.clone(), value)
+                            }));
+                            break;
+                        }
+                    }
+                    if !found {
+                        if let Ok(world) = get_world_state().read() {
+                            if let Some((mob, data)) = world
+                                .mob_cache
+                                .get_all_mobs_in_room(zone, room)
+                                .into_iter()
+                                .find_map(|mob| {
+                                    let data = world.get_mob_data(&mob.mob_key)?;
+                                    (mob.name == target
+                                        || data.name == target
+                                        || data.reaction_names.iter().any(|alias| alias == target))
+                                        .then_some((mob, data))
+                                })
+                            {
+                                found = true;
+                                attrs.extend(data.attributes.iter().map(|(key, value)| {
+                                    (key.clone(), json_text(value))
+                                }));
+                                for (key, value) in [
+                                    ("이름", mob.name.clone()),
+                                    ("체력", mob.hp.to_string()),
+                                    ("최고체력", mob.max_hp.to_string()),
+                                    ("내공", mob.mp.to_string()),
+                                    ("은전", mob.gold.to_string()),
+                                ] {
+                                    if let Some(existing) =
+                                        attrs.iter_mut().find(|(name, _)| name == key)
+                                    {
+                                        existing.1 = value;
+                                    } else {
+                                        attrs.push((key.to_string(), value));
+                                    }
+                                }
+                            }
+                        }
+                    }
+                    if !found {
+                        let player_name = get_world_state().read().ok().and_then(|world| {
+                            world
+                                .get_players_in_room(zone, room)
+                                .iter()
+                                .rev()
+                                .find(|player| {
+                                    player.as_str() == target || player.starts_with(target)
+                                })
+                                .cloned()
+                        });
+                        if let Some(player_name) = player_name {
+                            let path = format!("data/user/{player_name}.json");
+                            if let Ok(raw) = std::fs::read_to_string(path) {
+                                if let Ok(root) = serde_json::from_str::<serde_json::Value>(&raw) {
+                                    if let Some(values) = root
+                                        .get("사용자오브젝트")
+                                        .and_then(|value| value.get("attr"))
+                                        .and_then(|value| value.as_object())
+                                    {
+                                        found = true;
+                                        attrs.extend(values.iter().map(|(key, value)| {
+                                            (key.clone(), json_text(value))
+                                        }));
+                                    }
+                                }
+                            }
+                        }
+                    }
+                }
+                // Python falls back to ob.findObjName after the room lookup.
+                if !found {
                 for arc in &body.object.objs {
                     if let Ok(obj) = arc.lock() {
-                        if obj.getName() == target || obj.getString("반응이름").contains(target)
+                        if obj.getName() == target
+                            || reaction_names(&obj.getString("반응이름"))
+                                .iter()
+                                .any(|alias| alias == target)
                         {
+                            found = true;
                             attrs.extend(obj.attr.iter().map(|(k, v)| {
                                 let value = match v {
                                     crate::object::Value::Int(n) => n.to_string(),
@@ -11095,9 +12471,10 @@ pub fn create_engine_with_body_and_output(
                         }
                     }
                 }
+                }
             }
             attrs.sort_by(|a, b| a.0.cmp(&b.0));
-            attrs
+            let attrs = attrs
                 .into_iter()
                 .map(|(key, value)| {
                     let mut item = rhai::Map::new();
@@ -11105,7 +12482,11 @@ pub fn create_engine_with_body_and_output(
                     item.insert("value".into(), Dynamic::from(value));
                     Dynamic::from(item)
                 })
-                .collect()
+                .collect::<rhai::Array>();
+            let mut result = rhai::Map::new();
+            result.insert("found".into(), Dynamic::from(found));
+            result.insert("attrs".into(), Dynamic::from(attrs));
+            Dynamic::from(result)
         },
     );
 
@@ -14356,6 +15737,38 @@ mod tests {
     }
 
     #[test]
+    fn eating_requeues_any_healing_food_when_python_continuous_aliases_are_enabled() {
+        use crate::command::handler::CommandResult;
+
+        let storage = ScriptStorage::default();
+        let mut body = Body::new();
+        body.set("이름", "연속복용검사");
+        body.set("체력", 100_i64);
+        body.set("최고체력", 10_000_i64);
+        body.set(
+            ALIAS_LIST_ATTR,
+            encode_alias_entries(&[
+                ("체력약".into(), "다른약".into()),
+                ("체력".into(), "9000".into()),
+                ("연속복용".into(), "켜기".into()),
+            ]),
+        );
+        let (food, _) = object_from_item_json("1037").expect("food fixture");
+        body.object.objs.push(food);
+        let (output, special) = storage
+            .execute("먹어", &mut body, "탕수육", None, None, None)
+            .unwrap();
+        assert_eq!(body.get_hp(), 7030);
+        assert_eq!(output.len(), 1);
+        assert!(matches!(
+            special,
+            Some(CommandResult::OutputAndSendToUsers(ref own, ref sends))
+                if own == &output[0]
+                    && sends == &vec![("연속복용검사".to_string(), "탕수육 먹어".to_string())]
+        ));
+    }
+
+    #[test]
     fn admin_skill_rank_preserves_unbounded_python_integer() {
         let storage = ScriptStorage::default();
         let mut body = Body::new();
@@ -14373,6 +15786,136 @@ mod tests {
             .execute("성올려", &mut body, "성값검사 태극권 -7", None, None, None)
             .unwrap();
         assert_eq!(body.skill_map["태극권"].level, -7);
+    }
+
+    #[test]
+    fn rank_command_uses_live_players_stable_ties_and_python_columns() {
+        let online = [
+            ("Alpha", 10_i64, 0_i64),
+            ("Bravo", 20_i64, 0_i64),
+            ("Charlie", 20_i64, 0_i64),
+            ("Operator", 999_i64, 1000_i64),
+            ("Zero", 0_i64, 0_i64),
+        ]
+        .into_iter()
+        .map(|(name, strength, admin)| {
+            let mut map = rhai::Map::new();
+            map.insert("이름".into(), Dynamic::from(name));
+            map.insert("힘".into(), Dynamic::from(strength));
+            map.insert("관리자등급".into(), Dynamic::from(admin));
+            Dynamic::from(map)
+        })
+        .collect();
+        set_precomputed_all_online(online);
+        let storage = ScriptStorage::default();
+        let mut body = Body::new();
+        body.set("이름", "순위조회자");
+        body.set("은전", 200_000_i64);
+        let normal = storage
+            .execute("순위", &mut body, "힘", None, None, None)
+            .unwrap();
+        assert_eq!(body.get_int("은전"), 100_000);
+        assert_eq!(normal.0, vec!["[01] Bravo      [02] Charlie    [03] Alpha      "]);
+
+        body.set("관리자등급", 1000_i64);
+        let admin = storage
+            .execute("순위", &mut body, "힘", None, None, None)
+            .unwrap();
+        assert_eq!(body.get_int("은전"), 0);
+        assert_eq!(
+            admin.0,
+            vec!["     Bravo 20                Charlie 20                  Alpha 10             \r\n"]
+        );
+        clear_precomputed_all_online();
+        let _ = std::fs::remove_file("data/user/순위조회자.json");
+    }
+
+    #[test]
+    fn compare_command_targets_mob_and_restores_python_interface_and_table() {
+        use crate::world::{get_world_state, MobInstance, PlayerPosition, RawMobData};
+
+        let suffix = std::process::id();
+        let player = format!("비교회귀-{suffix}");
+        let zone = format!("비교회귀존-{suffix}");
+        let mob_key = format!("{zone}:상대");
+        let mut mob_data = RawMobData::new();
+        mob_data.name = "비교허수아비".into();
+        mob_data.zone = zone.clone();
+        mob_data.max_hp = 1000;
+        mob_data.strength = 20;
+        mob_data.arm = 5;
+        {
+            let mut world = get_world_state().write().unwrap();
+            world
+                .mob_cache
+                .insert_mob_data(mob_key.clone(), mob_data.clone());
+            world.mob_cache.add_mob_instance(MobInstance::new(
+                mob_key.clone(),
+                zone.clone(),
+                "1",
+                &mob_data,
+            ));
+            world.set_player_position(
+                &player,
+                PlayerPosition::new(zone.clone(), "1".into()),
+            );
+        }
+        let mut body = Body::new();
+        body.set("이름", player.as_str());
+        body.set("힘", 100_i64);
+        body.set("최고내공", 500_i64);
+        body.set("최고체력", 2000_i64);
+        body.attpower = 100;
+        let storage = ScriptStorage::default();
+
+        let usage = storage
+            .execute("비교", &mut body, "", None, None, None)
+            .unwrap();
+        assert_eq!(usage.0, vec!["☞ 사용법: [대상] 비교"]);
+        let missing = storage
+            .execute("비교", &mut body, "없는대상", None, None, None)
+            .unwrap();
+        assert_eq!(missing.0, vec!["자신의 상태를 통탄해 합니다. @_@"]);
+        let compared = storage
+            .execute("비교", &mut body, "비교허수아비", None, None, None)
+            .unwrap();
+        assert_eq!(compared.0.len(), 7);
+        assert_eq!(compared.0[0], "━━━━━━━━━━━━━━━");
+        assert_eq!(
+            compared.0[1],
+            "▶ \x1b[1m비교허수아비\x1b[0;37m와의 상대비교"
+        );
+        assert!(compared.0[3].starts_with("☞ 당신의 승률 오차ː"));
+        assert!(compared.0[4].starts_with("☞ 상대의 승률 오차ː"));
+
+        body.set("설정상태", "비교거부 1");
+        let refused = storage
+            .execute("비교", &mut body, "비교허수아비", None, None, None)
+            .unwrap();
+        assert_eq!(
+            refused.0,
+            vec!["☞ 진정한 승부란 비무를 통해서 알 수 있는 것 이지"]
+        );
+
+        let mut world = get_world_state().write().unwrap();
+        world.remove_player_position(&player);
+        world.mob_cache.remove_mob(&mob_key);
+    }
+
+    #[test]
+    fn map_command_checks_python_usage_before_missing_position() {
+        let mut body = Body::new();
+        body.set("이름", "맵순서검사");
+        body.set("관리자등급", 2000_i64);
+        let storage = ScriptStorage::default();
+        let usage = storage
+            .execute("맵", &mut body, "", None, None, None)
+            .unwrap();
+        assert_eq!(usage.0, vec!["☞ 사용법: [제외할방향] 맵"]);
+        let invisible = storage
+            .execute("맵", &mut body, "동", None, None, None)
+            .unwrap();
+        assert_eq!(invisible.0, vec!["\r\n* 아무것도 보이지 않습니다.\r\n"]);
     }
 
     #[test]
@@ -15007,6 +16550,133 @@ mod tests {
     }
 
     #[test]
+    fn compact_inventory_uses_admin_target_but_python_viewer_gold() {
+        let storage = ScriptStorage::default();
+        let mut viewer = Body::new();
+        viewer.set("이름", "소소관리자");
+        viewer.set("관리자등급", 1000_i64);
+        viewer.set("금전", 33_i64);
+        let mut target = Body::new();
+        target.set("이름", "소소대상");
+        target.set("은전", 7_i64);
+        target.set("금전", 99_i64);
+        target
+            .object
+            .objs
+            .push(inventory_test_item("약초", false, false));
+        target
+            .object
+            .objs
+            .push(inventory_test_item("약초", false, false));
+        set_precomputed_room_inventories(vec![build_room_player_inventory_snapshot(&target)]);
+
+        let output = storage
+            .execute("소소", &mut viewer, "소소대상", None, None, None)
+            .unwrap()
+            .0;
+        clear_precomputed_all_online();
+        assert!(output.contains(&"\x1b[36m약초 \x1b[36m2개\x1b[37m".to_string()));
+        assert!(output.iter().any(|line| line.contains("은전 :                    7 개")));
+        assert!(output.iter().any(|line| line.contains("금전 :                   33 개")));
+        assert!(!output.iter().any(|line| line.contains("금전 :                   99 개")));
+        assert_eq!(output.last().unwrap(), "─────────────────");
+    }
+
+    #[test]
+    fn tweet_uses_python_usage_and_recipient_time_ansi_preferences() {
+        use crate::command::handler::CommandResult;
+        use crate::world::{get_world_state, PlayerPosition};
+
+        let sender = "트윗발신자";
+        let timed = "트윗시간수신자";
+        let blocked = "트윗거부자";
+        let online = [
+            (sender, ""),
+            (timed, "잡담시간보기 1\n사용자안시거부 1"),
+            (blocked, "외침거부 1"),
+        ]
+        .into_iter()
+        .map(|(name, config)| {
+            let mut map = rhai::Map::new();
+            map.insert("이름".into(), Dynamic::from(name));
+            map.insert("설정상태".into(), Dynamic::from(config));
+            Dynamic::from(map)
+        })
+        .collect();
+        set_precomputed_all_online(online);
+        get_world_state().write().unwrap().set_player_position(
+            sender,
+            PlayerPosition::new("트윗시험존".into(), "1".into()),
+        );
+        let mut body = Body::new();
+        body.set("이름", sender);
+        body.set("act", 1_i64);
+        let storage = ScriptStorage::default();
+
+        let usage = storage
+            .execute("트윗", &mut body, "", None, None, None)
+            .unwrap();
+        assert_eq!(usage.0, vec!["☞ 사용법: [내용] 외침(,)"]);
+
+        let sent = storage
+            .execute("트윗", &mut body, "{빨}안녕", None, None, None)
+            .unwrap();
+        assert!(sent.0.is_empty());
+        let sends = match sent.1 {
+            Some(CommandResult::SendToUsers(sends)) => sends,
+            other => panic!("unexpected tweet result: {other:?}"),
+        };
+        assert_eq!(sends.len(), 2);
+        let self_wire = sends.iter().find(|(name, _)| name == sender).unwrap().1.clone();
+        assert!(!self_wire.starts_with("\r\n"));
+        assert!(self_wire.contains("\x1b[31m안녕"));
+        let timed_wire = sends.iter().find(|(name, _)| name == timed).unwrap().1.clone();
+        assert!(timed_wire.starts_with("\r\n["));
+        assert!(!timed_wire.contains("\x1b[31m"));
+        assert!(timed_wire.contains("안녕"));
+        assert!(!sends.iter().any(|(name, _)| name == blocked));
+        assert!(chat_history_snapshot()
+            .last()
+            .is_some_and(|line| line.contains("\x1b[31m안녕\x1b[0;37m")));
+
+        body.set("성격", "선인");
+        body.set("관리자등급", 2000_i64);
+        let shouted = storage
+            .execute("외쳐", &mut body, "{빨}호령", None, None, None)
+            .unwrap();
+        let shout_sends = match shouted.1 {
+            Some(CommandResult::SendToUsers(sends)) => sends,
+            other => panic!("unexpected shout result: {other:?}"),
+        };
+        assert!(shout_sends
+            .iter()
+            .find(|(name, _)| name == sender)
+            .is_some_and(|(_, wire)| wire.contains("\x1b[0;35m사자후\x1b[0;37m")
+                && wire.contains("\x1b[31m호령")));
+        assert!(shout_sends
+            .iter()
+            .find(|(name, _)| name == timed)
+            .is_some_and(|(_, wire)| wire.starts_with("\r\n[") && !wire.contains("\x1b[31m")));
+
+        let shout2 = storage
+            .execute("외쳐2", &mut body, "두번째", None, None, None)
+            .unwrap();
+        let shout2_sends = match shout2.1 {
+            Some(CommandResult::SendToUsers(sends)) => sends,
+            other => panic!("unexpected shout2 result: {other:?}"),
+        };
+        assert!(shout2_sends
+            .iter()
+            .all(|(_, wire)| wire.ends_with(" \x1b[1;32m밍밍이지렁~\x1b[0;37m")));
+
+        clear_precomputed_all_online();
+        get_world_state()
+            .write()
+            .unwrap()
+            .remove_player_position(sender);
+    }
+
+    #[test]
     fn test_inventory_keeps_python_hidden_only_and_target_failure_behavior() {
         let storage = ScriptStorage::default();
         let mut viewer = Body::new();
@@ -15369,6 +17039,184 @@ mod tests {
     }
 
     #[test]
+    fn burn_and_break_use_actual_item_text_notify_room_and_persist_removal() {
+        use crate::command::handler::CommandResult;
+        use crate::object::Object;
+        use crate::world::{get_world_state, PlayerPosition};
+
+        let suffix = std::process::id();
+        let self_name = format!("파괴회귀-{suffix}");
+        let observer = format!("파괴관찰-{suffix}");
+        {
+            let mut world = get_world_state().write().unwrap();
+            world.set_player_position(
+                &self_name,
+                PlayerPosition::new("파괴회귀존".into(), suffix.to_string()),
+            );
+            world.set_player_position(
+                &observer,
+                PlayerPosition::new("파괴회귀존".into(), suffix.to_string()),
+            );
+        }
+        let mut body = Body::new();
+        body.set("이름", self_name.as_str());
+        let mut fruit = Object::new();
+        fruit.set("이름", "설삼과");
+        fruit.set("반응이름", "설삼과\r\n과일");
+        body.object.append(Arc::new(Mutex::new(fruit)));
+        let storage = ScriptStorage::default();
+
+        let (output, special) = storage
+            .execute("소각", &mut body, "과일", None, None, None)
+            .unwrap();
+        assert_eq!(output, vec!["당신이 \x1b[36m설삼과를\x1b[37m 소각해버립니다."]);
+        assert!(body.object.objs.is_empty());
+        assert!(matches!(
+            special,
+            Some(CommandResult::OutputAndSendToUsers(ref own, ref sends))
+                if own == "당신이 \x1b[36m설삼과를\x1b[37m 소각해버립니다."
+                    && sends == &vec![(
+                        observer.clone(),
+                        format!("\x1b[1m{self_name}\x1b[0;37m{} \x1b[36m설삼과를\x1b[37m 소각해버립니다.", han_iga(&self_name))
+                    )]
+        ));
+
+        let mut unbreakable = Object::new();
+        unbreakable.set("이름", "금강석");
+        unbreakable.set("반응이름", "돌");
+        unbreakable.set("아이템속성", "부수지못함");
+        body.object.append(Arc::new(Mutex::new(unbreakable)));
+        let blocked = storage
+            .execute("부셔", &mut body, "돌", None, None, None)
+            .unwrap();
+        assert_eq!(blocked.0, vec!["☞ 부셔지지 않네요. ^^"]);
+        assert_eq!(body.object.objs.len(), 1);
+
+        body.object.objs.clear();
+        for _ in 0..2 {
+            let mut pottery = Object::new();
+            pottery.set("이름", "도자기");
+            pottery.set("반응이름", "그릇");
+            body.object.append(Arc::new(Mutex::new(pottery)));
+        }
+        let broken = storage
+            .execute("부셔", &mut body, "그릇 2", None, None, None)
+            .unwrap();
+        assert_eq!(
+            broken.0,
+            vec!["당신이 \x1b[36m도자기\x1b[37m 2개를 부셔버립니다."]
+        );
+        assert!(body.object.objs.is_empty());
+
+        let unique_index = format!("파괴단일-{suffix}");
+        let mut unique = Object::new();
+        unique.set("이름", "단일옥패");
+        unique.set("반응이름", "옥패");
+        unique.set("인덱스", unique_index.as_str());
+        unique.set("아이템속성", "단일아이템");
+        body.object.append(Arc::new(Mutex::new(unique)));
+        assert!(crate::oneitem::oneitem_have(&unique_index, &self_name));
+        let _ = storage
+            .execute("소각", &mut body, "옥패", None, None, None)
+            .unwrap();
+        assert_eq!(crate::oneitem::oneitem_get(&unique_index), "");
+
+        let _ = std::fs::remove_file(format!("data/user/{self_name}.json"));
+        let mut world = get_world_state().write().unwrap();
+        world.remove_player_position(&self_name);
+        world.remove_player_position(&observer);
+    }
+
+    #[test]
+    fn give_commands_preserve_python_lookup_self_and_admin_grant_requests() {
+        use crate::command::handler::CommandResult;
+        use crate::object::Object;
+        use crate::world::{get_world_state, PlayerPosition};
+
+        let suffix = std::process::id();
+        let giver = format!("전달자-{suffix}");
+        let target = format!("수령자-{suffix}");
+        {
+            let mut world = get_world_state().write().unwrap();
+            world.set_player_position(
+                &giver,
+                PlayerPosition::new("전달회귀존".into(), suffix.to_string()),
+            );
+            world.set_player_position(
+                &target,
+                PlayerPosition::new("전달회귀존".into(), suffix.to_string()),
+            );
+        }
+        let mut body = Body::new();
+        body.set("이름", giver.as_str());
+        body.set("관리자등급", 2000_i64);
+        body.set("은전", 10_i64);
+        let mut item = Object::new();
+        item.set("이름", "청옥패");
+        item.set("반응이름", "옥패");
+        item.set("아이템속성", "줄수없음");
+        body.object.append(Arc::new(Mutex::new(item)));
+        let storage = ScriptStorage::default();
+
+        let missing_item_first = storage
+            .execute("줘", &mut body, "없는대상 없는물건", None, None, None)
+            .unwrap();
+        assert_eq!(missing_item_first.0, vec!["☞ 그런 아이템이 소지품에 없어요."]);
+
+        let self_play = storage
+            .execute("줘", &mut body, &format!("{giver} 옥패"), None, None, None)
+            .unwrap();
+        assert_eq!(
+            self_play.0,
+            vec!["당신이 \x1b[36m청옥패를\x1b[37m 가지고 장난합니다. '@_@'"]
+        );
+        assert!(self_play.1.is_none());
+
+        let normal_money = storage
+            .execute("줘", &mut body, &format!("{target} 은전 7"), None, None, None)
+            .unwrap();
+        assert!(matches!(
+            normal_money.1,
+            Some(CommandResult::GiveToPlayer {
+                give_silver: Some(7),
+                deduct_from_giver: true,
+                bypass_item_limits: false,
+                ..
+            })
+        ));
+
+        let admin_money = storage
+            .execute("줘줘", &mut body, &format!("{target} 은전 25"), None, None, None)
+            .unwrap();
+        assert!(matches!(
+            admin_money.1,
+            Some(CommandResult::GiveToPlayer {
+                give_silver: Some(25),
+                deduct_from_giver: false,
+                bypass_item_limits: false,
+                ..
+            })
+        ));
+        assert_eq!(body.get_int("은전"), 10, "요청 단계에서 관리자 은전을 차감하지 않음");
+
+        let admin_item = storage
+            .execute("줘줘", &mut body, &format!("{target} 옥패 100"), None, None, None)
+            .unwrap();
+        assert!(matches!(
+            admin_item.1,
+            Some(CommandResult::GiveToPlayer {
+                give_item: Some((ref name, 1, 100)),
+                bypass_item_limits: true,
+                ..
+            }) if name == "청옥패"
+        ));
+
+        let mut world = get_world_state().write().unwrap();
+        world.remove_player_position(&giver);
+        world.remove_player_position(&target);
+    }
+
+    #[test]
     fn shop_commands_match_python_valid_quantity_and_item_name_format() {
         use crate::world::{get_world_state, PlayerPosition};
 
@@ -15399,6 +17247,27 @@ mod tests {
         );
         assert!(!bought.0.join("\r\n").contains("수박모자를 1개를"));
 
+        body.set(
+            ALIAS_LIST_ATTR,
+            encode_alias_entries(&[
+                ("체력약".into(), "수박모자".into()),
+                ("체력약개수".into(), "3".into()),
+            ]),
+        );
+        let auto_bought = storage
+            .execute("구입", &mut body, "체력약", None, None, None)
+            .unwrap();
+        assert_eq!(body.object.objs.len(), 3);
+        assert_eq!(body.get_int("은전"), 73);
+        assert_eq!(
+            auto_bought.0.join("\r\n"),
+            "당신이 \x1b[36m수박모자\x1b[0;37m 2개를 은전 18개에 구입합니다."
+        );
+        let enough = storage
+            .execute("구입", &mut body, "체력약", None, None, None)
+            .unwrap();
+        assert_eq!(enough.0, vec!["☞ 구매할 물품이 충분합니다. ^_^"]);
+
         {
             let mut world = get_world_state().write().unwrap();
             world.room_cache.get_room("낙양성", "43").unwrap();
@@ -15412,13 +17281,72 @@ mod tests {
             .execute("판매", &mut body, "모두", None, None, None)
             .unwrap();
         assert!(body.object.objs.is_empty());
-        assert!(sold.0.join("\r\n").contains("수박모자 1개를 은전 3개에 판매합니다."));
+        assert_eq!(
+            sold.0,
+            vec!["당신이 \x1b[0;36m수박모자\x1b[37m 1개를 은전 3개에 판매합니다."; 3]
+        );
 
         let _ = std::fs::remove_file(format!("data/user/{player_name}.json"));
         get_world_state()
             .write()
             .unwrap()
             .remove_player_position(&player_name);
+    }
+
+    #[test]
+    fn guard_purchase_consumes_python_requirement_without_charging_silver() {
+        use crate::world::{get_world_state, MobInstance, PlayerPosition, RawMobData};
+
+        let suffix = std::process::id();
+        let player_name = format!("호위구매-{suffix}");
+        let zone = format!("호위구매존-{suffix}");
+        let mob_key = format!("{zone}:상인");
+        let mut merchant = RawMobData::new();
+        merchant.name = "호위상인".into();
+        merchant.zone = zone.clone();
+        merchant.items_for_sale = vec![("명견".into(), 100), ("사강시".into(), 100)];
+        {
+            let mut world = get_world_state().write().unwrap();
+            world
+                .mob_cache
+                .insert_mob_data(mob_key.clone(), merchant.clone());
+            world.mob_cache.add_mob_instance(MobInstance::new(
+                mob_key.clone(),
+                zone.clone(),
+                "1",
+                &merchant,
+            ));
+            world.set_player_position(
+                &player_name,
+                PlayerPosition::new(zone.clone(), "1".into()),
+            );
+        }
+        let mut body = Body::new();
+        body.set("이름", player_name.as_str());
+        body.set("성격", "정사");
+        body.set("은전", 1234_i64);
+        let (herb, _) = object_from_item_json("합성1").expect("herb fixture");
+        body.object.append(herb);
+        let storage = ScriptStorage::default();
+        let bought = storage
+            .execute("구입", &mut body, "명견", None, None, None)
+            .unwrap();
+        assert_eq!(bought.0, vec!["당신이 \x1b[36m명견을\x1b[37m 구입합니다."]);
+        assert_eq!(body.get_int("은전"), 1234);
+        assert_eq!(body.object.objs.len(), 1, "약초 1개를 소모하고 호위 1개를 추가");
+        assert_eq!(body.object.objs[0].lock().unwrap().getString("종류"), "호위");
+        assert_eq!(body.object.objs[0].lock().unwrap().getInt("체력"), 1000);
+
+        body.set("성격", "정파");
+        let faction = storage
+            .execute("구입", &mut body, "사강시", None, None, None)
+            .unwrap();
+        assert_eq!(faction.0, vec!["☞ 해당 호위는 사파원만 사용 가능합니다."]);
+
+        let _ = std::fs::remove_file(format!("data/user/{player_name}.json"));
+        let mut world = get_world_state().write().unwrap();
+        world.remove_player_position(&player_name);
+        world.mob_cache.remove_mob(&mob_key);
     }
 
     #[test]
@@ -15482,6 +17410,79 @@ mod tests {
             .write()
             .unwrap()
             .remove_player_position(&player_name);
+    }
+
+    #[test]
+    fn donation_command_requires_guard_then_clamps_to_carried_silver_like_python() {
+        use crate::world::{get_world_state, MobInstance, PlayerPosition, RawMobData};
+
+        let player_name = format!("기부회귀-{}", std::process::id());
+        let zone = format!("기부회귀존-{}", std::process::id());
+        let mut body = Body::new();
+        body.set("이름", player_name.as_str());
+        body.set("은전", 50_i64);
+        {
+            get_world_state().write().unwrap().set_player_position(
+                &player_name,
+                PlayerPosition::new(zone.clone(), "1".to_string()),
+            );
+        }
+        let storage = ScriptStorage::default();
+        let no_guard_before_amount = storage
+            .execute("기부", &mut body, "0", None, None, None)
+            .unwrap();
+        assert_eq!(no_guard_before_amount.0, vec!["☞ 이곳에 표국무사가 없네요."]);
+
+        let mob_key = format!("{zone}:표두");
+        let mut guard_data = RawMobData::new();
+        guard_data.name = "표두".into();
+        guard_data.zone = zone.clone();
+        guard_data.gold = 100;
+        guard_data.reaction_names = vec!["표두".into(), "표국무사".into()];
+        {
+            let mut world = get_world_state().write().unwrap();
+            world
+                .mob_cache
+                .insert_mob_data(mob_key.clone(), guard_data.clone());
+            world.mob_cache.add_mob_instance(MobInstance::new(
+                mob_key.clone(),
+                zone.clone(),
+                "1",
+                &guard_data,
+            ));
+        }
+        let invalid = storage
+            .execute("기부", &mut body, "0", None, None, None)
+            .unwrap();
+        assert_eq!(invalid.0, vec!["☞ 은전 1개 이상 입금 하셔야 해요."]);
+
+        let donated = storage
+            .execute("기부", &mut body, "100", None, None, None)
+            .unwrap();
+        assert_eq!(body.get_int("은전"), 0);
+        assert_eq!(
+            donated.0,
+            vec!["당신이 은전 50개를 표국무사에게 기탁합니다.\r\n현재까지 모여진 기부금 총액은 은전 \x1b[1m150\x1b[0;37m개 입니다."]
+        );
+        assert_eq!(
+            get_world_state()
+                .read()
+                .unwrap()
+                .mob_cache
+                .get_all_mobs_in_room(&zone, "1")[0]
+                .gold,
+            150
+        );
+
+        let zero_clamped = storage
+            .execute("기부", &mut body, "1", None, None, None)
+            .unwrap();
+        assert!(zero_clamped.0[0].starts_with("당신이 은전 0개를"));
+
+        let _ = std::fs::remove_file(format!("data/user/{player_name}.json"));
+        let mut world = get_world_state().write().unwrap();
+        world.remove_player_position(&player_name);
+        world.mob_cache.remove_mob(&mob_key);
     }
 
     #[test]
@@ -15550,6 +17551,645 @@ mod tests {
             .write()
             .unwrap()
             .remove_player_position(&player_name);
+    }
+
+    #[test]
+    fn borrow_and_return_commands_match_python_branch_messages_and_state() {
+        use crate::object::Object;
+        use crate::world::{get_world_state, MobInstance, PlayerPosition, RawMobData};
+
+        let suffix = std::process::id();
+        let player_name = format!("대여회귀-{suffix}");
+        let zone = format!("대여회귀존-{suffix}");
+        let catalog_path = std::env::temp_dir().join(format!("muc-book-command-{suffix}.json"));
+        crate::book::save(
+            &catalog_path,
+            &[serde_json::json!({
+                "이름": "철퇴",
+                "고유번호": "command-book-id",
+                "등록자": "등록자",
+                "대여가능": true,
+                "대여": "",
+                "인덱스": "289",
+                "attr": {
+                    "이름": "철퇴",
+                    "반응이름": "철퇴",
+                    "계층": "무기",
+                    "종류": "무기"
+                }
+            })],
+        )
+        .unwrap();
+
+        let mob_key = format!("{zone}:진영");
+        let mut mob_data = RawMobData::new();
+        mob_data.name = "진영".to_string();
+        mob_data.zone = zone.clone();
+        {
+            let mut world = get_world_state().write().unwrap();
+            world
+                .mob_cache
+                .insert_mob_data(mob_key.clone(), mob_data.clone());
+            world.mob_cache.add_mob_instance(MobInstance::new(
+                mob_key,
+                zone.clone(),
+                "1",
+                &mob_data,
+            ));
+            world.set_player_position(
+                &player_name,
+                PlayerPosition::new(zone.clone(), "1".to_string()),
+            );
+        }
+
+        let storage = ScriptStorage::default();
+        let mut body = Body::new();
+        body.set("이름", player_name.as_str());
+        body.set("__시험도서목록경로", catalog_path.to_string_lossy().as_ref());
+
+        let usage = storage.execute("대여", &mut body, "", None, None, None).unwrap();
+        assert_eq!(usage.0, vec!["☞ 사용법: [물품번호] 대여"]);
+        let invalid = storage.execute("대여", &mut body, "0", None, None, None).unwrap();
+        assert_eq!(invalid.0, vec!["☞ 대여 가능한 물품이 없습니다."]);
+
+        let borrowed = storage.execute("대여", &mut body, "1", None, None, None).unwrap();
+        assert_eq!(borrowed.0, vec!["☞ 대여가 완료 되었습니다."]);
+        assert_eq!(body.object.objs.len(), 1);
+        assert_eq!(
+            body.object.objs[0].lock().unwrap().getString("고유번호"),
+            "command-book-id"
+        );
+        let entry = crate::book::load(&catalog_path).unwrap().remove(0);
+        assert!(!crate::book::dict_get_bool(&entry, "대여가능"));
+        assert_eq!(crate::book::dict_get_string(&entry, "대여"), player_name);
+
+        let returned = storage
+            .execute("반납", &mut body, "철퇴", None, None, None)
+            .unwrap();
+        assert_eq!(returned.0, vec!["☞ 반납이 완료 되었습니다."]);
+        assert!(body.object.objs.is_empty());
+        let entry = crate::book::load(&catalog_path).unwrap().remove(0);
+        assert!(crate::book::dict_get_bool(&entry, "대여가능"));
+        assert_eq!(crate::book::dict_get_string(&entry, "대여"), "");
+
+        let mut ordinary = Object::new();
+        ordinary.set("이름", "평범한물품");
+        body.object.append(Arc::new(Mutex::new(ordinary)));
+        let not_returnable = storage
+            .execute("반납", &mut body, "평범한물품", None, None, None)
+            .unwrap();
+        assert_eq!(not_returnable.0, vec!["☞ 반납 가능한 물품이 아닙니다."]);
+
+        body.object.objs.clear();
+        let mut weapon = Object::new();
+        weapon.set("이름", "등록시험철퇴");
+        weapon.set("반응이름", "등록시험철퇴\r\n시험철퇴");
+        weapon.set("인덱스", "289");
+        weapon.set("종류", "무기");
+        weapon.set("계층", "무기");
+        body.object.append(Arc::new(Mutex::new(weapon)));
+        let registered = storage
+            .execute("등록", &mut body, "등록시험철퇴", None, None, None)
+            .unwrap();
+        assert_eq!(registered.0, vec!["☞ 등록 되었습니다."]);
+        assert!(body.object.objs.is_empty());
+
+        let list = storage
+            .execute("대여목록", &mut body, "등록시험철퇴", None, None, None)
+            .unwrap();
+        assert_eq!(list.0.len(), 1);
+        assert!(list.0[0].starts_with("2\t등록시험철퇴\t\t("));
+        assert!(list.0[0].ends_with(")\t대여가능"));
+
+        let canceled = storage
+            .execute("등록취소", &mut body, "2", None, None, None)
+            .unwrap();
+        assert_eq!(canceled.0, vec!["☞ 등록 취소 되었습니다."]);
+        assert_eq!(body.object.objs.len(), 1);
+        assert_eq!(body.object.objs[0].lock().unwrap().getName(), "등록시험철퇴");
+        assert_eq!(body.object.objs[0].lock().unwrap().getString("고유번호"), "");
+
+        let mut entries = crate::book::load(&catalog_path).unwrap();
+        entries[0]["등록자"] = serde_json::Value::String("다른등록자".into());
+        crate::book::save(&catalog_path, &entries).unwrap();
+        let not_owner = storage
+            .execute("등록취소", &mut body, "1", None, None, None)
+            .unwrap();
+        assert_eq!(not_owner.0, vec!["☞ 자신이 등록한 물품이 아닙니다."]);
+
+        body.set("관리자등급", 1000_i64);
+        let deleted = storage
+            .execute("등록삭제", &mut body, "1", None, None, None)
+            .unwrap();
+        assert_eq!(deleted.0, vec!["☞ 등록 삭제 되었습니다."]);
+        assert!(crate::book::load(&catalog_path).unwrap().is_empty());
+
+        let _ = std::fs::remove_file(catalog_path);
+        let _ = std::fs::remove_file(format!("data/user/{player_name}.json"));
+        get_world_state()
+            .write()
+            .unwrap()
+            .remove_player_position(&player_name);
+    }
+
+    #[test]
+    fn settings_command_lists_python_cfg_and_toggles_with_python_text() {
+        let player_name = format!("설정회귀-{}", std::process::id());
+        let mut body = Body::new();
+        body.set("이름", player_name.as_str());
+        body.set("설정상태", "자동습득 1\n전음거부 0");
+        let storage = ScriptStorage::default();
+
+        let listed = storage
+            .execute("설정", &mut body, "", None, None, None)
+            .unwrap();
+        assert_eq!(listed.0[0], "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━");
+        assert_eq!(
+            listed.0[1],
+            "\x1b[47m\x1b[30m◁               설      정      상      태               ▷\x1b[40m\x1b[37m"
+        );
+        assert!(listed.0.join("\r\n").contains("자동습득         [\x1b[1m설  정\x1b[0;37m]"));
+        assert!(listed.0.join("\r\n").contains("전음거부         [비설정]"));
+        assert!(listed.0.join("\r\n").contains("자동채널입장     [비설정]"));
+        assert_eq!(listed.0.last().unwrap(), "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━");
+
+        let enabled = storage
+            .execute("설정", &mut body, "전음거부", None, None, None)
+            .unwrap();
+        assert_eq!(
+            enabled.0,
+            vec!["☞ 전음거부를 \x1b[1m[설정]\x1b[0;37m 하였습니다."]
+        );
+        assert!(config_is_enabled(&body.get_string("설정상태"), "전음거부"));
+
+        let disabled = storage
+            .execute("설정", &mut body, "전음거부", None, None, None)
+            .unwrap();
+        assert_eq!(
+            disabled.0,
+            vec!["☞ 전음거부를 \x1b[1m[비설정]\x1b[0;37m 하였습니다."]
+        );
+        assert!(!config_is_enabled(&body.get_string("설정상태"), "전음거부"));
+
+        let invalid = storage
+            .execute("설정", &mut body, "없는설정", None, None, None)
+            .unwrap();
+        assert_eq!(invalid.0, vec!["☞ 그런 설정은 없어요. ^^"]);
+        let _ = std::fs::remove_file(format!("data/user/{player_name}.json"));
+    }
+
+    #[test]
+    fn exit_admin_commands_toggle_and_persist_like_python() {
+        use crate::world::{get_world_state, PlayerPosition};
+
+        let suffix = std::process::id();
+        let player_name = format!("출구회귀-{suffix}");
+        let zone = format!("출구회귀존-{suffix}");
+        let room_dir = std::path::Path::new("data/map").join(&zone);
+        let room_path = room_dir.join("1.json");
+        std::fs::create_dir_all(&room_dir).unwrap();
+        std::fs::write(
+            &room_path,
+            serde_json::to_string_pretty(&serde_json::json!({
+                "맵정보": {
+                    "이름": "출구 시험방", "존이름": zone,
+                    "설명": ["시험방"], "출구": ["동 2", "비밀$ 3"], "몹": []
+                }
+            }))
+            .unwrap(),
+        )
+        .unwrap();
+        {
+            let mut world = get_world_state().write().unwrap();
+            world.room_cache.get_room(&zone, "1").unwrap();
+            world.set_player_position(
+                &player_name,
+                PlayerPosition::new(zone.clone(), "1".to_string()),
+            );
+        }
+        let mut body = Body::new();
+        body.set("이름", player_name.as_str());
+        body.set("관리자등급", 1000_i64);
+        let storage = ScriptStorage::default();
+
+        let hidden = storage
+            .execute("출구숨김", &mut body, "동", None, None, None)
+            .unwrap();
+        assert_eq!(hidden.0, vec!["☞ 출구가 숨겨졌습니다."]);
+        let json: serde_json::Value =
+            serde_json::from_str(&std::fs::read_to_string(&room_path).unwrap()).unwrap();
+        assert!(json["맵정보"]["출구"].as_array().unwrap().iter().any(|v| v == "동$ 2"));
+
+        let shown = storage
+            .execute("출구숨김", &mut body, "동", None, None, None)
+            .unwrap();
+        assert_eq!(shown.0, vec!["☞ 출구가 드러났습니다."]);
+
+        let wandered = storage
+            .execute("맴돌이", &mut body, "비밀", None, None, None)
+            .unwrap();
+        assert_eq!(wandered.0, vec!["☞ 출구가 맴돌이 되었습니다."]);
+        let json: serde_json::Value =
+            serde_json::from_str(&std::fs::read_to_string(&room_path).unwrap()).unwrap();
+        assert!(json["맵정보"]["출구"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .any(|v| v == &format!("비밀$ {zone}:1")));
+
+        let usage = storage
+            .execute("출구제거", &mut body, "", None, None, None)
+            .unwrap();
+        assert_eq!(usage.0, vec!["☞ 사용법: [출구] 출구숨김"]);
+        let removed = storage
+            .execute("출구제거", &mut body, "동", None, None, None)
+            .unwrap();
+        assert_eq!(removed.0, vec!["☞ 출구가 제거되었습니다."]);
+        let json: serde_json::Value =
+            serde_json::from_str(&std::fs::read_to_string(&room_path).unwrap()).unwrap();
+        assert!(!json["맵정보"]["출구"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .any(|v| v.as_str().is_some_and(|v| v.starts_with("동 "))));
+
+        let _ = std::fs::remove_dir_all(room_dir);
+        get_world_state()
+            .write()
+            .unwrap()
+            .remove_player_position(&player_name);
+    }
+
+    #[test]
+    fn comma_value_command_executes_python_assignment_branches() {
+        use crate::object::Object;
+        use crate::world::{get_world_state, MobInstance, PlayerPosition, RawMobData};
+
+        let suffix = std::process::id();
+        let player_name = format!("값값회귀-{suffix}");
+        let zone = format!("값값회귀존-{suffix}");
+        let mut floor_item = Object::new();
+        floor_item.set("이름", "시험석");
+        floor_item.set("반응이름", "시험석\r\n돌");
+        floor_item.set("무게", 10_i64);
+        floor_item.set("설명", "기존");
+        let floor_item = Arc::new(Mutex::new(floor_item));
+
+        let mob_key = format!("{zone}:시험몹");
+        let mut mob_data = RawMobData::new();
+        mob_data.name = "시험몹".to_string();
+        mob_data.zone = zone.clone();
+        mob_data.max_hp = 100;
+        {
+            let mut world = get_world_state().write().unwrap();
+            world.set_player_position(
+                &player_name,
+                PlayerPosition::new(zone.clone(), "1".to_string()),
+            );
+            world.get_room_objs_mut(&zone, "1").push(floor_item.clone());
+            world
+                .mob_cache
+                .insert_mob_data(mob_key.clone(), mob_data.clone());
+            world.mob_cache.add_mob_instance(MobInstance::new(
+                mob_key,
+                zone.clone(),
+                "1",
+                &mob_data,
+            ));
+        }
+
+        let mut body = Body::new();
+        body.set("이름", player_name.as_str());
+        body.set("관리자등급", 2000_i64);
+        let storage = ScriptStorage::default();
+
+        let usage = storage.execute("값값", &mut body, "", None, None, None).unwrap();
+        assert_eq!(usage.0.len(), 2);
+        assert!(usage.0[0].parse::<i64>().is_ok());
+        assert_eq!(usage.0[1], "☞ 사용법: [대상],[키],[값] 값설정");
+
+        let numeric = storage
+            .execute("값값", &mut body, "시험석,무게,25", None, None, None)
+            .unwrap();
+        assert_eq!(numeric.0[1], "☞ 값이 설정되었습니다.");
+        assert_eq!(floor_item.lock().unwrap().getInt("무게"), 25);
+
+        let string_with_comma = storage
+            .execute(
+                "값값",
+                &mut body,
+                "시험석,설명,쉼표,포함",
+                None,
+                None,
+                None,
+            )
+            .unwrap();
+        assert_eq!(string_with_comma.0[1], "☞ 값이 설정되었습니다.");
+        assert_eq!(floor_item.lock().unwrap().getString("설명"), "쉼표,포함");
+
+        let invalid = storage
+            .execute("값값", &mut body, "시험석,무게,아님", None, None, None)
+            .unwrap();
+        assert_eq!(invalid.0[1], "☞ 잘못된 값입니다.");
+        assert_eq!(floor_item.lock().unwrap().getInt("무게"), 25);
+
+        let mob = storage
+            .execute("값값", &mut body, "시험몹,체력,77", None, None, None)
+            .unwrap();
+        assert_eq!(mob.0[1], "☞ 값이 설정되었습니다.");
+        assert_eq!(
+            get_world_state()
+                .read()
+                .unwrap()
+                .mob_cache
+                .get_all_mobs_in_room(&zone, "1")[0]
+                .hp,
+            77
+        );
+
+        let missing = storage
+            .execute("값값", &mut body, "없는것,키,값", None, None, None)
+            .unwrap();
+        assert_eq!(missing.0[1], "☞ 그런 대상이 없어요!");
+
+        let spaced = storage
+            .execute(
+                "값설정",
+                &mut body,
+                "시험석 설명 공백이 들어간 설명",
+                None,
+                None,
+                None,
+            )
+            .unwrap();
+        assert_eq!(spaced.0, vec!["☞ 값이 설정되었습니다."]);
+        assert_eq!(
+            floor_item.lock().unwrap().getString("설명"),
+            "공백이 들어간 설명"
+        );
+
+        let mut inventory_item = Object::new();
+        inventory_item.set("이름", "소지시험품");
+        inventory_item.set("반응이름", "소지시험품");
+        inventory_item.set("무게", 3_i64);
+        let inventory_item = Arc::new(Mutex::new(inventory_item));
+        body.object.append(inventory_item.clone());
+        let inventory = storage
+            .execute("값설정", &mut body, "소지시험품 무게 9", None, None, None)
+            .unwrap();
+        assert_eq!(inventory.0, vec!["☞ 값이 설정되었습니다."]);
+        assert_eq!(inventory_item.lock().unwrap().getInt("무게"), 9);
+
+        let room_attr = storage
+            .execute("값설정", &mut body, "방 시험속성 여러 단어 값", None, None, None)
+            .unwrap();
+        assert_eq!(room_attr.0, vec!["☞ 값이 설정되었습니다."]);
+        assert_eq!(
+            get_world_state()
+                .read()
+                .unwrap()
+                .room_attrs
+                .get(&format!("{zone}:1"))
+                .and_then(|attrs| attrs.get("시험속성"))
+                .map(String::as_str),
+            Some("여러 단어 값")
+        );
+
+        let invalid_space = storage
+            .execute("값설정", &mut body, "소지시험품 무게 숫자아님", None, None, None)
+            .unwrap();
+        assert_eq!(invalid_space.0, vec!["☞ 잘못된 값입니다."]);
+        assert_eq!(inventory_item.lock().unwrap().getInt("무게"), 9);
+
+        let mut world = get_world_state().write().unwrap();
+        world.get_room_objs_mut(&zone, "1").clear();
+        world.remove_player_position(&player_name);
+    }
+
+    #[test]
+    fn who_gives_item_preserves_python_mob_registration_order() {
+        use crate::world::{get_world_state, RawMobData};
+
+        let suffix = std::process::id();
+        let item_key = format!("누가주나시험-{suffix}");
+        let first_key = format!("순서시험:{suffix}-첫째");
+        let second_key = format!("순서시험:{suffix}-둘째");
+        let mut first = RawMobData::new();
+        first.name = "첫째몹".into();
+        first.items_for_sale.push((item_key.clone(), 1));
+        let mut second = RawMobData::new();
+        second.name = "둘째몹".into();
+        second.use_items.push((item_key.clone(), 1, 1, 1));
+        {
+            let mut world = get_world_state().write().unwrap();
+            world.mob_cache.insert_mob_data(first_key.clone(), first);
+            world.mob_cache.insert_mob_data(second_key.clone(), second);
+        }
+
+        let mut body = Body::new();
+        body.set("이름", "누가주나회귀");
+        body.set("관리자등급", 1000_i64);
+        let output = ScriptStorage::default()
+            .execute("누가주나", &mut body, &item_key, None, None, None)
+            .unwrap();
+        assert_eq!(
+            output.0,
+            vec![
+                format!("첫째몹 : {first_key}"),
+                format!("둘째몹 : {second_key}")
+            ]
+        );
+        let mut world = get_world_state().write().unwrap();
+        world.mob_cache.remove_mob(&first_key);
+        world.mob_cache.remove_mob(&second_key);
+    }
+
+    #[test]
+    fn save_object_command_handles_room_item_mob_and_room_as_valid_python_targets() {
+        use crate::object::Object;
+        use crate::world::{get_world_state, MobInstance, PlayerPosition, RawMobData};
+
+        let suffix = std::process::id();
+        let player_name = format!("저장회귀-{suffix}");
+        let zone = format!("저장회귀존-{suffix}");
+        let item_key = format!("저장회귀아이템-{suffix}");
+        let mob_file = format!("저장회귀몹-{suffix}");
+        let mob_key = format!("{zone}:{mob_file}");
+        let room_dir = std::path::Path::new("data/map").join(&zone);
+        let room_path = room_dir.join("1.json");
+        let mob_dir = std::path::Path::new("data/mob").join(&zone);
+        let mob_path = mob_dir.join(format!("{mob_file}.json"));
+        let item_path = std::path::Path::new("data/item").join(format!("{item_key}.json"));
+        std::fs::create_dir_all(&room_dir).unwrap();
+        std::fs::create_dir_all(&mob_dir).unwrap();
+        std::fs::write(
+            &room_path,
+            serde_json::to_string_pretty(&serde_json::json!({
+                "맵정보": {"이름": "저장 시험방", "존이름": zone, "설명": [], "출구": []}
+            }))
+            .unwrap(),
+        )
+        .unwrap();
+        std::fs::write(
+            &mob_path,
+            serde_json::to_string_pretty(&serde_json::json!({
+                "몹정보": {"이름": "저장시험몹", "체력": 100, "최고체력": 100}
+            }))
+            .unwrap(),
+        )
+        .unwrap();
+
+        let mut floor_item = Object::new();
+        floor_item.set("이름", "저장시험석");
+        floor_item.set("반응이름", "저장시험석\r\n시험석");
+        floor_item.set("인덱스", item_key.as_str());
+        floor_item.set("종류", "일반");
+        floor_item.set("설명1", "변경된 설명");
+        let floor_item = Arc::new(Mutex::new(floor_item));
+
+        let mut mob_data = RawMobData::new();
+        mob_data.name = "저장시험몹".into();
+        mob_data.zone = zone.clone();
+        mob_data.max_hp = 100;
+        mob_data
+            .attributes
+            .insert("이름".into(), serde_json::Value::String("저장시험몹".into()));
+        {
+            let mut world = get_world_state().write().unwrap();
+            world.set_player_position(
+                &player_name,
+                PlayerPosition::new(zone.clone(), "1".to_string()),
+            );
+            world.get_room_objs_mut(&zone, "1").push(floor_item);
+            world
+                .mob_cache
+                .insert_mob_data(mob_key.clone(), mob_data.clone());
+            let mut instance = MobInstance::new(mob_key.clone(), zone.clone(), "1", &mob_data);
+            instance.hp = 73;
+            instance.runtime_attrs.insert("시험값".into(), Value::Int(9));
+            world.mob_cache.add_mob_instance(instance);
+        }
+
+        let mut body = Body::new();
+        body.set("이름", player_name.as_str());
+        body.set("관리자등급", 2000_i64);
+        let storage = ScriptStorage::default();
+
+        let room_saved = storage
+            .execute("오브젝트저장", &mut body, "", None, None, None)
+            .unwrap();
+        assert_eq!(
+            room_saved.0,
+            vec![format!("* data/map/{zone}/1.json 저장되었습니다.")]
+        );
+        let item_saved = storage
+            .execute("오브젝트저장", &mut body, "시험석", None, None, None)
+            .unwrap();
+        assert_eq!(
+            item_saved.0,
+            vec![format!("* data/item/{item_key}.json 저장되었습니다.")]
+        );
+        let item_json: serde_json::Value =
+            serde_json::from_str(&std::fs::read_to_string(&item_path).unwrap()).unwrap();
+        assert_eq!(item_json["아이템정보"]["설명1"], "변경된 설명");
+
+        let mob_saved = storage
+            .execute("오브젝트저장", &mut body, "저장시험몹", None, None, None)
+            .unwrap();
+        assert_eq!(
+            mob_saved.0,
+            vec![format!("* data/mob/{zone}/{mob_file}.json 저장되었습니다.")]
+        );
+        let mob_json: serde_json::Value =
+            serde_json::from_str(&std::fs::read_to_string(&mob_path).unwrap()).unwrap();
+        assert_eq!(mob_json["몹정보"]["체력"], 73);
+        assert_eq!(mob_json["몹정보"]["시험값"], 9);
+
+        let missing = storage
+            .execute("오브젝트저장", &mut body, "없는대상", None, None, None)
+            .unwrap();
+        assert_eq!(missing.0, vec!["☞ 그런 대상이 없어요!"]);
+
+        let _ = std::fs::remove_file(item_path);
+        let _ = std::fs::remove_dir_all(room_dir);
+        let _ = std::fs::remove_dir_all(mob_dir);
+        let mut world = get_world_state().write().unwrap();
+        world.get_room_objs_mut(&zone, "1").clear();
+        world.remove_player_position(&player_name);
+        world.mob_cache.remove_mob(&mob_key);
+    }
+
+    #[test]
+    fn attributes_command_reads_room_json_then_room_object_and_inventory_fallback() {
+        use crate::object::Object;
+        use crate::world::{get_world_state, PlayerPosition};
+
+        let suffix = std::process::id();
+        let player = format!("속성회귀-{suffix}");
+        let zone = format!("속성회귀존-{suffix}");
+        let room_dir = std::path::Path::new("data/map").join(&zone);
+        std::fs::create_dir_all(&room_dir).unwrap();
+        std::fs::write(
+            room_dir.join("1.json"),
+            serde_json::to_string_pretty(&serde_json::json!({
+                "맵정보": {"이름": "속성 시험방", "설명": ["첫줄", "둘째줄"], "출구": []}
+            }))
+            .unwrap(),
+        )
+        .unwrap();
+        let mut floor = Object::new();
+        floor.set("이름", "바닥옥패");
+        floor.set("반응이름", "옥패");
+        floor.set("시험수치", 17_i64);
+        let floor = Arc::new(Mutex::new(floor));
+        {
+            let mut world = get_world_state().write().unwrap();
+            world.set_player_position(
+                &player,
+                PlayerPosition::new(zone.clone(), "1".to_string()),
+            );
+            world.get_room_objs_mut(&zone, "1").push(floor);
+        }
+        let mut body = Body::new();
+        body.set("이름", player.as_str());
+        body.set("관리자등급", 1000_i64);
+        let mut inventory = Object::new();
+        inventory.set("이름", "소지옥패");
+        inventory.set("반응이름", "소지패");
+        inventory.set("문자값", "보관값");
+        body.object.append(Arc::new(Mutex::new(inventory)));
+        let storage = ScriptStorage::default();
+
+        let room = storage
+            .execute("속성", &mut body, "", None, None, None)
+            .unwrap()
+            .0
+            .join("");
+        assert!(room.contains("#설명\r\n첫줄\r\n둘째줄\r\n\r\n"));
+        assert!(room.contains("#이름\r\n속성 시험방\r\n\r\n"));
+
+        let floor = storage
+            .execute("속성", &mut body, "옥패", None, None, None)
+            .unwrap()
+            .0
+            .join("");
+        assert!(floor.contains("#시험수치\r\n17\r\n\r\n"));
+        let inventory = storage
+            .execute("속성", &mut body, "소지패", None, None, None)
+            .unwrap()
+            .0
+            .join("");
+        assert!(inventory.contains("#문자값\r\n보관값\r\n\r\n"));
+
+        let missing = storage
+            .execute("속성", &mut body, "없는대상", None, None, None)
+            .unwrap();
+        assert_eq!(missing.0, vec!["☞ 그런 대상이 없어요!"]);
+
+        let _ = std::fs::remove_dir_all(room_dir);
+        let mut world = get_world_state().write().unwrap();
+        world.get_room_objs_mut(&zone, "1").clear();
+        world.remove_player_position(&player);
     }
 
     fn adult_channel_test_body(name: &str, nickname: &str, config: &str) -> Body {

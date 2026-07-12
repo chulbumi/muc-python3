@@ -1,41 +1,51 @@
-// 줘줘.rhai - 여러 아이템 주기
-// Python: cmds/줘줘.py
+// Python `cmds/줘줘.py`: 관리자가 같은 방 플레이어에게 아이템/은전을 지급한다.
 
 fn cmd(ob, line) {
     if !require_admin(ob, 2000) {
         send_line(ob, "☞ 무슨 말인지 모르겠어요. *^_^*");
         return;
     }
-    let words = split(trim(line), " ");
+    let words = line_args(line);
     if len(words) < 2 {
         send_line(ob, "☞ 사용법: [대상] [물품] 주다");
         return;
     }
-    let target = words[0];
-    let item = words[1];
-    if item == "은전" {
-        let amount = if len(words) >= 3 { to_int(words[2]) } else { 1 };
-        let result = request_give_silver(ob, target, if amount > 0 { amount } else { 1 });
-        if result == "" {
-            send_line(ob, "당신이 " + target + "에게 은전을 줍니다.");
-        } else {
+    let requested_target = words[0];
+    let item_arg = words[1];
+    let my_name = get_string(ob, "이름");
+
+    if item_arg == "은전" {
+        let target_name = find_give_player(ob, requested_target);
+        if target_name == "" {
             send_line(ob, "☞ 물품을 건내줄 무림인을 찾을 수 없어요. ^^");
+            return;
         }
+        let amount = if len(words) >= 3 && to_int(words[2]) > 0 { to_int(words[2]) } else { 1 };
+        request_grant_silver(ob, target_name, amount);
         return;
     }
-    let count = if len(words) >= 3 { to_int(words[2]) } else { 1 };
-    let result = request_give_item(ob, target, item, 1, if count > 0 { count } else { 1 });
-    if result == "no_item" {
+
+    let parsed = parse_order_name(item_arg);
+    let order = parsed[0].to_int();
+    let selected = give_item_presentation(ob, parsed[1], order);
+    if !selected["found"] {
         send_line(ob, "☞ 그런 아이템이 소지품에 없어요.");
         return;
     }
-    if result != "" {
+    let target_name = find_give_player(ob, requested_target);
+    if target_name == "" {
         send_line(ob, "☞ 물품을 건내줄 무림인을 찾을 수 없어요. ^^");
         return;
     }
-    send_line(ob, "당신이 " + target + "에게 " + item + "을(를) 줍니다.");
+    if target_name == my_name {
+        send_line(ob, "당신이 \x1b[36m" + selected["post"].to_string()
+            + "\x1b[37m 가지고 장난합니다. '@_@'");
+        return;
+    }
+    let count = if len(words) >= 3 { to_int(words[2]) } else { 1 };
+    let count = if count < 1 { 1 } else { if count > 100 { 100 } else { count } };
+    let give_count = if order != 1 { 1 } else { count };
+    request_admin_give_item(ob, target_name, selected["name"].to_string(), order, give_count);
 }
 
-fn main(ob, line) {
-    cmd(ob, line);
-}
+fn main(ob, line) { cmd(ob, line); }

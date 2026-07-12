@@ -11,8 +11,11 @@ fn cmd(ob, line) {
         return;
     }
     let result = book_return(ob, line);
-    if result == "" { send_line(ob, "☞ 반납이 완료 되었습니다."); }
-    else { send_line(ob, result); }
+    if result == "ok" { send_line(ob, "☞ 반납이 완료 되었습니다."); }
+    else if result == "no_item" { send_line(ob, "☞ 그런 아이템이 소지품에 없어요."); }
+    else if result == "not_returnable" { send_line(ob, "☞ 반납 가능한 물품이 아닙니다."); }
+    else if result == "catalog_unavailable" { send_line(ob, "☞ 반납 가능한 물품이 없습니다."); }
+    else { send_line(ob, "☞ 반납 할 수 없습니다."); }
 }
 
 fn main(ob, line) {

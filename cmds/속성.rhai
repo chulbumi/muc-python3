@@ -7,13 +7,13 @@ fn cmd(ob, line) {
         return;
     }
     let target = line;
-    let attrs = get_obj_attrs(ob, target);
-    if attrs.len() == 0 && target != "" {
+    let result = get_obj_attrs(ob, target);
+    if !result["found"] {
         send_line(ob, "☞ 그런 대상이 없어요!");
         return;
     }
     let msg = "";
-    for item in attrs {
+    for item in result["attrs"] {
         msg += "#" + item["key"] + "\r\n" + item["value"] + "\r\n\r\n";
     }
     send_line(ob, msg);

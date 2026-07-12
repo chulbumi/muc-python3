@@ -6,7 +6,7 @@ fn cmd(ob, line) {
         return;
     }
     if line == "" || is_empty(line) {
-        send_line(ob, "☞ 사용법: [출구] 출구제거");
+        send_line(ob, "☞ 사용법: [출구] 출구숨김");
         return;
     }
     if exit_remove(ob, trim(line)) {
