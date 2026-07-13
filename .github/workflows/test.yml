@@ -58,10 +58,11 @@ jobs:
         key: ${{ runner.os }}-cargo-${{ hashFiles('**/Cargo.lock') }}
 
     - name: Build release
-      run: cargo build --release
+      run: cargo build --release --bin murim_server
 
     - name: Upload binary
       uses: actions/upload-artifact@v4
       with:
-        name: muc_server
-        path: target/release/muc_server
+        name: murim_server
+        path: target/release/murim_server
+        if-no-files-found: error

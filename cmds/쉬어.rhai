@@ -29,7 +29,7 @@ fn cmd(ob, line) {
                 for person in context["room_players"] {
                     if person["name"] == player_name { output += rest_prompt(person); break; }
                 }
-                send_to_user(player_name, output);
+                send_raw_to_user(player_name, output);
             }
         }
         set_act(ob, "휴식");

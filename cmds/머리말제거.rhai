@@ -2,7 +2,7 @@
 // ob['머리말'] = '';
 
 fn cmd(ob, line) {
-    set_value(ob, "머리말", "");
+    set_text_affix(ob, "머리말", "");
     send_line(ob, "☞ 머리말을 제거 하였습니다.");
 }
 

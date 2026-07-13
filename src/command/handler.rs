@@ -154,7 +154,7 @@ pub enum CommandResult {
         give_item: Option<(String, usize, usize)>, // (item_name, order, count) 비스택
         give_item_stack: Option<(String, i64)>,    // (인덱스, count) 스택
         deduct_from_giver: bool,                   // 일반 `줘` true, 관리자 `줘줘` 금전 지급 false
-        bypass_item_limits: bool,                  // 관리자 `줘줘` 아이템은 전달불가/무게/수량 제한 우회
+        bypass_item_limits: bool, // 관리자 `줘줘` 아이템은 전달불가/무게/수량 제한 우회
     },
     /// 방파/길드 말: 특정 플레이어 이름 목록에게 메시지 전송. [방파] 발신자 : 메시지.
     BroadcastToPlayers(Vec<String>, String),

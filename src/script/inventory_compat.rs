@@ -30,6 +30,17 @@ fn json_array_marker(field: &str) -> String {
     format!("{JSON_ARRAY_MARKER_PREFIX}{field}")
 }
 
+/// Python's `value in item[field]`: list-valued JSON fields use exact element
+/// membership, while legacy scalar strings use substring membership.
+pub(crate) fn python_item_field_contains(item: &Object, field: &str, wanted: &str) -> bool {
+    let raw = item.getString(field);
+    if item.temp.contains_key(&json_array_marker(field)) {
+        raw.split('\n').any(|entry| entry == wanted)
+    } else {
+        raw.contains(wanted)
+    }
+}
+
 /// Preserve whether a Python item field was a JSON array even though the
 /// current Rust `Value` type stores list data as a string. Array elements are
 /// separated with newlines because option entries such as `"힘 10"` contain

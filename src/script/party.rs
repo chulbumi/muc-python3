@@ -76,6 +76,14 @@ pub(crate) fn build_party_person_snapshot(
         })
         .unwrap_or_default();
     person.insert("combat_target_ids".into(), Dynamic::from(combat_targets));
+    let combat_target_instances = super::combat_commands::combat_target_instance_ids(body)
+        .into_iter()
+        .map(|id| Dynamic::from(id as i64))
+        .collect::<Array>();
+    person.insert(
+        "combat_target_instance_ids".into(),
+        Dynamic::from(combat_target_instances),
+    );
     person.insert(
         "reaction_names".into(),
         Dynamic::from(
@@ -86,6 +94,7 @@ pub(crate) fn build_party_person_snapshot(
         ),
     );
     person.insert("lookup_supported".into(), Dynamic::from(true));
+    person.insert("kind".into(), Dynamic::from("player"));
     Dynamic::from(person)
 }
 
@@ -156,6 +165,18 @@ pub(crate) fn installed_box_party_snapshots(zone: &str, room: &str) -> Option<Ar
     Some(snapshots)
 }
 
+pub(crate) fn installed_box_party_snapshot_by_pointer(
+    zone: &str,
+    room: &str,
+    pointer: usize,
+) -> Option<Dynamic> {
+    let boxes = super::box_commands::installed_boxes_for_room(zone, room)?;
+    let index = boxes
+        .iter()
+        .position(|object| std::sync::Arc::as_ptr(object) as usize == pointer)?;
+    installed_box_party_snapshots(zone, room)?.get(index).cloned()
+}
+
 pub(crate) fn missing_party_person(connection_id: String, relation: RelationState) -> Dynamic {
     let mut person = Map::new();
     person.insert("id".into(), Dynamic::from(connection_id));
@@ -186,6 +207,16 @@ pub(crate) fn missing_party_person(connection_id: String, relation: RelationStat
 
 pub(crate) fn set_precomputed_party_context(context: Map) {
     PRECOMPUTED_PARTY_CONTEXT.with(|slot| *slot.borrow_mut() = Some(context));
+}
+
+#[cfg(test)]
+pub(crate) fn precomputed_party_context_for_test() -> Option<Map> {
+    PRECOMPUTED_PARTY_CONTEXT.with(|slot| slot.borrow().clone())
+}
+
+#[cfg(test)]
+pub(crate) fn find_follow_player_for_test(line: &str) -> Dynamic {
+    find_follow_player(line)
 }
 
 pub(crate) fn clear_precomputed_party_context() {
@@ -304,7 +335,13 @@ pub(crate) fn register_party_efuns(engine: &mut Engine, body_ptr: *mut Body) {
     let body_ptr_group_targets = body_ptr;
     engine.register_fn(
         "party_request_set_group_combat_targets",
-        move |_ob: &mut Map, owners: Array, targets: Array, tanker: &str| -> bool {
+        move |_ob: &mut Map,
+              owners: Array,
+              targets: Array,
+              instances: Array,
+              tanker: &str,
+              prepend_all: bool|
+              -> bool {
             let owners = owners
                 .into_iter()
                 .filter_map(|value| value.into_string().ok())
@@ -319,11 +356,19 @@ pub(crate) fn register_party_efuns(engine: &mut Engine, body_ptr: *mut Body) {
                 .into_iter()
                 .map(|owner| (owner, targets.clone()))
                 .collect();
+            let target_instances = instances
+                .into_iter()
+                .filter_map(|value| value.as_int().ok())
+                .filter_map(|value| u64::try_from(value).ok())
+                .filter(|value| *value != 0)
+                .collect();
             store_action(
                 unsafe { &mut *body_ptr_group_targets },
                 SocialAction::SetPartyCombatTargets {
                     assignments,
+                    target_instances,
                     tanker: (!tanker.is_empty()).then(|| tanker.to_string()),
+                    prepend_all,
                 },
             )
         },
@@ -508,10 +553,63 @@ fn find_follow_player(line: &str) -> Dynamic {
         return unsupported_party_person();
     }
 
-    // Python selects from one insertion-ordered room.objs list and only then
-    // checks is_player(). Rust currently has separate player/mob/item stores.
-    // If any non-player can compete for this query, do not guess which object
-    // Python would have selected and do not allow a relation mutation.
+    let ordered_objects = context_array("room_objects");
+    if !ordered_objects.is_empty() {
+        let mut exact_count = 0usize;
+        let mut prefix_count = 0usize;
+        for candidate in ordered_objects {
+            let Some(candidate) = candidate.try_cast::<Map>() else {
+                continue;
+            };
+            if candidate
+                .get("transparent")
+                .and_then(|value| value.as_bool().ok())
+                .unwrap_or(false)
+            {
+                continue;
+            }
+            let name = candidate
+                .get("name")
+                .and_then(|value| value.clone().into_string().ok())
+                .unwrap_or_default();
+            let reactions = candidate
+                .get("reaction_names")
+                .and_then(|value| value.clone().try_cast::<Array>())
+                .unwrap_or_default()
+                .into_iter()
+                .filter_map(|value| value.into_string().ok())
+                .collect::<Vec<_>>();
+            let selected = if name == query || reactions.iter().any(|alias| alias == &query) {
+                exact_count += 1;
+                exact_count == order
+            } else {
+                let mut selected = false;
+                for alias in reactions {
+                    if alias.starts_with(&query) {
+                        prefix_count += 1;
+                        selected |= prefix_count == order;
+                    }
+                }
+                selected
+            };
+            if selected {
+                return if candidate
+                    .get("kind")
+                    .and_then(|value| value.clone().into_string().ok())
+                    .as_deref()
+                    == Some("player")
+                {
+                    Dynamic::from(candidate)
+                } else {
+                    unsupported_party_person()
+                };
+            }
+        }
+        return missing_party_person(String::new(), RelationState::default());
+    }
+
+    // Legacy contexts without the unified array retain the conservative
+    // ambiguity guard.
     if context_array("room_nonplayers")
         .into_iter()
         .any(|candidate| nonplayer_matches(candidate, &query))
@@ -633,6 +731,8 @@ mod tests {
     use super::*;
     use crate::script::{ScriptConfig, ScriptStorage};
     use crate::world::{get_world_state, PlayerPosition};
+    use std::collections::HashMap;
+    use std::sync::{Arc, Mutex};
 
     fn body(name: &str, nickname: &str, personality: &str, hp: i64, max_hp: i64) -> Body {
         let mut body = Body::new();
@@ -726,6 +826,10 @@ mod tests {
             "_combat_target_ids".to_string(),
             Value::String("몹:하나\n몹:둘".to_string()),
         );
+        fighter.temp_mut().insert(
+            "_combat_target_instance_ids".to_string(),
+            Value::String("101\n202".to_string()),
+        );
         let idle = body("대기자", "", "정파", 45, 90);
         let leader_person = person("leader", &leader, None, Some("leader"));
         let fighter_person = person("fighter", &fighter, None, Some("leader"));
@@ -745,11 +849,45 @@ mod tests {
         let (action, _) = take_party_requests(&mut leader);
         assert!(matches!(
             action,
-            Some(SocialAction::SetPartyCombatTargets { assignments, tanker: None })
+            Some(SocialAction::SetPartyCombatTargets { assignments, target_instances, tanker: None, prepend_all: true })
                 if assignments == vec![
                     ("leader".to_string(), vec!["몹:하나".to_string(), "몹:둘".to_string()]),
                     ("idle".to_string(), vec!["몹:하나".to_string(), "몹:둘".to_string()]),
-                ]
+                ] && target_instances == vec![101, 202]
+        ));
+    }
+
+    #[test]
+    fn party_join_reassigns_fighting_leader_because_python_object_comparison_is_always_true() {
+        let mut leader = body("전투중대장", "", "정파", 45, 90);
+        leader.act = crate::player::ActState::Fight;
+        leader.temp_mut().insert(
+            "_combat_target_ids".to_string(),
+            Value::String("몹:대상".to_string()),
+        );
+        let leader_person = person("leader", &leader, None, Some("leader"));
+        let ctx = context(
+            leader_person.clone(),
+            None,
+            vec![],
+            Some(leader_person),
+            vec![],
+            vec![],
+        );
+
+        assert_eq!(
+            run("무리합", &mut leader, "", ctx),
+            vec!["당신이 속한 무리가 무리합동 공격을 시작 합니다."]
+        );
+        let (action, _) = take_party_requests(&mut leader);
+        assert!(matches!(
+            action,
+            Some(SocialAction::SetPartyCombatTargets {
+                assignments,
+                tanker: None,
+                prepend_all: true,
+                ..
+            }) if assignments == vec![("leader".to_string(), vec!["몹:대상".to_string()])]
         ));
     }
 
@@ -760,6 +898,10 @@ mod tests {
         leader.temp_mut().insert(
             "_combat_target_ids".to_string(),
             Value::String("몹:첫째\n몹:둘째".to_string()),
+        );
+        leader.temp_mut().insert(
+            "_combat_target_instance_ids".to_string(),
+            Value::String("303\n404".to_string()),
         );
         let tanker = body("방어담당", "", "정파", 60, 100);
         let leader_person = person("leader", &leader, None, Some("leader"));
@@ -779,13 +921,83 @@ mod tests {
         let (action, _) = take_party_requests(&mut leader);
         assert!(matches!(
             action,
-            Some(SocialAction::SetPartyCombatTargets { assignments, tanker: Some(tanker) })
+            Some(SocialAction::SetPartyCombatTargets { assignments, target_instances, tanker: Some(tanker), prepend_all: false })
                 if tanker == "tanker"
+                    && target_instances == vec![303, 404]
                     && assignments == vec![(
                         "tanker".to_string(),
                         vec!["몹:첫째".to_string(), "몹:둘째".to_string()]
                     )]
         ));
+    }
+
+    #[test]
+    fn defense_assignment_uses_python_room_alias_and_object_collision_order() {
+        let suffix = std::process::id();
+        let zone = format!("방어지정선택존-{suffix}");
+        let mut leader = body("방어선택대장", "", "정파", 45, 90);
+        leader.act = crate::player::ActState::Fight;
+        leader.temp_mut().insert(
+            "_combat_target_ids".to_string(),
+            Value::String("몹:대상".to_string()),
+        );
+        let tanker = body("방어선택담당", "", "정파", 60, 100);
+        {
+            let mut world = get_world_state().write().unwrap();
+            world.set_player_position(
+                "방어선택대장",
+                PlayerPosition::new(zone.clone(), "1".to_string()),
+            );
+            world.set_player_position(
+                "방어선택담당",
+                PlayerPosition::new(zone.clone(), "1".to_string()),
+            );
+        }
+        let mut snapshot = Map::new();
+        snapshot.insert("이름".into(), Dynamic::from("방어선택담당"));
+        snapshot.insert("반응이름".into(), Dynamic::from("방어별칭"));
+        crate::script::set_precomputed_room_view_players(HashMap::from([(
+            format!("{zone}:1"),
+            vec![Dynamic::from(snapshot)],
+        )]));
+        let leader_person = person("leader", &leader, None, Some("leader"));
+        let tanker_person = person("tanker", &tanker, Some("leader"), Some("leader"));
+        let make_context = || {
+            context(
+                leader_person.clone(),
+                None,
+                vec![],
+                Some(leader_person.clone()),
+                vec![tanker_person.clone()],
+                vec![],
+            )
+        };
+        assert_eq!(
+            run("방어지정", &mut leader, "방어별", make_context()),
+            vec!["\x1b[1m방어선택담당\x1b[0;37m이 무리의 방어로 지정 되었습니다."]
+        );
+        let _ = take_party_requests(&mut leader);
+
+        let mut collision = crate::object::Object::new();
+        collision.set("이름", "방어충돌물건");
+        collision.set("반응이름", "방어별칭");
+        let collision = Arc::new(Mutex::new(collision));
+        {
+            let mut world = get_world_state().write().unwrap();
+            world.get_room_objs_mut(&zone, "1").push(collision.clone());
+            world.record_floor_item(&zone, "1", &collision);
+        }
+        assert_eq!(
+            run("방어지정", &mut leader, "방어별칭", make_context()),
+            vec!["☞ 당신의 무리원이 아니에요."]
+        );
+        assert!(take_party_requests(&mut leader).0.is_none());
+
+        crate::script::set_precomputed_room_view_players(HashMap::new());
+        let mut world = get_world_state().write().unwrap();
+        world.get_room_objs_mut(&zone, "1").clear();
+        world.remove_player_position("방어선택대장");
+        world.remove_player_position("방어선택담당");
     }
 
     #[test]
@@ -854,6 +1066,48 @@ mod tests {
     }
 
     #[test]
+    fn follow_self_command_leaves_party_and_dissolves_last_member_with_python_bytes() {
+        let mut actor = body("나가는이", "", "정파", 45, 90);
+        let leader = body("이끈이", "", "정파", 31, 45);
+        let actor_person = person(
+            "member-token",
+            &actor,
+            Some("leader-token"),
+            Some("leader-token"),
+        );
+        let leader_person = person("leader-token", &leader, None, Some("leader-token"));
+        let ctx = context(
+            actor_person.clone(),
+            Some(leader_person.clone()),
+            vec![],
+            Some(leader_person),
+            vec![actor_person],
+            vec![],
+        );
+
+        assert_eq!(
+            run("따라", &mut actor, "나", ctx),
+            ["당신은 \x1b[1m이끈이\x1b[0m\x1b[40m\x1b[37m의 무리에서 이탈 하였습니다."]
+        );
+        let (action, deliveries) = take_party_requests(&mut actor);
+        assert_eq!(action, Some(SocialAction::LeaveParty));
+        assert_eq!(
+            deliveries,
+            [
+                PartyDelivery {
+                    connection_id: "leader-token".to_string(),
+                    raw_text: "\r\n당신의 무리에서 \x1b[1m나가는이\x1b[0m\x1b[40m\x1b[37m가 나갔습니다.\r\n".to_string(),
+                },
+                PartyDelivery {
+                    connection_id: "leader-token".to_string(),
+                    raw_text: "\r\n무리가 해제 되었습니다\r\n\r\n\x1b[0;37;40m[ 31/45, 7/9 ] ".to_string(),
+                },
+            ]
+        );
+        clear_precomputed_party_context();
+    }
+
+    #[test]
     fn compressed_floor_item_competitor_silently_blocks_unordered_follow_lookup() {
         let compressed = super::super::build_room_mugong_stack_item_snapshot("289", 1)
             .expect("data/item/289.json is required by existing item command tests");
@@ -881,6 +1135,62 @@ mod tests {
         let (action, deliveries) = take_party_requests(&mut actor);
         assert_eq!(action, None);
         assert!(deliveries.is_empty());
+        clear_precomputed_party_context();
+    }
+
+    #[test]
+    fn follow_lookup_honors_integrated_room_object_order() {
+        let compressed = super::super::build_room_mugong_stack_item_snapshot("289", 1)
+            .expect("data/item/289.json is required by existing item command tests");
+        let competitor = build_party_nonplayer_snapshot(&compressed);
+        let target_name = competitor.clone().try_cast::<Map>().unwrap()["name"]
+            .clone()
+            .into_string()
+            .unwrap();
+        let target = body(&target_name, "", "정파", 31, 45);
+
+        let mut blocked_actor = body("통합순서차단검사", "", "정파", 45, 90);
+        let blocked_actor_person = person("blocked-actor", &blocked_actor, None, None);
+        let target_person = person("target-token", &target, None, None);
+        let mut blocked = context(
+            blocked_actor_person.clone(),
+            None,
+            vec![],
+            None,
+            vec![],
+            vec![blocked_actor_person, target_person.clone()],
+        );
+        blocked.insert(
+            "room_objects".into(),
+            Dynamic::from(vec![competitor.clone(), target_person.clone()]),
+        );
+        assert!(run("따라", &mut blocked_actor, &target_name, blocked).is_empty());
+        assert_eq!(take_party_requests(&mut blocked_actor).0, None);
+
+        let mut following_actor = body("통합순서성공검사", "", "정파", 45, 90);
+        let following_actor_person = person("following-actor", &following_actor, None, None);
+        let mut following = context(
+            following_actor_person.clone(),
+            None,
+            vec![],
+            None,
+            vec![],
+            vec![following_actor_person, target_person.clone()],
+        );
+        following.insert(
+            "room_objects".into(),
+            Dynamic::from(vec![target_person, competitor]),
+        );
+        assert_eq!(
+            run("따라", &mut following_actor, &target_name, following),
+            vec![format!(
+                "당신은 \x1b[1m{target_name}\x1b[0;37m를 따라다니기 시작합니다."
+            )]
+        );
+        assert!(matches!(
+            take_party_requests(&mut following_actor).0,
+            Some(SocialAction::Follow { target }) if target == "target-token"
+        ));
         clear_precomputed_party_context();
     }
 
@@ -970,14 +1280,68 @@ mod tests {
             .write()
             .unwrap()
             .remove_player_position("무리원");
-        assert_eq!(chat_output.len(), 1);
-        assert!(chat_output[0].contains("◁"));
+        let chat_message = "\x1b[1m\x1b[40m\x1b[32m◁\x1b[0m\x1b[40m\x1b[37m무리원\x1b[1m\x1b[40m\x1b[32m▷\x1b[0m\x1b[40m\x1b[37m 안녕";
+        assert_eq!(chat_output, vec![chat_message]);
         let (_, chat_deliveries) = take_party_requests(&mut member_body);
-        assert_eq!(chat_deliveries.len(), 1);
-        assert_eq!(chat_deliveries[0].connection_id, "leader");
-        assert!(chat_deliveries[0]
-            .raw_text
-            .ends_with("\r\n\x1b[0;37;40m[ 90/90, 7/9 ] "));
+        assert_eq!(
+            chat_deliveries,
+            vec![PartyDelivery {
+                connection_id: "leader".to_string(),
+                raw_text: format!("\r\n{chat_message}\r\n\r\n\x1b[0;37;40m[ 90/90, 7/9 ] "),
+            }]
+        );
+        clear_precomputed_party_context();
+    }
+
+    #[test]
+    fn party_chat_keeps_python_validation_order_and_requires_a_room_before_party_check() {
+        let mut actor = body("무리말검사", "", "정파", 45, 90);
+        let actor_person = person("actor", &actor, None, None);
+        let empty = context(actor_person, None, vec![], None, vec![], vec![]);
+
+        assert_eq!(
+            run("무리말", &mut actor, "", empty.clone()),
+            vec!["☞ 사용법: [내용] 무리말(;)"]
+        );
+        assert_eq!(
+            run("무리말", &mut actor, &"가".repeat(161), empty.clone()),
+            vec!["☞ 너무 길어요. ^^"]
+        );
+        // Python returns silently at `ob.env == None` before checking Party.
+        assert!(run("무리말", &mut actor, "안녕", empty.clone()).is_empty());
+
+        get_world_state().write().unwrap().set_player_position(
+            "무리말검사",
+            PlayerPosition::new("낙양성".to_string(), "42".to_string()),
+        );
+        assert_eq!(
+            run("무리말", &mut actor, "안녕", empty),
+            vec!["☞ 당신이 속한 무리가 없어요. ^^"]
+        );
+        get_world_state()
+            .write()
+            .unwrap()
+            .remove_player_position("무리말검사");
+        clear_precomputed_party_context();
+    }
+
+    #[test]
+    fn failed_named_party_add_still_requests_python_solo_party_state() {
+        let mut leader = body("혼자대장", "", "정파", 45, 90);
+        let leader_person = person("leader", &leader, None, None);
+        let empty_context = context(leader_person, None, vec![], None, vec![], vec![]);
+
+        // Python addParty() assigns ob.Party = ob before it searches followers.
+        assert_eq!(
+            run("무리", &mut leader, "없는동행", empty_context),
+            vec!["☞ 당신을 따르는 대상이 아닙니다."]
+        );
+        let (action, deliveries) = take_party_requests(&mut leader);
+        assert_eq!(
+            action,
+            Some(SocialAction::AddPartyMembers { members: vec![] })
+        );
+        assert!(deliveries.is_empty());
         clear_precomputed_party_context();
     }
 
@@ -1031,10 +1395,14 @@ mod tests {
         );
 
         let output = run("무리제외", &mut leader, "모두", remove_context);
-        assert_eq!(output.len(), 3);
-        assert!(output[0].contains("일원"));
-        assert!(output[1].contains("이원"));
-        assert!(output[2].contains("동행자"));
+        assert_eq!(
+            output,
+            vec![
+                "당신의 무리에서 \x1b[1m일원\x1b[0m\x1b[40m\x1b[37m을 제외시킵니다.",
+                "당신의 무리에서 \x1b[1m이원\x1b[0m\x1b[40m\x1b[37m을 제외시킵니다.",
+                "당신이 \x1b[1m동행자\x1b[0m\x1b[40m\x1b[37m를 더이상 따라다니지 못하게 합니다.",
+            ]
+        );
         let (action, deliveries) = take_party_requests(&mut leader);
         assert_eq!(
             action,
@@ -1047,19 +1415,26 @@ mod tests {
             })
         );
         assert_eq!(
-            deliveries
-                .iter()
-                .map(|delivery| delivery.connection_id.as_str())
-                .collect::<Vec<_>>(),
-            ["second", "first", "second", "loose"]
+            deliveries,
+            vec![
+                PartyDelivery {
+                    connection_id: "second".to_string(),
+                    raw_text: "\r\n당신의 무리에서 \x1b[1m일원\x1b[0m\x1b[40m\x1b[37m을 제외시킵니다.\r\n\r\n\x1b[0;37;40m[ 70/90, 7/9 ] ".to_string(),
+                },
+                PartyDelivery {
+                    connection_id: "first".to_string(),
+                    raw_text: "\r\n\x1b[1m제외대장\x1b[0m\x1b[40m\x1b[37m의 무리에서 당신을 제외시킵니다.\r\n\r\n\x1b[0;37;40m[ 80/90, 7/9 ] ".to_string(),
+                },
+                PartyDelivery {
+                    connection_id: "second".to_string(),
+                    raw_text: "\r\n\x1b[1m제외대장\x1b[0m\x1b[40m\x1b[37m의 무리에서 당신을 제외시킵니다.\r\n\r\n\x1b[0;37;40m[ 70/90, 7/9 ] ".to_string(),
+                },
+                PartyDelivery {
+                    connection_id: "loose".to_string(),
+                    raw_text: "\r\n\x1b[1m제외대장\x1b[0m\x1b[40m\x1b[37m의 무리에서 당신을 더이상 따라다니지 못하게 합니다.\r\n\r\n\x1b[0;37;40m[ 60/90, 7/9 ] ".to_string(),
+                },
+            ]
         );
-        assert!(deliveries[0].raw_text.contains("일원"));
-        assert!(deliveries[1]
-            .raw_text
-            .contains("의 무리에서 당신을 제외시킵니다."));
-        assert!(deliveries[3]
-            .raw_text
-            .contains("더이상 따라다니지 못하게 합니다."));
         clear_precomputed_party_context();
     }
 

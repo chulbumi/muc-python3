@@ -7,11 +7,12 @@ fn cmd(ob, line) {
         send_line(ob, "☞ 무슨 말인지 모르겠어요. *^_^*");
         return;
     }
-    if is_empty(line) {
+    let mob_name = trim(line);
+    if mob_name == "" {
         send_line(ob, "사용법: [몹 이름] 생성");
         return;
     }
-    let result = spawn_mob_definition(line);
+    let result = spawn_mob_definition(mob_name);
     if !result["ok"] {
         send_line(ob, "* 생성 실패!!!");
         return;

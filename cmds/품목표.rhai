@@ -2,9 +2,9 @@
 // Python: cmds/품목표.py
 
 fn cmd(ob, line) {
-    let txt = get_merchant_script(ob);
-    if length(txt) > 0 {
-        send_line(ob, txt);
+    let lines = get_merchant_script(ob);
+    if len(lines) > 0 {
+        for line in lines { send_line(ob, line); }
     } else {
         send_line(ob, "☞ 품목을 보여줄 상인이 없어요. ^^");
     }

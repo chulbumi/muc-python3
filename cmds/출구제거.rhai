@@ -5,11 +5,11 @@ fn cmd(ob, line) {
         send_line(ob, "☞ 무슨 말인지 모르겠어요. *^_^*");
         return;
     }
-    if line == "" || is_empty(line) {
+    if line == "" {
         send_line(ob, "☞ 사용법: [출구] 출구숨김");
         return;
     }
-    if exit_remove(ob, trim(line)) {
+    if exit_remove(ob, line) {
         send_line(ob, "☞ 출구가 제거되었습니다.");
     } else {
         send_line(ob, "☞ 그런 출구가 없습니다.");

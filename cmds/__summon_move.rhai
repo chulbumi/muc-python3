@@ -2,5 +2,9 @@
 fn main(ob, line) {
     let words = line_args(line);
     if len(words) != 2 { return; }
-    perform_summon_move(ob, words[0], words[1]);
+    let error = perform_summon_move(ob, words[0], words[1]);
+    if error != "" {
+        // Python 모두소환 calls ply.clearTarget() even when enterRoom fails.
+        clear_summon_combat(ob);
+    }
 }

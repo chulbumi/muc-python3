@@ -59,6 +59,7 @@ fn cmd(ob, line) {
         return;
     }
     let pos = get_my_position(ob);
+    if pos["zone"] == "" { return; }
     if has_room_property(pos["zone"], pos["room"], "모든통신금지") {
         send_line(ob, "☞ 이지역에서는 어떠한 통신도 불가능합니다.");
         return;

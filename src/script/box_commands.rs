@@ -41,6 +41,19 @@ pub(crate) fn build_box_observer_snapshot(
     let mut observer = rhai::Map::new();
     observer.insert("id".into(), Dynamic::from(connection_id));
     observer.insert("name".into(), Dynamic::from(body.get_name()));
+    observer.insert(
+        "reaction_names".into(),
+        Dynamic::from(
+            super::reaction_names(&body.get_string("반응이름"))
+                .into_iter()
+                .map(Dynamic::from)
+                .collect::<rhai::Array>(),
+        ),
+    );
+    observer.insert(
+        "transparent".into(),
+        Dynamic::from(body.get_int("투명상태") == 1),
+    );
     observer.insert("hp".into(), Dynamic::from(body.get_hp()));
     observer.insert("max_hp".into(), Dynamic::from(body.get_max_hp()));
     observer.insert("mp".into(), Dynamic::from(body.get_mp()));
@@ -93,6 +106,51 @@ fn box_context_knows(connection_id: &str) -> bool {
     })
 }
 
+fn connected_player_occurrences(name: &str, query: &str) -> i64 {
+    PRECOMPUTED_BOX_CONTEXT.with(|slot| {
+        let player = slot
+            .borrow()
+            .as_ref()
+            .and_then(|context| context.get("players"))
+            .and_then(|players| players.clone().try_cast::<rhai::Array>())
+            .unwrap_or_default()
+            .into_iter()
+            .filter_map(|player| player.try_cast::<rhai::Map>())
+            .find(|player| {
+                player
+                    .get("name")
+                    .and_then(|value| value.clone().into_string().ok())
+                    .as_deref()
+                    == Some(name)
+            });
+        let Some(player) = player else {
+            return i64::from(name == query);
+        };
+        if player
+            .get("transparent")
+            .and_then(|value| value.as_bool().ok())
+            .unwrap_or(false)
+        {
+            return 0;
+        }
+        let aliases = player
+            .get("reaction_names")
+            .and_then(|value| value.clone().try_cast::<rhai::Array>())
+            .unwrap_or_default()
+            .into_iter()
+            .filter_map(|value| value.into_string().ok())
+            .collect::<Vec<_>>();
+        if name == query || aliases.iter().any(|alias| alias == query) {
+            1
+        } else {
+            aliases
+                .iter()
+                .filter(|alias| alias.starts_with(query))
+                .count() as i64
+        }
+    })
+}
+
 fn array_marker(field: &str) -> String {
     format!("{ARRAY_MARKER_PREFIX}{field}")
 }
@@ -133,7 +191,7 @@ fn direct_integer(object: &Object, field: &str) -> Option<i64> {
     }
 }
 
-fn python_get_int(value: &str) -> i64 {
+fn parse_int_prefix(value: &str) -> i64 {
     if value.is_empty() {
         return 0;
     }
@@ -160,7 +218,7 @@ fn python_is_digit_string(value: &str) -> bool {
 }
 
 fn python_name_order(value: &str) -> (String, i64) {
-    let order = python_get_int(value);
+    let order = parse_int_prefix(value);
     if order == 0 {
         return (value.to_string(), 1);
     }
@@ -637,11 +695,7 @@ fn save_box(box_object: &Object) -> bool {
         .is_some_and(|serialized| std::fs::write(output_path, serialized).is_ok())
 }
 
-pub(crate) fn prepare_installed_box(
-    box_object: &mut Object,
-    owner: &str,
-    name: &str,
-) -> bool {
+pub(crate) fn prepare_installed_box(box_object: &mut Object, owner: &str, name: &str) -> bool {
     let index = format!("{owner}_{name}");
     let path = Path::new("data/box").join(format!("{index}.json"));
     mark_box(box_object, &index, &path);
@@ -918,6 +972,158 @@ fn resolve_box(body: &Body, raw_name: &str) -> Result<Arc<Mutex<Object>>, Transf
             .unwrap_or_default()
     };
 
+    let ordered_resolution = {
+        let world = get_world_state()
+            .read()
+            .map_err(|_| TransferStatus::Unsupported)?;
+        let ordered = world.get_room_object_order(&zone, &room);
+        if ordered.is_empty() {
+            None
+        } else {
+            let floor = world.get_room_objs(&zone, &room);
+            let mobs = world.mob_cache.get_all_mobs_in_room(&zone, &room);
+            let mut remaining = query.order;
+            let occurrences = |object: &Object| -> i64 {
+                if object.getInt("투명상태") == 1 {
+                    return 0;
+                }
+                if matches_item_name(object, &query.name) {
+                    1
+                } else {
+                    python_sequence(object, "반응이름")
+                        .iter()
+                        .filter(|alias| alias.starts_with(&query.name))
+                        .count() as i64
+                }
+            };
+            let mut resolved = None;
+            let mut saw_match = false;
+            for object in ordered {
+                let (count, selected_box) = match object {
+                    crate::world::RoomObjectRef::InstalledBox(ordinal) => {
+                        let Some(candidate) = boxes.get(ordinal).cloned() else {
+                            continue;
+                        };
+                        let count = candidate
+                            .lock()
+                            .map_err(|_| TransferStatus::Unsupported)
+                            .map(|candidate| occurrences(&candidate))?;
+                        (count, Some(candidate))
+                    }
+                    crate::world::RoomObjectRef::Box(pointer) => {
+                        let Some(candidate) = boxes
+                            .iter()
+                            .find(|candidate| Arc::as_ptr(candidate) as usize == pointer)
+                            .cloned()
+                        else {
+                            continue;
+                        };
+                        let count = candidate
+                            .lock()
+                            .map_err(|_| TransferStatus::Unsupported)
+                            .map(|candidate| occurrences(&candidate))?;
+                        (count, Some(candidate))
+                    }
+                    crate::world::RoomObjectRef::FloorItem(pointer) => {
+                        let Some(item) = floor
+                            .iter()
+                            .find(|item| Arc::as_ptr(item) as usize == pointer)
+                        else {
+                            continue;
+                        };
+                        let count = item
+                            .lock()
+                            .map_err(|_| TransferStatus::Unsupported)
+                            .map(|item| occurrences(&item))?;
+                        (count, None)
+                    }
+                    crate::world::RoomObjectRef::Mob(id) => {
+                        let Some(mob) = mobs.iter().find(|mob| mob.instance_id == id) else {
+                            continue;
+                        };
+                        let eligible = if query.name == "시체" {
+                            !mob.alive
+                        } else {
+                            mob.alive
+                        };
+                        if !eligible {
+                            continue;
+                        }
+                        let Some(data) = world.mob_cache.get_mob(&mob.mob_key) else {
+                            return Err(TransferStatus::Unsupported);
+                        };
+                        let count = if mob.name == query.name || data.name == query.name {
+                            1
+                        } else {
+                            data.reaction_names
+                                .iter()
+                                .filter(|alias| alias.starts_with(&query.name))
+                                .count() as i64
+                        };
+                        (count, None)
+                    }
+                    crate::world::RoomObjectRef::Player(name) => {
+                        (connected_player_occurrences(&name, &query.name), None)
+                    }
+                    crate::world::RoomObjectRef::SummonedUser(id) => {
+                        let Some(user) = world
+                            .summoned_users()
+                            .iter()
+                            .find(|user| user.id == id)
+                        else {
+                            continue;
+                        };
+                        if user.body.get_int("투명상태") == 1 {
+                            continue;
+                        }
+                        let aliases = super::reaction_names(
+                            &user.body.get_string("반응이름"),
+                        );
+                        let count = if user.body.get_name() == query.name
+                            || aliases.iter().any(|alias| alias == &query.name)
+                        {
+                            1
+                        } else {
+                            aliases
+                                .iter()
+                                .filter(|alias| alias.starts_with(&query.name))
+                                .count() as i64
+                        };
+                        (count, None)
+                    }
+                };
+                if count <= 0 {
+                    continue;
+                }
+                saw_match = true;
+                if remaining <= count {
+                    resolved = Some(match selected_box {
+                        Some(selected) => Ok(selected),
+                        None => Err(TransferStatus::NoBox),
+                    });
+                    break;
+                }
+                remaining -= count;
+            }
+            if resolved.is_none() && saw_match {
+                Some(Err(TransferStatus::NoBox))
+            } else {
+                resolved
+            }
+        }
+    };
+
+    if let Some(result) = ordered_resolution {
+        let selected = result?;
+        let supported = selected
+            .lock()
+            .map(|box_object| box_load_supported(&box_object))
+            .map_err(|_| TransferStatus::Unsupported)?;
+        return supported
+            .then_some(selected)
+            .ok_or(TransferStatus::Unsupported);
+    }
+
     if !box_has_any_match(&boxes, &query) {
         return Err(TransferStatus::NoBox);
     }
@@ -988,7 +1194,10 @@ fn find_inventory_item(
 }
 
 fn selected_count(words: &[&str]) -> i64 {
-    words.get(2).map(|value| python_get_int(value)).unwrap_or(1)
+    words
+        .get(2)
+        .map(|value| parse_int_prefix(value))
+        .unwrap_or(1)
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -1076,13 +1285,9 @@ fn put_bulk(
         Err(status) => return TransferResult::for_box(status, box_name),
     };
 
-    // `약초`'s single-count format has three `%s` placeholders but two
-    // arguments. Python has already mutated item/ONEITEM state when it raises
-    // TypeError. Rust cannot safely reproduce that partial exception through
-    // the command protocol, so block the whole transaction before mutation.
-    if mode == PutBulkMode::Herb && groups.iter().any(|group| group.count == 1) {
-        return TransferResult::for_box(TransferStatus::Unsupported, box_name);
-    }
+    // Python's single-herb output has one stray `%s` placeholder and raises
+    // after moving the item.  Treat that as a source bug: the intended output
+    // is the same one-item form used by every other bulk selector.
     if !can_save_after_put(box_object, &selected) {
         return TransferResult::for_box(TransferStatus::Unsupported, box_name);
     }
@@ -1328,7 +1533,10 @@ fn execute_put(body: &mut Body, line: &str, oneitems: &mut dyn OneItemActions) -
         return TransferResult::status(TransferStatus::Unsupported);
     };
     if words[1] == "은전" {
-        let amount = words.get(2).map(|value| python_get_int(value)).unwrap_or(1);
+        let amount = words
+            .get(2)
+            .map(|value| parse_int_prefix(value))
+            .unwrap_or(1);
         return put_money(body, &mut box_object, amount);
     }
     if let Some(mode) = PutBulkMode::from_word(words[1]) {
@@ -1374,7 +1582,7 @@ fn max_inventory_count() -> Option<i64> {
         .and_then(|config| config.get("사용자아이템갯수").cloned())
         .and_then(|value| match value {
             JsonValue::Number(number) => number.as_i64(),
-            JsonValue::String(value) => Some(python_get_int(&value)),
+            JsonValue::String(value) => Some(parse_int_prefix(&value)),
             _ => None,
         })
 }
@@ -1390,7 +1598,7 @@ fn current_inventory_load(body: &Body) -> Result<(i64, i64), TransferStatus> {
         let item_weight = match item.get("무게") {
             Value::Int(value) => value,
             Value::Float(value) => value as i64,
-            Value::String(value) => python_get_int(&value),
+            Value::String(value) => parse_int_prefix(&value),
         };
         weight = weight
             .checked_add(item_weight)
@@ -1535,7 +1743,7 @@ fn take_selected(
     let mut order = -1_i64;
 
     if python_is_digit_string(raw_name) {
-        let index = python_get_int(raw_name);
+        let index = parse_int_prefix(raw_name);
         let length = match i64::try_from(box_object.objs.len()) {
             Ok(value) => value,
             Err(_) => return TransferResult::for_box(TransferStatus::Unsupported, box_name),
@@ -1669,6 +1877,10 @@ fn execute_sort(body: &mut Body, line: &str) -> &'static str {
     if words.len() < 2 {
         return "usage";
     }
+    let box_arc = match resolve_box(body, words[0]) {
+        Ok(value) => value,
+        Err(_) => return "missing",
+    };
     let key = words[1];
     const KEYS: [&str; 11] = [
         "힘",
@@ -1689,10 +1901,6 @@ fn execute_sort(body: &mut Body, line: &str) -> &'static str {
     if body.get_int("은전") < 100_000 {
         return "money";
     }
-    let box_arc = match resolve_box(body, words[0]) {
-        Ok(value) => value,
-        Err(_) => return "missing",
-    };
     let Ok(mut box_object) = box_arc.lock() else {
         return "missing";
     };
@@ -1721,74 +1929,102 @@ fn execute_sort(body: &mut Body, line: &str) -> &'static str {
             .cmp(&right_value)
             .then(left_name.cmp(&right_name))
     });
-    if !save_box(&box_object) {
-        return "missing";
-    }
     body.set("은전", body.get_int("은전") - 100_000);
     "ok"
 }
 
 pub(super) fn register_box_command_efuns(engine: &mut Engine, body_ptr: *mut Body) {
     let view_body_ptr = body_ptr;
-    engine.register_fn("find_view_box", move |_ob: &mut rhai::Map, line: &str| -> Dynamic {
-        let body = unsafe { &*view_body_ptr };
-        let (name, order) = python_name_order(line);
-        let mut candidates = body.object.objs.clone();
-        if let Some(position) = get_world_state()
-            .read()
-            .ok()
-            .and_then(|world| world.get_player_position(&body.get_name()).cloned())
-        {
-            candidates.extend(installed_boxes_for_room(&position.zone, &position.room).unwrap_or_default());
-        }
-        let mut count = 0_i64;
-        for candidate in candidates {
-            let Ok(value) = candidate.lock() else { continue };
-            if !is_box(&value) {
-                continue;
+    engine.register_fn(
+        "find_view_box",
+        move |_ob: &mut rhai::Map, line: &str| -> Dynamic {
+            let body = unsafe { &*view_body_ptr };
+            let (name, order) = python_name_order(line);
+            // Python first selects from the complete inventory, then falls
+            // back to Room.findObjName's integrated object order.  Filtering
+            // for boxes before selection lets a room box jump ahead of a
+            // same-name ordinary inventory item.
+            let selected =
+                body.object
+                    .findObjInven(&name, order.max(1) as usize)
+                    .or_else(|| {
+                        if let Some(selected) = match super::select_python_room_object(body, line) {
+                            Some(crate::world::RoomObjectRef::InstalledBox(ordinal)) => {
+                                let position = get_world_state().read().ok().and_then(|world| {
+                                    world.get_player_position(&body.get_name()).cloned()
+                                })?;
+                                installed_boxes_for_room(&position.zone, &position.room)
+                                    .and_then(|boxes| boxes.get(ordinal).cloned())
+                            }
+                            _ => None,
+                        } {
+                            return Some(selected);
+                        }
+                        // Older loaded fixtures may have no integrated room-order
+                        // record.  Preserve their installed-box registration
+                        // order only as a fallback.
+                        let position = get_world_state().read().ok().and_then(|world| {
+                            world.get_player_position(&body.get_name()).cloned()
+                        })?;
+                        let boxes = installed_boxes_for_room(&position.zone, &position.room)?;
+                        let mut matched = 0_i64;
+                        boxes.into_iter().find(|candidate| {
+                            let Ok(value) = candidate.lock() else {
+                                return false;
+                            };
+                            let aliases = value.getString("반응이름");
+                            let is_match = value.getName() == name
+                                || aliases
+                                    .split_whitespace()
+                                    .any(|alias| alias == name || alias.starts_with(name.as_str()));
+                            if is_match {
+                                matched += 1;
+                            }
+                            is_match && matched == order
+                        })
+                    });
+            if let Some(candidate) = selected {
+                let Ok(value) = candidate.lock() else {
+                    let mut result = rhai::Map::new();
+                    result.insert("found".into(), Dynamic::from(false));
+                    return Dynamic::from(result);
+                };
+                if !is_box(&value) {
+                    let mut result = rhai::Map::new();
+                    result.insert("found".into(), Dynamic::from(false));
+                    return Dynamic::from(result);
+                }
+                let mut result = rhai::Map::new();
+                result.insert("found".into(), Dynamic::from(true));
+                for key in ["이름", "주인", "인덱스"] {
+                    result.insert(key.into(), Dynamic::from(value.getString(key)));
+                }
+                for key in ["보관수량", "보관최대수량", "보관증가은전", "은전"] {
+                    result.insert(key.into(), Dynamic::from(value.getInt(key)));
+                }
+                let items = value
+                    .objs
+                    .iter()
+                    .filter_map(|item| {
+                        let item = item.lock().ok()?;
+                        let mut data = rhai::Map::new();
+                        data.insert("name".into(), Dynamic::from(item.getName()));
+                        data.insert("option".into(), Dynamic::from(item.get_option_str()));
+                        data.insert(
+                            "oneitem".into(),
+                            Dynamic::from(item.checkAttr("아이템속성", "단일아이템")),
+                        );
+                        Some(Dynamic::from(data))
+                    })
+                    .collect::<rhai::Array>();
+                result.insert("items".into(), Dynamic::from(items));
+                return Dynamic::from(result);
             }
-            let aliases = value.getString("반응이름");
-            if value.getName() != name
-                && !aliases
-                    .split_whitespace()
-                    .any(|alias| alias == name || alias.starts_with(name.as_str()))
-            {
-                continue;
-            }
-            count += 1;
-            if count != order {
-                continue;
-            }
-            let mut result = rhai::Map::new();
-            result.insert("found".into(), Dynamic::from(true));
-            for key in ["이름", "주인"] {
-                result.insert(key.into(), Dynamic::from(value.getString(key)));
-            }
-            for key in ["보관수량", "보관최대수량", "보관증가은전", "은전"] {
-                result.insert(key.into(), Dynamic::from(value.getInt(key)));
-            }
-            let items = value
-                .objs
-                .iter()
-                .filter_map(|item| {
-                    let item = item.lock().ok()?;
-                    let mut data = rhai::Map::new();
-                    data.insert("name".into(), Dynamic::from(item.getName()));
-                    data.insert("option".into(), Dynamic::from(item.getString("옵션")));
-                    data.insert(
-                        "oneitem".into(),
-                        Dynamic::from(item.checkAttr("아이템속성", "단일아이템")),
-                    );
-                    Some(Dynamic::from(data))
-                })
-                .collect::<rhai::Array>();
-            result.insert("items".into(), Dynamic::from(items));
-            return Dynamic::from(result);
-        }
-        let mut missing = rhai::Map::new();
-        missing.insert("found".into(), Dynamic::from(false));
-        Dynamic::from(missing)
-    });
+            let mut missing = rhai::Map::new();
+            missing.insert("found".into(), Dynamic::from(false));
+            Dynamic::from(missing)
+        },
+    );
 
     engine.register_fn("get_box_room_context", || -> Dynamic {
         Dynamic::from(
@@ -2012,6 +2248,303 @@ mod tests {
     }
 
     #[test]
+    fn sort_checks_box_before_key_and_money_sorts_memory_without_python_file_write() {
+        let directory = test_directory("sort");
+        let suffix = TEST_ID.fetch_add(1, Ordering::Relaxed);
+        let player = format!("정렬사용자-{suffix}");
+        let zone = format!("정렬존-{suffix}");
+        let room = "1";
+        let box_name = format!("정렬함-{suffix}");
+        let mut box_object = make_box(&directory, &box_name, &player, 10, 10, &["무기"], &[]);
+        let high_b = make_item("높은나", "나검", "무기", &["나검"], &[], 1);
+        high_b.lock().unwrap().set("옵션", "힘 7");
+        let zero = make_item("영", "가검", "무기", &["가검"], &[], 1);
+        let high_a = make_item("높은가", "가검2", "무기", &["가검2"], &[], 1);
+        high_a.lock().unwrap().set("옵션", "힘 7");
+        box_object.objs.extend([high_b, zero, high_a]);
+        let path = box_path(&box_object).unwrap();
+        std::fs::write(&path, "원본파일유지").unwrap();
+        let box_arc = Arc::new(Mutex::new(box_object));
+        register_installed_box(&zone, room, box_arc.clone());
+        get_world_state()
+            .write()
+            .unwrap()
+            .set_player_position(&player, PlayerPosition::new(zone.clone(), room.into()));
+        let mut body = Body::new();
+        body.set("이름", player.as_str());
+
+        let storage = crate::script::ScriptStorage::default();
+        assert_eq!(
+            storage
+                .execute("정렬", &mut body, "", None, None, None)
+                .unwrap()
+                .0,
+            vec!["☞ 사용법: [보관함] [특성치] 정렬"]
+        );
+        assert_eq!(execute_sort(&mut body, "없는함 잘못"), "missing");
+        assert_eq!(
+            storage
+                .execute(
+                    "정렬",
+                    &mut body,
+                    &format!("{box_name} 잘못"),
+                    None,
+                    None,
+                    None,
+                )
+                .unwrap()
+                .0,
+            vec!["☞ 힘|민첩성|맷집|명중|회피|필살|운|방어력|체력|내공|이름 만 가능합니다."]
+        );
+        let poor = storage
+            .execute(
+                "정렬",
+                &mut body,
+                &format!("{box_name} 힘"),
+                None,
+                None,
+                None,
+            )
+            .unwrap();
+        assert_eq!(poor.0, vec!["☞ 은전이 부족해요."]);
+        body.set("은전", 100_000_i64);
+        let sorted = storage
+            .execute(
+                "정렬",
+                &mut body,
+                &format!("  {box_name}   힘  "),
+                None,
+                None,
+                None,
+            )
+            .unwrap();
+        assert_eq!(sorted.0, vec!["☞ 정렬되었습니다."]);
+        assert_eq!(body.get_int("은전"), 0);
+        assert_eq!(
+            object_names(&box_arc.lock().unwrap().objs),
+            ["가검", "가검2", "나검"]
+        );
+        assert_eq!(std::fs::read_to_string(&path).unwrap(), "원본파일유지");
+
+        body.set("은전", 100_000_i64);
+        let by_name = storage
+            .execute(
+                "정렬",
+                &mut body,
+                &format!("{box_name} 이름"),
+                None,
+                None,
+                None,
+            )
+            .unwrap();
+        assert_eq!(by_name.0, vec!["☞ 정렬되었습니다."]);
+        assert_eq!(
+            object_names(&box_arc.lock().unwrap().objs),
+            ["가검", "가검2", "나검"]
+        );
+
+        get_world_state()
+            .write()
+            .unwrap()
+            .remove_player_position(&player);
+        let _ = std::fs::remove_dir_all(directory);
+    }
+
+    #[test]
+    fn box_resolution_uses_integrated_floor_item_and_box_order() {
+        let directory = test_directory("integrated_order");
+        let suffix = TEST_ID.fetch_add(1, Ordering::Relaxed);
+        let player = format!("보관순서사용자-{suffix}");
+        let zone = format!("보관순서존-{suffix}");
+        let room = "1";
+        let box_object = Arc::new(Mutex::new(make_box(
+            &directory,
+            "충돌보관함",
+            &player,
+            5,
+            5,
+            &["기타"],
+            &[],
+        )));
+        register_installed_box(&zone, room, box_object.clone());
+        let mut floor = Object::new();
+        floor.set("이름", "충돌물건");
+        floor.set("반응이름", "충돌보관함");
+        let floor = Arc::new(Mutex::new(floor));
+        {
+            let mut world = get_world_state().write().unwrap();
+            world.set_player_position(&player, PlayerPosition::new(zone.clone(), room.into()));
+            world.get_room_objs_mut(&zone, room).push(floor.clone());
+            world.record_floor_item(&zone, room, &floor);
+        }
+        let mut body = Body::new();
+        body.set("이름", player.as_str());
+        assert_eq!(
+            resolve_box(&body, "충돌보관함").unwrap_err(),
+            TransferStatus::NoBox
+        );
+
+        get_world_state()
+            .write()
+            .unwrap()
+            .record_box(&zone, room, &box_object);
+        assert!(Arc::ptr_eq(
+            &resolve_box(&body, "충돌보관함").unwrap(),
+            &box_object
+        ));
+
+        let summoned_id = {
+            let mut summoned = Body::new();
+            summoned.set("이름", "보관소환경쟁자");
+            summoned.set("반응이름", "충돌보관함");
+            get_world_state().write().unwrap().add_summoned_user(
+                summoned,
+                PlayerPosition::new(zone.clone(), room.into()),
+            )
+        };
+        assert_eq!(
+            resolve_box(&body, "충돌보관함").unwrap_err(),
+            TransferStatus::NoBox
+        );
+        get_world_state()
+            .write()
+            .unwrap()
+            .remove_summoned_user_by_id(summoned_id);
+
+        let mut connected = Body::new();
+        connected.set("이름", "보관연결경쟁자");
+        connected.set("반응이름", "충돌보관함");
+        let snapshot = build_box_observer_snapshot("경쟁자토큰".into(), &connected, 1);
+        set_precomputed_box_context("행위자토큰".into(), vec![snapshot]);
+        get_world_state().write().unwrap().set_player_position(
+            "보관연결경쟁자",
+            PlayerPosition::new(zone.clone(), room.into()),
+        );
+        assert_eq!(
+            resolve_box(&body, "충돌보관함").unwrap_err(),
+            TransferStatus::NoBox
+        );
+        clear_precomputed_box_context();
+
+        let mut world = get_world_state().write().unwrap();
+        world.remove_player_position("보관연결경쟁자");
+        world.remove_player_position(&player);
+        world.get_room_objs_mut(&zone, room).clear();
+        drop(world);
+        let _ = std::fs::remove_dir_all(directory);
+    }
+
+    #[test]
+    fn take_empty_box_all_keeps_python_bulk_space_message() {
+        let directory = test_directory("take_nothing_text");
+        let suffix = TEST_ID.fetch_add(1, Ordering::Relaxed);
+        let player = format!("빈꺼내사용자-{suffix}");
+        let zone = format!("빈꺼내존-{suffix}");
+        let room = "1";
+        let box_name = format!("빈보관함-{suffix}");
+        let box_object = make_box(&directory, &box_name, &player, 10, 10, &["무기"], &[]);
+        register_installed_box(zone.as_str(), room, Arc::new(Mutex::new(box_object)));
+        get_world_state()
+            .write()
+            .unwrap()
+            .set_player_position(&player, PlayerPosition::new(zone.clone(), room.into()));
+        let mut body = Body::new();
+        body.set("이름", player.as_str());
+
+        let output = crate::script::ScriptStorage::default()
+            .execute(
+                "꺼내",
+                &mut body,
+                &format!("{box_name} 모두"),
+                None,
+                None,
+                None,
+            )
+            .unwrap();
+        assert_eq!(output.0, vec!["☞ 더 이상 꺼낼 물건이 없어요. ^^"]);
+
+        get_world_state()
+            .write()
+            .unwrap()
+            .remove_player_position(&player);
+        let _ = std::fs::remove_dir_all(directory);
+    }
+
+    #[test]
+    fn put_and_take_rhai_commands_match_python_text_and_move_the_real_item() {
+        use crate::script::ScriptStorage;
+
+        let directory = test_directory("put_take_command");
+        let suffix = TEST_ID.fetch_add(1, Ordering::Relaxed);
+        let player = format!("보관명령사용자-{suffix}");
+        let zone = format!("보관명령존-{suffix}");
+        let room = "1";
+        let box_name = format!("시험보관함-{suffix}");
+        let box_object = make_box(&directory, &box_name, &player, 10, 10, &["무기"], &[]);
+        let box_arc = Arc::new(Mutex::new(box_object));
+        register_installed_box(&zone, room, box_arc.clone());
+        get_world_state()
+            .write()
+            .unwrap()
+            .set_player_position(&player, PlayerPosition::new(zone.clone(), room.into()));
+
+        let item = make_item("보관시험검", "청명검", "무기", &["검", "청명"], &[], 2);
+        item.lock().unwrap().set("안시", "\x1b[1;35m");
+        let mut body = Body::new();
+        body.set("이름", player.as_str());
+        body.set("힘", 100_i64);
+        body.object.objs.push(item.clone());
+        let storage = ScriptStorage::default();
+
+        let put = storage
+            .execute(
+                "넣어",
+                &mut body,
+                &format!("  {box_name}   검  "),
+                None,
+                None,
+                None,
+            )
+            .unwrap();
+        assert_eq!(
+            put.0,
+            vec![format!(
+                "당신이 \x1b[36m{box_name}\x1b[37m에 \x1b[36m\x1b[1;35m청명검\x1b[0;37m을\x1b[37m 보관합니다."
+            )]
+        );
+        assert!(body.object.objs.is_empty());
+        assert_eq!(box_arc.lock().unwrap().objs.len(), 1);
+        assert!(Arc::ptr_eq(&box_arc.lock().unwrap().objs[0], &item));
+
+        let take = storage
+            .execute(
+                "꺼내",
+                &mut body,
+                &format!(" {box_name} 청명 "),
+                None,
+                None,
+                None,
+            )
+            .unwrap();
+        assert_eq!(
+            take.0,
+            vec![format!(
+                "당신이 \x1b[36m{box_name}\x1b[37m에서 \x1b[36m\x1b[1;35m청명검\x1b[0;37m을\x1b[37m 꺼냅니다."
+            )]
+        );
+        assert!(box_arc.lock().unwrap().objs.is_empty());
+        assert_eq!(body.object.objs.len(), 1);
+        assert!(Arc::ptr_eq(&body.object.objs[0], &item));
+
+        get_world_state()
+            .write()
+            .unwrap()
+            .remove_player_position(&player);
+        let _ = std::fs::remove_file(format!("data/user/{player}.json"));
+        let _ = std::fs::remove_dir_all(directory);
+    }
+
+    #[test]
     fn box_load_reverses_json_items_and_preserves_raw_field_shapes() {
         let directory = test_directory("load");
         let path = directory.join("주인_함.json");
@@ -2098,10 +2631,7 @@ mod tests {
         box_object.objs.push(malformed);
         let before = std::fs::read_to_string(&source_path).unwrap();
         assert!(!save_box(&box_object));
-        assert_eq!(
-            std::fs::read_to_string(&source_path).unwrap(),
-            before
-        );
+        assert_eq!(std::fs::read_to_string(&source_path).unwrap(), before);
         let _ = std::fs::remove_dir_all(directory);
     }
 
@@ -2139,12 +2669,12 @@ mod tests {
         let insufficient = put_money(&mut body, &mut box_object, 11);
         assert_eq!(insufficient.status, TransferStatus::NotEnoughMoney);
         assert_eq!(body.get_int("은전"), 10);
-        let default_one = put_money(&mut body, &mut box_object, python_get_int("0"));
+        let default_one = put_money(&mut body, &mut box_object, parse_int_prefix("0"));
         assert_eq!(default_one.status, TransferStatus::Ok);
         assert_eq!(default_one.money, 1);
         assert_eq!(body.get_int("은전"), 9);
         assert_eq!(box_object.getInt("은전"), 1);
-        let prefixed = put_money(&mut body, &mut box_object, python_get_int("8개"));
+        let prefixed = put_money(&mut body, &mut box_object, parse_int_prefix("8개"));
         assert_eq!(prefixed.status, TransferStatus::Ok);
         assert_eq!(prefixed.money, 8);
         assert_eq!(body.get_int("은전"), 1);
@@ -2222,7 +2752,7 @@ mod tests {
     }
 
     #[test]
-    fn single_herb_group_is_blocked_before_python_format_exception_mutation() {
+    fn single_herb_group_repairs_python_format_exception_and_completes_transfer() {
         let directory = test_directory("herb_bug");
         let mut box_object = make_box(&directory, "함", "주인", 10, 10, &["먹는것"], &[]);
         let herb = make_item("1", "산삼", "먹는것", &["산삼"], &[], 1);
@@ -2233,9 +2763,12 @@ mod tests {
         let mut oneitems = RecordingOneItems::default();
 
         let result = put_bulk(&mut body, &mut box_object, PutBulkMode::Herb, &mut oneitems);
-        assert_eq!(result.status, TransferStatus::Unsupported);
-        assert_eq!(body.object.objs.len(), 1);
-        assert!(box_object.objs.is_empty());
+        assert_eq!(result.status, TransferStatus::Ok);
+        assert_eq!(result.groups.len(), 1);
+        assert_eq!(result.groups[0].name, "산삼");
+        assert_eq!(result.groups[0].count, 1);
+        assert!(body.object.objs.is_empty());
+        assert_eq!(object_names(&box_object.objs), ["산삼"]);
         assert!(oneitems.kept.is_empty());
         let _ = std::fs::remove_dir_all(directory);
     }

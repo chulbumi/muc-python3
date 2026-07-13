@@ -47,7 +47,9 @@ pub(crate) enum SocialAction {
     },
     SetPartyCombatTargets {
         assignments: Vec<(ConnectionId, Vec<String>)>,
+        target_instances: Vec<u64>,
         tanker: Option<ConnectionId>,
+        prepend_all: bool,
     },
 }
 
@@ -491,6 +493,18 @@ mod tests {
         assert_eq!(state.snapshot("대장").party_members, ids(&["하나"]));
         assert_eq!(state.snapshot("둘").party_leader, None);
         assert_eq!(state.snapshot("대장").followers, ids(&["하나", "셋"]));
+    }
+
+    #[test]
+    fn empty_add_party_request_keeps_python_solo_leader_state() {
+        let mut state = SocialState::default();
+        assert!(state.apply(
+            "혼자대장",
+            SocialAction::AddPartyMembers { members: vec![] },
+        ));
+        let snapshot = state.snapshot("혼자대장");
+        assert_eq!(snapshot.party_leader.as_deref(), Some("혼자대장"));
+        assert!(snapshot.party_members.is_empty());
     }
 
     #[test]

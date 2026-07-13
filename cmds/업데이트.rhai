@@ -7,37 +7,38 @@ fn cmd(ob, line) {
         return;
     }
 
-    if line == "" {
+    let target = trim(line);
+    if target == "" {
         send_line(ob, "* 명령어, 무림별호, 도움말, 무공, 표현, 도우미, 메인설정, 스크립트 중에 선택하세요");
-    } else if line == "명령어" {
+    } else if target == "명령어" {
         if reload_runtime_data(ob, "명령어") {
             send_line(ob, "* 명령어가 업데이트 되었습니다.");
         }
-    } else if line == "무림별호" {
+    } else if target == "무림별호" {
         if reload_runtime_data(ob, "무림별호") {
             send_line(ob, "* 무림별호가 업데이트 되었습니다.");
         }
-    } else if line == "도움말" {
+    } else if target == "도움말" {
         if reload_runtime_data(ob, "도움말") {
             send_line(ob, "* 도움말이 업데이트 되었습니다.");
         }
-    } else if line == "무공" {
+    } else if target == "무공" {
         if reload_runtime_data(ob, "무공") {
             send_line(ob, "* 무공이 업데이트 되었습니다.");
         }
-    } else if line == "표현" {
+    } else if target == "표현" {
         if reload_runtime_data(ob, "표현") {
             send_line(ob, "* 표현이 업데이트 되었습니다.");
         }
-    } else if line == "도우미" {
+    } else if target == "도우미" {
         if reload_runtime_data(ob, "도우미") {
             send_line(ob, "* 도우미가 업데이트 되었습니다.");
         }
-    } else if line == "메인설정" {
+    } else if target == "메인설정" {
         if reload_runtime_data(ob, "메인설정") {
             send_line(ob, "* 메인설정이 업데이트 되었습니다.");
         }
-    } else if line == "스크립트" {
+    } else if target == "스크립트" {
         if reload_runtime_data(ob, "스크립트") {
             send_line(ob, "* 스크립트가 업데이트 되었습니다.");
         }

@@ -1,5 +1,12 @@
 // Python `cmds/구입.py`: 일반 물품, 자동 약품 수량, 호위 조건 구매.
 
+fn buy_prompt(player) {
+    if !player["show_prompt"] { return ""; }
+    "\r\n\x1b[0;37;40m[ " + player["hp"].to_string() + "/"
+        + player["max_hp"].to_string() + ", " + player["mp"].to_string()
+        + "/" + player["max_mp"].to_string() + " ] "
+}
+
 fn cmd(ob, line) {
     if !require_arg(ob, line) { send_line(ob, "☞ 사용법: [물품이름] [수량] 구입"); return; }
     if !room_has_merchant(ob) {
@@ -8,12 +15,12 @@ fn cmd(ob, line) {
     }
     let args = line_args(line);
     let name = args[0];
-    let count = if len(args) >= 2 { to_int(args[1]) } else { 1 };
+    let count = if len(args) >= 2 { parse_int_prefix(args[1]) } else { 1 };
     let count = if count <= 0 { 1 } else { if count > 50 { 50 } else { count } };
     if name == "체력약" && alias_has(ob, "체력약") {
         name = alias_get(ob, "체력약");
         if alias_has(ob, "체력약개수") {
-            count = to_int(alias_get(ob, "체력약개수")) - inventory_named_count(ob, name);
+            count = parse_int_prefix(alias_get(ob, "체력약개수")) - inventory_named_count(ob, name);
         }
         if count <= 0 { send_line(ob, "☞ 구매할 물품이 충분합니다. ^_^"); return; }
         if count > 200 { count = 200; }
@@ -21,7 +28,7 @@ fn cmd(ob, line) {
     if name == "내공약" && alias_has(ob, "내공약") {
         name = alias_get(ob, "내공약");
         if alias_has(ob, "내공약개수") {
-            count = to_int(alias_get(ob, "내공약개수")) - inventory_named_count(ob, name);
+            count = parse_int_prefix(alias_get(ob, "내공약개수")) - inventory_named_count(ob, name);
         }
         if count <= 0 { send_line(ob, "☞ 구매할 물품이 충분합니다. ^_^"); return; }
         if count > 200 { count = 200; }
@@ -45,14 +52,14 @@ fn cmd(ob, line) {
     let self_text = "";
     let room_text = "";
     if result["guard"] {
-        let item = "\x1b[36m" + actual + han_eul(actual) + "\x1b[37m";
+        let item = result["post"] + han_eul(actual);
         self_text = "당신이 " + item + " 구입합니다.";
         room_text = actor + " " + item + " 구입합니다.";
     } else {
         let count = result["bought"].to_int();
         if count == 0 { return; }
         let cost = result["total_cost"].to_int();
-        let item = "\x1b[36m" + actual + "\x1b[0;37m";
+        let item = result["post"];
         self_text = "당신이 " + item + " " + count.to_string()
             + "개를 은전 " + cost.to_string() + "개에 구입합니다.";
         room_text = actor + " " + item + " " + count.to_string()
@@ -61,7 +68,8 @@ fn cmd(ob, line) {
     send_line(ob, self_text);
     for player in get_cast_room_players(ob) {
         if player["name"] != own_name && !player["reject_fight"] {
-            send_to_user(player["name"], room_text);
+            // Python sendFightScriptRoom(): sendLine("\r\n" + text) 뒤 lpPrompt().
+            send_raw_to_user(player["name"], "\r\n" + room_text + "\r\n" + buy_prompt(player));
         }
     }
 }

@@ -11,23 +11,23 @@ fn channel_member_prompt(member) {
 
 fn cmd(ob, line) {
     if length(line) == 0 {
-        send_line(ob, "☞ 사용법: [내용] 채널잡담([)\r\n");
+        send_line(ob, "☞ 사용법: [내용] 채널잡담([)");
         return;
     }
     if !is_adult_channel_member(ob) {
-        send_line(ob, "☞ 먼저 채널에 입장하세요.\r\n");
+        send_line(ob, "☞ 먼저 채널에 입장하세요.");
         return;
     }
     if length(line) > 160 {
-        send_line(ob, "☞ 너무 길어요. ^^\r\n");
+        send_line(ob, "☞ 너무 길어요. ^^");
         return;
     }
     if get_user_config(ob, "외침거부") == "1" {
-        send_line(ob, "☞ 외침거부중엔 외칠 수 없어요. ^^\r\n");
+        send_line(ob, "☞ 외침거부중엔 외칠 수 없어요. ^^");
         return;
     }
     if get_int(ob, "act") == 4 {
-        send_line(ob, "☞ 운기조식중에 외치게 되면 기가 흐트러집니다.\r\n");
+        send_line(ob, "☞ 운기조식중에 외치게 되면 기가 흐트러집니다.");
         return;
     }
 
@@ -36,7 +36,7 @@ fn cmd(ob, line) {
         return;
     }
     if has_room_property(position["zone"], position["room"], "모든통신금지") {
-        send_line(ob, "☞ 이지역에서는 어떠한 통신도 불가능합니다.\r\n");
+        send_line(ob, "☞ 이지역에서는 어떠한 통신도 불가능합니다.");
         return;
     }
 

@@ -7,15 +7,15 @@ fn cmd(ob, line) {
         send_line(ob, "☞ 무슨 말인지 모르겠어요. *^_^*");
         return;
     }
-    if line == "" || is_empty(line) {
+    if line == "" {
         send_line(ob, "☞ 사용법: [사용자명] 정리");
         return;
     }
+    send_line(ob, line);
     let found = false;
-    for player in get_all_online_players() {
-        if player["이름"] == line { found = true; break; }
+    for player_name in get_connected_player_names() {
+        if player_name == line { found = true; break; }
     }
-    if found { send_line(ob, line); }
     if found && disconnect_player_for_cleanup(ob, line) {
         send_line(ob, "☞ 정리하였습니다. *^_^*");
     }

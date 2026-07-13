@@ -1,5 +1,13 @@
 // Python `cmds/트윗.py`: 수신자 설정별 전역 twitter 잡담.
 
+fn tweet_recipient_tail(player) {
+    let config = player["설정상태"].to_string();
+    if config_text_is_enabled(config, "엘피출력") || player["interactive"] != 1 { return "\r\n"; }
+    "\r\n\r\n\x1b[0;37;40m[ " + player["현재체력"].to_string() + "/"
+        + player["현재최고체력"].to_string() + ", " + player["현재내공"].to_string() + "/"
+        + player["현재최고내공"].to_string() + " ] "
+}
+
 fn cmd(ob, line) {
     if line == "" {
         send_line(ob, "☞ 사용법: [내용] 외침(,)");
@@ -18,6 +26,7 @@ fn cmd(ob, line) {
         return;
     }
     let position = get_my_position(ob);
+    if position["zone"] == "" { return; }
     if has_room_property(position["zone"], position["room"], "모든통신금지") {
         send_line(ob, "☞ 이지역에서는 어떠한 통신도 불가능합니다.");
         return;
@@ -44,7 +53,8 @@ fn cmd(ob, line) {
             shown
         };
         let prefix = if player["이름"].to_string() == own_name { "" } else { "\r\n" };
-        send_to_user(player["이름"].to_string(), prefix + shown + "\x1b[0;37;40m");
+        let tail = if player["이름"].to_string() == own_name { "\r\n" } else { tweet_recipient_tail(player) };
+        send_raw_to_user(player["이름"].to_string(), prefix + shown + "\x1b[0;37;40m" + tail);
     }
 }
 

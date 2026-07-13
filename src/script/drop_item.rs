@@ -262,11 +262,11 @@ fn parse_selected(line: &str) -> (String, i64, usize) {
     let args: Vec<&str> = line.split_whitespace().collect();
     let mut count = args
         .get(1)
-        .map(|value| python_get_int(value))
+        .map(|value| parse_int_prefix(value))
         .unwrap_or(1)
         .clamp(1, 50) as usize;
     let original_name = args.first().copied().unwrap_or("");
-    let parsed_order = python_get_int(original_name);
+    let parsed_order = parse_int_prefix(original_name);
     let (name, order) = if parsed_order != 0 {
         let mut stripped_name = original_name.to_string();
         // Python reuses the count variable `i` as this loop index. Preserve
@@ -289,7 +289,7 @@ fn parse_selected(line: &str) -> (String, i64, usize) {
     (name, order, count)
 }
 
-fn python_get_int(value: &str) -> i64 {
+fn parse_int_prefix(value: &str) -> i64 {
     if value.is_empty() {
         return 0;
     }
@@ -699,30 +699,33 @@ pub(super) fn register_drop_item_efuns(engine: &mut Engine, body_ptr: *mut Body)
                     .flat_map(HashMap::values)
                     .map(|count| (*count).max(0) as usize)
                     .sum::<usize>();
-            let world = &mut *world;
-            let floor = world.room_objs.entry(room_key.clone()).or_default();
-            let floor_stack = world.room_inv_stack.entry(room_key).or_default();
             let mut oneitems = PersistentOneItemActions;
-            let result = if all {
-                drop_all(
-                    body,
-                    floor,
-                    floor_stack,
-                    room_item_count,
-                    current_unix_seconds(),
-                    &mut oneitems,
-                )
-            } else {
-                drop_selected(
-                    body,
-                    floor,
-                    floor_stack,
-                    room_item_count,
-                    line,
-                    current_unix_seconds(),
-                    &mut oneitems,
-                )
+            let result = {
+                let world = &mut *world;
+                let floor = world.room_objs.entry(room_key.clone()).or_default();
+                let floor_stack = world.room_inv_stack.entry(room_key).or_default();
+                if all {
+                    drop_all(
+                        body,
+                        floor,
+                        floor_stack,
+                        room_item_count,
+                        current_unix_seconds(),
+                        &mut oneitems,
+                    )
+                } else {
+                    drop_selected(
+                        body,
+                        floor,
+                        floor_stack,
+                        room_item_count,
+                        line,
+                        current_unix_seconds(),
+                        &mut oneitems,
+                    )
+                }
             };
+            world.sync_floor_item_order(&zone, &room);
             result.into_dynamic()
         },
     );
@@ -750,18 +753,21 @@ pub(super) fn register_drop_item_efuns(engine: &mut Engine, body_ptr: *mut Body)
                     .flat_map(HashMap::values)
                     .map(|count| (*count).max(0) as usize)
                     .sum::<usize>();
-            let world = &mut *world;
-            let floor = world.room_objs.entry(room_key.clone()).or_default();
-            let floor_stack = world.room_inv_stack.entry(room_key).or_default();
             let mut oneitems = PersistentOneItemActions;
-            let (result, insured) = death_drop_all(
-                body,
-                floor,
-                floor_stack,
-                room_item_count,
-                current_unix_seconds(),
-                &mut oneitems,
-            );
+            let (result, insured) = {
+                let world = &mut *world;
+                let floor = world.room_objs.entry(room_key.clone()).or_default();
+                let floor_stack = world.room_inv_stack.entry(room_key).or_default();
+                death_drop_all(
+                    body,
+                    floor,
+                    floor_stack,
+                    room_item_count,
+                    current_unix_seconds(),
+                    &mut oneitems,
+                )
+            };
+            world.sync_floor_item_order(&zone, &room);
             result.into_death_dynamic(insured)
         },
     );
@@ -1278,6 +1284,8 @@ mod tests {
 
     #[test]
     fn rhai_selected_drop_formats_python_plural_output_and_only_notifies_same_room() {
+        use crate::script::party::set_precomputed_party_context;
+
         let (zone, room, actor_name, observer_name, other_name) = script_room_names();
         let mut body = Body::new();
         body.set("이름", actor_name.as_str());
@@ -1299,6 +1307,19 @@ mod tests {
                 PlayerPosition::new(zone.clone(), "다른방".to_string()),
             );
         }
+        let mut person = rhai::Map::new();
+        person.insert("name".into(), Dynamic::from(observer_name.clone()));
+        person.insert("show_prompt".into(), Dynamic::from(true));
+        person.insert("hp".into(), Dynamic::from(17_i64));
+        person.insert("max_hp".into(), Dynamic::from(28_i64));
+        person.insert("mp".into(), Dynamic::from(3_i64));
+        person.insert("max_mp".into(), Dynamic::from(4_i64));
+        let mut context = rhai::Map::new();
+        context.insert(
+            "room_players".into(),
+            Dynamic::from(vec![Dynamic::from(person)]),
+        );
+        set_precomputed_party_context(context);
 
         let (outputs, sends) = run_drop_script(&mut body, "칼 2");
         let actor = format!(
@@ -1310,7 +1331,10 @@ mod tests {
             sends,
             vec![(
                 observer_name.clone(),
-                format!("{actor} \x1b[36m검\x1b[37m 2개를 버립니다.")
+                format!(
+                    "{}\r\n{actor} \x1b[36m검\x1b[37m 2개를 버립니다.\r\n\r\n\x1b[0;37;40m[ 17/28, 3/4 ] ",
+                    crate::script::RAW_USER_MESSAGE_PREFIX,
+                )
             )]
         );
         assert!(sends.iter().all(|(name, _)| name != &other_name));
@@ -1325,6 +1349,7 @@ mod tests {
         );
 
         clear_script_room(&zone, &room, &[&actor_name, &observer_name, &other_name]);
+        set_precomputed_party_context(rhai::Map::new());
     }
 
     #[test]
@@ -1361,7 +1386,10 @@ mod tests {
             sends,
             vec![(
                 observer_name.clone(),
-                format!("{actor} \x1b[36m탕수육\x1b[37m 2개를 버립니다.")
+                format!(
+                    "{}\r\n{actor} \x1b[36m탕수육\x1b[37m 2개를 버립니다.\r\n",
+                    crate::script::RAW_USER_MESSAGE_PREFIX,
+                )
             )]
         );
         assert!(!body.object.inv_stack.contains_key("1037"));
@@ -1369,7 +1397,106 @@ mod tests {
             let world = get_world_state().read().unwrap();
             assert!(world.get_room_objs_stack(&zone, &room).is_empty());
             assert_eq!(world.get_room_objs(&zone, &room).len(), 2);
+            let order = world.get_room_object_order(&zone, &room);
+            assert!(matches!(
+                order.as_slice(),
+                [
+                    crate::world::RoomObjectRef::FloorItem(_),
+                    crate::world::RoomObjectRef::FloorItem(_),
+                    crate::world::RoomObjectRef::Player(observer),
+                    crate::world::RoomObjectRef::Player(actor),
+                ] if observer == &observer_name && actor == &actor_name
+            ));
         }
+        let expected = get_world_state()
+            .read()
+            .unwrap()
+            .get_room_object_order(&zone, &room)
+            .first()
+            .cloned();
+        assert_eq!(
+            super::super::select_python_room_object(&body, "탕수"),
+            expected,
+            "Python Room.findObjName must see a compact inventory item immediately after it is dropped"
+        );
+
+        clear_script_room(&zone, &room, &[&actor_name, &observer_name, &other_name]);
+    }
+
+    #[test]
+    fn legacy_room_stack_materializes_before_python_room_lookup() {
+        let (zone, room, actor_name, observer_name, other_name) = script_room_names();
+        let mut body = Body::new();
+        body.set("이름", actor_name.as_str());
+        {
+            let mut world = get_world_state().write().unwrap();
+            world.get_room_objs_mut(&zone, &room).clear();
+            world.get_room_objs_stack_mut(&zone, &room).clear();
+            world
+                .get_room_objs_stack_mut(&zone, &room)
+                .insert("1037".to_string(), 2);
+            world.set_player_position(&actor_name, PlayerPosition::new(zone.clone(), room.clone()));
+            world.set_player_position(
+                &observer_name,
+                PlayerPosition::new(zone.clone(), room.clone()),
+            );
+        }
+
+        super::super::materialize_legacy_room_stacks(&body);
+
+        let expected = {
+            let world = get_world_state().read().unwrap();
+            assert!(world.get_room_objs_stack(&zone, &room).is_empty());
+            assert_eq!(world.get_room_objs(&zone, &room).len(), 2);
+            let order = world.get_room_object_order(&zone, &room);
+            assert!(matches!(
+                order.as_slice(),
+                [
+                    crate::world::RoomObjectRef::FloorItem(_),
+                    crate::world::RoomObjectRef::FloorItem(_),
+                    crate::world::RoomObjectRef::Player(observer),
+                    crate::world::RoomObjectRef::Player(actor),
+                ] if observer == &observer_name && actor == &actor_name
+            ));
+            order.first().cloned()
+        };
+        assert_eq!(
+            super::super::select_python_room_object(&body, "탕수"),
+            expected
+        );
+
+        clear_script_room(&zone, &room, &[&actor_name, &observer_name, &other_name]);
+    }
+
+    #[test]
+    fn unknown_legacy_room_stack_is_quarantined_without_inventing_an_item() {
+        let (zone, room, actor_name, observer_name, other_name) = script_room_names();
+        let mut body = Body::new();
+        body.set("이름", actor_name.as_str());
+        let unknown = "없는-아이템-카탈로그";
+        {
+            let mut world = get_world_state().write().unwrap();
+            world.get_room_objs_mut(&zone, &room).clear();
+            world.get_room_objs_stack_mut(&zone, &room).clear();
+            world
+                .get_room_objs_stack_mut(&zone, &room)
+                .insert(unknown.to_string(), 2);
+            world.set_player_position(&actor_name, PlayerPosition::new(zone.clone(), room.clone()));
+        }
+
+        super::super::materialize_legacy_room_stacks(&body);
+
+        let world = get_world_state().read().unwrap();
+        assert!(world.get_room_objs(&zone, &room).is_empty());
+        assert_eq!(
+            world.get_room_objs_stack(&zone, &room).get(unknown),
+            Some(&2)
+        );
+        drop(world);
+        assert_eq!(
+            super::super::select_python_room_object(&body, unknown),
+            None
+        );
 
         clear_script_room(&zone, &room, &[&actor_name, &observer_name, &other_name]);
     }
@@ -1411,7 +1538,10 @@ mod tests {
             sends,
             vec![(
                 observer_name.clone(),
-                format!("{actor} \x1b[36m{post}\x1b[37m 버리자 바로 부서집니다.")
+                format!(
+                    "{}\r\n{actor} \x1b[36m{post}\x1b[37m 버리자 바로 부서집니다.\r\n",
+                    crate::script::RAW_USER_MESSAGE_PREFIX,
+                )
             )]
         );
         assert!(body.object.objs.is_empty());

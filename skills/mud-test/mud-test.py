@@ -193,20 +193,22 @@ class MUDTestSkill:
                 print(f"  {desc}: {len(output)} bytes")
 
         # Compare results
+        exact_matches = True
         if py_results and rust_results:
             print("\n[Comparison]")
             for py_res, rust_res in zip(py_results, rust_results):
-                py_clean = strip_ansi_codes(py_res.output).strip()
-                rust_clean = strip_ansi_codes(rust_res.output).strip()
-
-                py_len = len(py_clean)
-                rust_len = len(rust_clean)
+                py_output = py_res.output
+                rust_output = rust_res.output
+                py_len = len(py_output)
+                rust_len = len(rust_output)
 
                 if py_len > 0 and rust_len > 0:
-                    ratio = min(py_len, rust_len) / max(py_len, rust_len) * 100
-                    status = "MATCH" if ratio > 80 else "DIFFER"
-                    print(f"  {py_res.command}: Python={py_len}b, Rust={rust_len}b [{status} ({ratio:.0f}%)]")
+                    matched = py_output == rust_output
+                    exact_matches = exact_matches and matched
+                    status = "EXACT MATCH" if matched else "DIFFER"
+                    print(f"  {py_res.command}: Python={py_len}b, Rust={rust_len}b [{status}]")
                 else:
+                    exact_matches = False
                     print(f"  {py_res.command}: Python={py_len}b, Rust={rust_len}b [NO OUTPUT]")
 
         runner._cleanup()
@@ -214,6 +216,7 @@ class MUDTestSkill:
             bool(py_results)
             and bool(rust_results)
             and all(result.success for result in py_results + rust_results)
+            and exact_matches
         )
 
     def _check_server_status(self) -> int:

@@ -5,7 +5,7 @@ from objs.cmd import Command
 class CmdObj(Command):
 
     def cmd(self, ob, line):
-        import pickle
+        import json
 
         mob = ob.env.findObjName('진영')
         if mob == None:
@@ -13,8 +13,8 @@ class CmdObj(Command):
             return
 
         try:
-            with open("data/config/book.dat", "rb") as fr:
-                data = pickle.load(fr)
+            with open("data/config/book.json", "r", encoding="utf-8") as fr:
+                data = json.load(fr)
         except:
             ob.sendLine('☞ 대여가능한 품목이 없어요.')
             return

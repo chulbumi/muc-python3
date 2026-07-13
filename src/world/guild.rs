@@ -517,17 +517,20 @@ pub fn guild_move_member_role(id: &str, from: &str, to: &str, member: &str) -> b
     }
     match attrs.entry(to_key) {
         serde_json::map::Entry::Vacant(entry) => {
-            entry.insert(Value::String(member.to_string()));
+            entry.insert(Value::Array(vec![Value::String(member.to_string())]));
         }
         serde_json::map::Entry::Occupied(mut entry) => match entry.get_mut() {
             Value::Array(items) => items.push(Value::String(member.to_string())),
             Value::String(raw) => {
-                if !raw.is_empty() {
-                    raw.push_str("\r\n");
-                }
-                raw.push_str(member);
+                let mut members = raw
+                    .split(['\r', '\n', ','])
+                    .filter(|name| !name.is_empty())
+                    .map(|name| Value::String(name.to_string()))
+                    .collect::<Vec<_>>();
+                members.push(Value::String(member.to_string()));
+                *entry.get_mut() = Value::Array(members);
             }
-            _ => *entry.get_mut() = Value::String(member.to_string()),
+            _ => *entry.get_mut() = Value::Array(vec![Value::String(member.to_string())]),
         },
     }
     let _ = guild.save();
@@ -556,16 +559,15 @@ pub fn guild_transfer_leader(id: &str, former: &str, target: &str) -> bool {
     guild.save()
 }
 
-/// Add a member to a guild role list, preserving the legacy list encoding.
+/// Add a member to a guild role list and persist Python's JSON-array encoding.
+/// Legacy string lists are accepted and normalized during the write.
 pub fn guild_add_member(id: &str, role: &str, member: &str) -> bool {
     let mut guild = get_guild().write().unwrap();
     let Some(attrs) = guild.attr.get_mut(id) else {
         return false;
     };
     let key = format!("{}리스트", role);
-    let value = attrs
-        .entry(key)
-        .or_insert_with(|| Value::String(String::new()));
+    let value = attrs.entry(key).or_insert_with(|| Value::Array(Vec::new()));
     let exists = match value {
         Value::Array(items) => items.iter().any(|v| v.as_str() == Some(member)),
         Value::String(raw) => raw.split(['\r', '\n', ',']).any(|v| v == member),
@@ -577,10 +579,13 @@ pub fn guild_add_member(id: &str, role: &str, member: &str) -> bool {
     match value {
         Value::Array(items) => items.push(Value::String(member.to_string())),
         Value::String(raw) => {
-            if !raw.is_empty() {
-                raw.push_str("\r\n");
-            }
-            raw.push_str(member);
+            let mut members = raw
+                .split(['\r', '\n', ','])
+                .filter(|name| !name.is_empty())
+                .map(|name| Value::String(name.to_string()))
+                .collect::<Vec<_>>();
+            members.push(Value::String(member.to_string()));
+            *value = Value::Array(members);
         }
         _ => return false,
     }
@@ -603,7 +608,8 @@ mod tests {
 
     #[test]
     fn guild_load_save_and_list_preserve_python_json_order_and_numeric_values() {
-        let path = std::env::temp_dir().join(format!("muc-guild-order-{}.json", std::process::id()));
+        let path =
+            std::env::temp_dir().join(format!("muc-guild-order-{}.json", std::process::id()));
         std::fs::write(
             &path,
             r#"{

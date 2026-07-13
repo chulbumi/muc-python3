@@ -9,8 +9,7 @@ fn cmd(ob, line) {
     }
     let msg = "[올숙아이템인덱스]\r\n";
     for item in get_item_catalog() {
-        let user = item["user"];
-        if user != "0" && user != "\"\"" && user != "null" {
+        if item["user_enabled"] {
             msg += "#" + item["name"] + "\r\n:" + item["index"] + "\r\n\r\n";
         }
     }

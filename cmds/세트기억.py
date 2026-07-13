@@ -5,7 +5,6 @@ from objs.cmd import Command
 class CmdObj(Command):
 
     def cmd(self, ob, line):
-        import pickle
         import uuid
 
         cnt = 0

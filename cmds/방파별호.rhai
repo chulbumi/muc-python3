@@ -11,29 +11,28 @@ fn cmd(ob, line) {
         send_line(ob, "☞ 사용법 : [대상] [무림별호] 방파별호");
         return;
     }
-    let target_name = words[0];
+    let query = words[0];
     let nickname = words[1];
     let own_name = get_string(ob, "이름");
-    let target_guild = "";
-    let found = target_name == own_name;
-    if found { target_guild = guild; }
-    let location = get_my_position(ob);
-    let online = get_all_online_players();
-    if !found {
-        for player in online {
-            if player["이름"].to_string() == target_name
-                    && player["투명상태"] != 1
-                    && player["zone"].to_string() == location["zone"].to_string()
-                    && player["room"].to_string() == location["room"].to_string() {
-                found = true;
+    // Python always resolves through env.findObjName, including an explicit
+    // self name. Do not bypass an item/mob that appears first in room.objs.
+    let target_name = resolve_room_player_name(ob, query);
+    if target_name == "" {
+        send_line(ob, "☞ 이곳에 그런 무림인이 없습니다.");
+        return;
+    }
+    let target_guild = if target_name == own_name {
+        guild
+    } else {
+        get_room_player_attr(ob, target_name, "소속")
+    };
+    if target_guild.is_unit() {
+        for player in get_all_online_players() {
+            if player["이름"].to_string() == target_name {
                 target_guild = player["소속"].to_string();
                 break;
             }
         }
-    }
-    if !found {
-        send_line(ob, "☞ 이곳에 그런 무림인이 없습니다.");
-        return;
     }
     if target_guild != guild {
         send_line(ob, "☞ 당신의 소속이 아닙니다.");

@@ -6,11 +6,12 @@ fn cmd(ob, line) {
         send_line(ob, "☞ 무슨 말인지 모르겠어요. *^_^*");
         return;
     }
-    if line == "" {
+    let room_name = trim(line);
+    if room_name == "" {
         send_line(ob, "☞ 사용법: [이름] 방이름");
         return;
     }
-    if set_obj_attr(ob, "방", "이름", line) {
+    if set_obj_attr(ob, "방", "이름", room_name) {
         send_line(ob, "방이 이름이 변경 되었습니다.");
     }
 }

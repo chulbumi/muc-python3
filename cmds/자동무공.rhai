@@ -2,7 +2,7 @@
 // Python: cmds/자동무공.py
 
 fn cmd(ob, line) {
-    if line == "" || is_empty(line) {
+    if line == "" {
         let current = get_body_string(ob, "자동무공");
         if current == "" {
             send_line(ob, "☞ 자동무공 : 없음");

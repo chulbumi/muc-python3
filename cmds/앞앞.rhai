@@ -6,11 +6,13 @@ fn cmd(ob, line) {
         send_line(ob, "☞ 무슨 말인지 모르겠어요. *^_^*");
         return;
     }
-    if line == "" || is_empty(line) {
+    // Python Player.parse_command strips the parameter before cmd() receives it.
+    let target = trim(line);
+    if target == "" {
         send_line(ob, "☞ 운영자 명령: [대상] 앞");
         return;
     }
-    let t = get_position_of(trim(line));
+    let t = get_position_of(target);
     let zs = t["zone"].to_string();
     let rs = t["room"].to_string();
     if zs == "" {

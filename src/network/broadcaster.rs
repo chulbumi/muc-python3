@@ -507,6 +507,20 @@ impl Broadcaster {
         Some(f(&mut player.body))
     }
 
+    pub(crate) fn with_player_body_by_connection_token<F, R>(&self, token: &str, f: F) -> Option<R>
+    where
+        F: FnOnce(&mut crate::player::Body) -> R,
+    {
+        let addr = self.find_addr_by_connection_token(token)?;
+        let mut clients = self.clients.lock();
+        let client = clients.get_mut(&addr)?;
+        if client.connection_token != token {
+            return None;
+        }
+        let player = client.player.as_mut()?;
+        Some(f(&mut player.body))
+    }
+
     /// Request a client to disconnect (sends sentinel to their channel; e.g. kick on duplicate login).
     /// Caller should also send an informative message to the user before calling this.
     pub fn request_disconnect(&self, addr: SocketAddr) -> Result<(), String> {

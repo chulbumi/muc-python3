@@ -3,11 +3,12 @@
 // rhai unchecked feature로 표현 깊이 제한 비활성화 필요
 
 fn cmd(ob, line) {
-    let name = trim(line);
+    let name = line;
     if name != "" {
         let arr = get_all_online_players();
         for c in arr {
-            if c["이름"] == name {
+            // Python's named branch requires ACTIVE and a room environment.
+            if c["active"] == 1 && c["zone"] != "" && c["이름"] == name {
                 let z = c["zone"];
                 let r = c["room"];
                 let rn = get_room_name(z, r);
@@ -22,7 +23,7 @@ fn cmd(ob, line) {
     let my_zone = pos["zone"];
     let arr = get_all_online_players();
     for c in arr {
-        if c["zone"] == my_zone {
+        if c["zone"] != "" && c["zone"] == my_zone {
             let z = c["zone"];
             let r = c["room"];
             let rn = get_room_name(z, r);

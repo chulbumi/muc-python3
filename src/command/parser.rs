@@ -106,8 +106,12 @@ impl CommandParser {
     /// ```
     pub fn parse(line: &str) -> ParsedCommand {
         let sanitized = Self::strip_python_ansi(line);
-        // Trim newlines but keep trailing spaces for say command detection
-        let line = sanitized.trim_end_matches('\n').trim_end_matches('\r');
+        // Whitespace only separates tokens.  Surrounding whitespace must not
+        // turn an otherwise valid one-word command into speech.
+        let line = sanitized
+            .trim_end_matches('\n')
+            .trim_end_matches('\r')
+            .trim();
 
         // Empty input
         if line.trim().is_empty() {
@@ -115,15 +119,11 @@ impl CommandParser {
         }
 
         // Check if line ends with sentence-ending punctuation or space (treat as 'say' command)
-        if line.ends_with(' ') || line.ends_with('.') || line.ends_with('!') || line.ends_with('?')
-        {
+        if line.ends_with('.') || line.ends_with('!') || line.ends_with('?') {
             // Python passes the entire original line to cmds/말.py.  Sentence
             // punctuation and a trailing space are part of the spoken message.
             return ParsedCommand::new(line.to_string(), "말".to_string(), line.to_string());
         }
-
-        // For non-say commands, trim whitespace and parse normally
-        let line = line.trim();
 
         // Split into command (last word) and parameters (everything before)
         // Python: cmd = line.split(' ')[-1], param = line.rstrip(cmd).strip()
@@ -194,7 +194,7 @@ impl CommandParser {
 
     /// Splits a string into name and order components
     ///
-    /// Used for commands like "2.검" to get (name="검", order=2)
+    /// Python `getNameOrder`, e.g. "2검" -> (name="검", order=2)
     ///
     /// # Arguments
     /// * `input` - The input string to parse
@@ -206,41 +206,35 @@ impl CommandParser {
     /// ```
     /// use muc_engine::command::parser::CommandParser;
     ///
-    /// let (name, order) = CommandParser::parse_name_order("2.검");
+    /// let (name, order) = CommandParser::parse_name_order("2검");
     /// assert_eq!(name, "검");
     /// assert_eq!(order, 2);
     /// ```
     pub fn parse_name_order(input: &str) -> (String, usize) {
         let input = input.trim();
-
-        // Check for prefix number pattern like "2.검" or "2 검"
-        if let Some(dot_pos) = input.find('.') {
-            let prefix = &input[..dot_pos];
-            if prefix.chars().all(|c| c.is_ascii_digit()) {
-                if let Ok(order) = prefix.parse::<usize>() {
-                    let name = input[dot_pos + 1..].trim().to_string();
-                    if !name.is_empty() {
-                        return (name, order);
-                    }
-                }
-            }
+        // Python getNameOrder(): getInt accepts a leading run of digits and,
+        // when nonzero, removes only those digit characters. Separators are
+        // not syntax: `2.검` becomes `.검`, `2 검` becomes ` 검`.
+        let digit_end = input
+            .char_indices()
+            .take_while(|(_, character)| character.is_ascii_digit())
+            .map(|(index, character)| index + character.len_utf8())
+            .last()
+            .unwrap_or(0);
+        let order = if digit_end > 0 {
+            input[..digit_end].parse::<usize>().unwrap_or(0)
+        } else {
+            0
+        };
+        if order == 0 {
+            (input.to_string(), 1)
+        } else if digit_end < input.len() {
+            (input[digit_end..].to_string(), order)
+        } else {
+            // With a pure number Python's stripping loop finds no non-digit,
+            // so the numeric name remains for Room.findObjName.
+            (input.to_string(), order)
         }
-
-        // Check for pattern like "2 검"
-        if let Some(space_pos) = input.find(' ') {
-            let prefix = &input[..space_pos];
-            if prefix.chars().all(|c| c.is_ascii_digit()) {
-                if let Ok(order) = prefix.parse::<usize>() {
-                    let name = input[space_pos + 1..].trim().to_string();
-                    if !name.is_empty() {
-                        return (name, order);
-                    }
-                }
-            }
-        }
-
-        // No order specified, default to 1
-        (input.to_string(), 1)
     }
 
     /// Checks if a line looks like a "say" command (ends with punctuation)
@@ -252,10 +246,11 @@ impl CommandParser {
     /// true if the line should be treated as speech
     pub fn is_say_command(line: &str) -> bool {
         let sanitized = Self::strip_python_ansi(line);
-        // Don't trim first - we need to check the actual last character
-        // But trim trailing newlines for user input
-        let line = sanitized.trim_end_matches('\n').trim_end_matches('\r');
-        line.ends_with(' ') || line.ends_with('.') || line.ends_with('!') || line.ends_with('?')
+        let line = sanitized
+            .trim_end_matches('\n')
+            .trim_end_matches('\r')
+            .trim();
+        line.ends_with('.') || line.ends_with('!') || line.ends_with('?')
     }
 }
 
@@ -324,10 +319,15 @@ mod tests {
     }
 
     #[test]
-    fn test_parse_say_with_space() {
-        let parsed = CommandParser::parse("안녕 ");
-        assert_eq!(parsed.command, "말");
-        assert_eq!(parsed.args, "안녕 ");
+    fn surrounding_and_repeated_whitespace_only_separates_tokens() {
+        let parsed = CommandParser::parse(" 힘  ");
+        assert_eq!(parsed.command, "힘");
+        assert_eq!(parsed.args, "");
+
+        let parsed = CommandParser::parse("  대상   힘  ");
+        assert_eq!(parsed.command, "힘");
+        assert_eq!(parsed.args, "대상");
+        assert_eq!(parsed.tokens, vec!["대상"]);
     }
 
     #[test]
@@ -351,15 +351,28 @@ mod tests {
     #[test]
     fn test_parse_name_order_with_dot() {
         let (name, order) = CommandParser::parse_name_order("2.검");
-        assert_eq!(name, "검");
+        assert_eq!(name, ".검");
         assert_eq!(order, 2);
     }
 
     #[test]
     fn test_parse_name_order_with_space() {
         let (name, order) = CommandParser::parse_name_order("3 검");
-        assert_eq!(name, "검");
+        assert_eq!(name, " 검");
         assert_eq!(order, 3);
+    }
+
+    #[test]
+    fn test_parse_name_order_matches_python_bare_numeric_prefix() {
+        assert_eq!(
+            CommandParser::parse_name_order("12검"),
+            ("검".to_string(), 12)
+        );
+        assert_eq!(
+            CommandParser::parse_name_order("0검"),
+            ("0검".to_string(), 1)
+        );
+        assert_eq!(CommandParser::parse_name_order("2"), ("2".to_string(), 2));
     }
 
     #[test]
@@ -374,7 +387,7 @@ mod tests {
         assert!(CommandParser::is_say_command("안녕."));
         assert!(CommandParser::is_say_command("안녕!"));
         assert!(CommandParser::is_say_command("안녕?"));
-        assert!(CommandParser::is_say_command("안녕 "));
+        assert!(!CommandParser::is_say_command("안녕 "));
         assert!(!CommandParser::is_say_command("안녕,"));
         assert!(!CommandParser::is_say_command("동"));
         assert!(!CommandParser::is_say_command("동쪽"));

@@ -2,7 +2,7 @@
 // [대상] '비학천룡', ob['위치각인'], getRoom, enterRoom.
 
 fn cmd(ob, line) {
-    if line == "" || is_empty(line) {
+    if line == "" {
         send_line(ob, "☞ 사용법: [대상] 위치이동");
         return;
     }
@@ -17,7 +17,7 @@ fn cmd(ob, line) {
             send_line(ob, "☞ 각인된 위치가 없습니다.");
             return;
         }
-        let spec = parse_room_spec(idx);
+        let spec = parse_room_spec_exact(idx);
         let z = spec["zone"];
         let r = spec["room"];
         let err = perform_summon_move(ob, z, r);

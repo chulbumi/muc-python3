@@ -4,33 +4,9 @@
 //! Items are loaded from JSON files in the data/item/ directory.
 
 use serde_json::Value as JsonValue;
-use std::collections::{HashMap, HashSet};
+use std::collections::HashMap;
 use std::path::{Path, PathBuf};
-use std::sync::{OnceLock, RwLock};
-
-static RUNTIME_DELETED_ITEMS: OnceLock<RwLock<HashSet<String>>> = OnceLock::new();
-
-fn runtime_deleted_items() -> &'static RwLock<HashSet<String>> {
-    RUNTIME_DELETED_ITEMS.get_or_init(|| RwLock::new(HashSet::new()))
-}
-
-pub(crate) fn is_runtime_deleted(key: &str) -> bool {
-    runtime_deleted_items()
-        .read()
-        .is_ok_and(|items| items.contains(key))
-}
-
-fn mark_runtime_deleted(key: &str) {
-    if let Ok(mut items) = runtime_deleted_items().write() {
-        items.insert(key.to_string());
-    }
-}
-
-fn clear_runtime_deleted(key: &str) {
-    if let Ok(mut items) = runtime_deleted_items().write() {
-        items.remove(key);
-    }
-}
+use std::sync::RwLock;
 
 /// Raw item data from JSON
 #[derive(Debug, Clone)]
@@ -241,15 +217,7 @@ impl ItemCache {
     /// Remove a loaded item template from the runtime registry. The source
     /// JSON remains on disk, matching Python's Item.Items deletion semantics.
     pub fn remove_item(&mut self, key: &str) -> bool {
-        let removed = self.items.remove(key).is_some();
-        if removed {
-            mark_runtime_deleted(key);
-        }
-        removed
-    }
-
-    pub fn is_runtime_deleted(&self, key: &str) -> bool {
-        is_runtime_deleted(key)
+        self.items.remove(key).is_some()
     }
 
     /// Find item by name ( searches through reaction names too)
@@ -306,7 +274,6 @@ impl ItemCache {
 
         // Cache it
         self.items.insert(filename.to_string(), data.clone());
-        clear_runtime_deleted(filename);
 
         Ok(data)
     }

@@ -2,10 +2,24 @@
 // This is a private hot-reload handler, not a player command.
 
 
+fn movement_observer_prompt(player_name) {
+    for player in get_all_online_players() {
+        if player["이름"] == player_name {
+            if !player["show_prompt"] { return ""; }
+            return "\r\n\x1b[0;37;40m[ " + player["현재체력"].to_string() + "/"
+                + player["현재최고체력"].to_string() + ", "
+                + player["현재내공"].to_string() + "/"
+                + player["현재최고내공"].to_string() + " ] ";
+        }
+    }
+    ""
+}
+
 fn send_room_players_except(players, own_name, excluded, message) {
     for player_name in players {
         if player_name != "" && player_name != own_name && !has_exit(excluded, player_name) {
-            send_to_user(player_name, message);
+            send_raw_to_user(player_name, "\r\n" + message + "\r\n"
+                + movement_observer_prompt(player_name));
         }
     }
 }
@@ -162,6 +176,14 @@ fn main(ob, cmdline) {
         // after that command returns, even when the movement itself fails.
         if take_after_fight_route_finished(ob) {
             send_line(ob, "☞ 더 이상 이동 할 경로가 없습니다.");
+        }
+        return;
+    }
+    if args[0] == "__route_end" {
+        if take_after_fight_route_finished(ob) {
+            send_line(ob, "☞ 더 이상 이동 할 경로가 없습니다.");
+        } else {
+            internal_not_handled();
         }
         return;
     }

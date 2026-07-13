@@ -7,7 +7,7 @@ fn cmd(ob, line) {
         send_line(ob, "☞ 무슨 말인지 모르겠어요. *^_^*");
         return;
     }
-    if line == "" || is_empty(line) {
+    if line == "" {
         send_line(ob, "사용법: [사용자 이름] 사용자몹제거");
         return;
     }

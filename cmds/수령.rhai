@@ -2,11 +2,11 @@
 // [금액], 표두(표국무사), mob['은전'], ob['수령액'], 마지막수령.
 
 fn cmd(ob, line) {
-    if line == "" || is_empty(line) {
+    if line == "" {
         send_line(ob, "☞ 사용법: [금액] 수령");
         return;
     }
-    let amount = python_get_int(line);
+    let amount = parse_int_prefix(line);
     let result = receive_from_guard(ob, amount);
     let status = result["status"];
     if status == "no_guard" { send_line(ob, "☞ 이곳에 표국무사가 없네요."); return; }

@@ -99,7 +99,21 @@ fn make_fight_script(ob, script_value, target) {
 }
 
 // sendRoom/sendFightScriptRoom은 전 접속자가 아니라 현재 방 사용자만 순회한다.
-fn send_cast_room(ob, message, excluded_name, reject_filter) {
+fn cast_prompt(player) {
+    if !player["show_prompt"] { return ""; }
+    "\r\n\x1b[0;37;40m[ " + player["hp"].to_string() + "/"
+        + player["max_hp"].to_string() + ", " + player["mp"].to_string()
+        + "/" + player["max_mp"].to_string() + " ] "
+}
+
+fn cast_prompt_for(ob, player_name) {
+    for player in get_cast_room_players(ob) {
+        if player["name"] == player_name { return cast_prompt(player); }
+    }
+    ""
+}
+
+fn send_cast_room(ob, message, excluded_name, reject_filter, with_prompt) {
     let my_name = get_string(ob, "이름");
     for player in get_cast_room_players(ob) {
         let name = player["name"];
@@ -109,7 +123,16 @@ fn send_cast_room(ob, message, excluded_name, reject_filter) {
         if reject_filter && player["reject_fight"] {
             continue;
         }
-        send_to_user(name, message);
+        if message == "" {
+            if with_prompt {
+                let prompt = cast_prompt(player);
+                if prompt != "" { send_raw_to_user(name, prompt); }
+            }
+        } else {
+            let output = "\r\n" + message + "\r\n";
+            if with_prompt { output += cast_prompt(player); }
+            send_raw_to_user(name, output);
+        }
     }
 }
 
@@ -166,23 +189,22 @@ fn cast_combat(ob, skill_name, skill, target) {
         send_line(ob, "☞ 지금은 \x1b[1m\x1b[31m살겁\x1b[0m\x1b[37m\x1b[40m을 일으키기에 부적합한 상황 이라네");
         return;
     }
-    // Python 원본은 사용자 전투 지원 여부와 무관하게 다음 분기에서 막는다.
-    if target["kind"] == "player" {
-        send_line(ob, "☞ 강호에는 공격할 수 있는것과 없는것이 있지!");
-        return;
-    }
-    if !target["current"] && target["mob_type"] != 1 {
+    if target["kind"] != "player" && !target["current"] && target["mob_type"] != 1 {
         send_line(ob, "☞ 강호에는 공격할 수 있는것과 없는것이 있지!");
         return;
     }
 
-    let result = cast_apply_combat(ob, skill_name, target["id"]);
+    let result = cast_apply_combat(ob, skill_name, target["id"], target["instance_id"]);
     if result["status"] == "mp" || result["status"] == "hp" {
         send_line(ob, "\x1b[1;37m당신이 내공진기를 끌어 모으지만 기가 흩어져 버립니다.\x1b[0;37m");
         return;
     }
     if result["status"] == "busy" {
         send_line(ob, "\x1b[1;37m당신의 내가진기가 흩어지며 기의 순환이 멈추어 버립니다.\x1b[0;37m");
+        return;
+    }
+    if result["status"] == "target_busy" {
+        send_line(ob, "☞ 상대는 이미 다른 비무에 집중하고 있어요.");
         return;
     }
     if result["status"] != "ok" {
@@ -193,7 +215,7 @@ fn cast_combat(ob, skill_name, skill, target) {
     let scripts = make_fight_script(ob, skill["무공스크립"], target);
     send_line(ob, scripts[0]);
     // Python: 시전 직전 Stand면 sendRoom, 이미 Fight면 sendRoomFightScript.
-    send_cast_room(ob, scripts[2], "", !result["caster_was_stand"]);
+    send_cast_room(ob, scripts[2], "", !result["caster_was_stand"], !result["caster_was_stand"]);
 
     if result["new_target"] {
         let weapon = get_cast_weapon(ob);
@@ -202,13 +224,17 @@ fn cast_combat(ob, skill_name, skill, target) {
             let room_start = actor_name_a(ob) + han_iga(get_string(ob, "이름"))
                 + " " + weapon["fight_start"];
             send_line(ob, own_start);
-            send_cast_room(ob, room_start, "", false);
+            send_cast_room(ob, room_start, "", false, false);
         }
-        if result["target_was_stand"] {
+        if result["target_was_stand"] && target["kind"] == "mob" {
             let mob_start = "\x1b[33m" + result["target_name"] + "\x1b[37m"
                 + han_iga(result["target_name"]) + " " + result["target_start"];
             send_line(ob, mob_start);
-            send_cast_room(ob, mob_start, "", false);
+            send_cast_room(ob, mob_start, "", false, false);
+        } else if result["target_was_stand"] && target["kind"] == "player" {
+            let actor = actor_name_a(ob) + han_iga(get_string(ob, "이름"));
+            send_raw_to_user(result["target_name"], "\r\n" + actor
+                + " 당신에게 무공을 펼치기 시작합니다.\r\n");
         }
         // Python의 덩달이 전투 몹 분기는 시전자에게만 시작 문구를 보낸다.
         for linked in result["linked"] {
@@ -216,6 +242,9 @@ fn cast_combat(ob, skill_name, skill, target) {
                 + han_iga(linked["name"]) + " " + linked["script"];
             send_line(ob, linked_start);
         }
+        // Player.setFight finishes with promptRoom(), independently of the
+        // noPrompt start messages above.
+        send_cast_room(ob, "", "", false, true);
     }
 }
 
@@ -256,10 +285,11 @@ fn cast_noncombat(ob, skill_name, skill, target) {
     }
 
     if target["kind"] == "player" && target["id"] != get_string(ob, "이름") {
-        send_to_user(target["id"], scripts[1]);
-        send_cast_room(ob, scripts[2], target["id"], true);
+        send_raw_to_user(target["id"], "\r\n" + scripts[1] + "\r\n"
+            + cast_prompt_for(ob, target["id"]));
+        send_cast_room(ob, scripts[2], target["id"], true, true);
     } else {
-        send_cast_room(ob, scripts[2], "", true);
+        send_cast_room(ob, scripts[2], "", true, true);
     }
 }
 

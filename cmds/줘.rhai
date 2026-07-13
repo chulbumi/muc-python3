@@ -8,12 +8,12 @@ fn cmd(ob, line) {
     }
     let requested_target = words[0];
     let item_arg = words[1];
-    let count = if len(words) >= 3 { to_int(words[2]) } else { 1 };
-    let count = if count < 1 { 1 } else { if count > 50 { 50 } else { count } };
+    let requested_count = if len(words) >= 3 { to_int(words[2]) } else { 1 };
+    let requested_count = if requested_count < 1 { 1 } else { requested_count };
     let my_name = get_string(ob, "이름");
 
     if item_arg == "은전" || item_arg == "금전" {
-        let target_name = find_give_player(ob, requested_target);
+        let target_name = resolve_room_player_name(ob, requested_target);
         if target_name == "" {
             send_line(ob, "☞ 물품을 건내줄 무림인을 찾을 수 없어요. ^^");
             return;
@@ -23,9 +23,10 @@ fn cmd(ob, line) {
             send_line(ob, "☞ 돈이 모자라네요. ^^");
             return;
         }
-        let amount = if count > have { have } else { count };
+        // Python caps item batches at 50, but currency has no such cap.
+        let amount = if requested_count > have { have } else { requested_count };
         if target_name == my_name {
-            send_line(ob, "당신이 \x1b[1m" + my_name + "\x1b[0m에게 " + item_arg + " " + amount.to_string() + "개를 줍니다.");
+            send_line(ob, "당신이 \x1b[1m" + my_name + "\x1b[0;37m에게 " + item_arg + " " + amount.to_string() + "개를 줍니다.");
             send_line(ob, "\r\n\x1b[1m" + my_name + "\x1b[0;37m" + han_iga(my_name)
                 + " 당신에게 " + item_arg + " " + amount.to_string() + "개를 줍니다.");
             return;
@@ -42,7 +43,7 @@ fn cmd(ob, line) {
         send_line(ob, "☞ 그런 아이템이 소지품에 없어요.");
         return;
     }
-    let target_name = find_give_player(ob, requested_target);
+    let target_name = resolve_room_player_name(ob, requested_target);
     if target_name == "" {
         send_line(ob, "☞ 물품을 건내줄 무림인을 찾을 수 없어요. ^^");
         return;
@@ -52,7 +53,8 @@ fn cmd(ob, line) {
             + "\x1b[37m 가지고 장난합니다. '@_@'");
         return;
     }
-    let give_count = if order != 1 { 1 } else { count };
+    let item_count = if requested_count > 50 { 50 } else { requested_count };
+    let give_count = if order != 1 { 1 } else { item_count };
     request_give_item(ob, target_name, selected["name"].to_string(), order, give_count);
 }
 

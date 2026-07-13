@@ -97,7 +97,11 @@ impl OneitemState {
         let values: indexmap::IndexMap<String, String> = self
             .attr_order
             .iter()
-            .filter_map(|index| self.attr.get(index).map(|owner| (index.clone(), owner.clone())))
+            .filter_map(|index| {
+                self.attr
+                    .get(index)
+                    .map(|owner| (index.clone(), owner.clone()))
+            })
             .collect();
         let root = indexmap::IndexMap::from([("단일아이템", values)]);
         let pretty = serde_json::to_string_pretty(&root)?;
@@ -194,7 +198,9 @@ impl OneitemState {
     pub fn list(&self) -> String {
         let mut out = String::new();
         for index in &self.attr_order {
-            let Some(owner) = self.attr.get(index) else { continue };
+            let Some(owner) = self.attr.get(index) else {
+                continue;
+            };
             let name = self.get_name(index);
             out.push_str(&format!("{:<16} ({:<16}) : {}\r\n", name, index, owner));
         }
@@ -403,10 +409,15 @@ pub fn oneitem_list_index_entries() -> rhai::Array {
         let Some(info) = root.get("아이템정보").and_then(|v| v.as_object()) else {
             continue;
         };
-        let is_one = info
-            .get("아이템속성")
-            .and_then(|v| v.as_str())
-            .is_some_and(|v| v.split_whitespace().any(|x| x == "단일아이템"));
+        // Python Object.checkAttr uses `attr in keydata`: substring
+        // membership for strings and exact element membership for lists.
+        let is_one = match info.get("아이템속성") {
+            Some(JsonValue::String(value)) => value.contains("단일아이템"),
+            Some(JsonValue::Array(values)) => values
+                .iter()
+                .any(|value| value.as_str() == Some("단일아이템")),
+            _ => false,
+        };
         if !is_one {
             continue;
         }
@@ -420,7 +431,9 @@ pub fn oneitem_list_index_entries() -> rhai::Array {
     // getItem even when their JSON file is absent.
     if arr.is_empty() {
         for name in &guard.index_order {
-            let Some(index) = guard.index.get(name) else { continue };
+            let Some(index) = guard.index.get(name) else {
+                continue;
+            };
             let mut m = rhai::Map::new();
             m.insert("name".into(), rhai::Dynamic::from(name.clone()));
             m.insert("index".into(), rhai::Dynamic::from(index.clone()));

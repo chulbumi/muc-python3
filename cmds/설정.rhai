@@ -12,7 +12,7 @@ fn config_names() {
 
 fn cmd(ob, line) {
     let configs = config_names();
-    if is_empty(line) {
+    if line == "" {
         send_line(ob, "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━");
         send_line(ob, "\x1b[47m\x1b[30m◁               설      정      상      태               ▷\x1b[40m\x1b[37m");
         send_line(ob, "──────────────────────────────");
@@ -40,9 +40,8 @@ fn cmd(ob, line) {
         send_line(ob, "☞ 그런 설정은 없어요. ^^");
         return;
     }
-    let enabled = get_user_config(ob, line) == "1";
-    let state = if enabled { "\x1b[1m[비설정]\x1b[0;37m" } else { "\x1b[1m[설정]\x1b[0;37m" };
-    set_user_config(ob, line, if enabled { "0" } else { "1" });
+    let enabled = toggle_user_config_python(ob, line);
+    let state = if enabled { "\x1b[1m[설정]\x1b[0;37m" } else { "\x1b[1m[비설정]\x1b[0;37m" };
     send_line(ob, "☞ " + line + han_eul(line) + " " + state + " 하였습니다.");
 }
 

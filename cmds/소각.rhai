@@ -10,7 +10,7 @@ fn destroy_room_prompt(person) {
 fn cmd(ob, line) {
     if !require_arg(ob, line) { send_line(ob, "☞ 사용법: [물품이름] 소각"); return; }
     let args = line_args(line);
-    let count = if len(args) >= 2 { python_get_int(args[1]) } else { 1 };
+    let count = if len(args) >= 2 { parse_int_prefix(args[1]) } else { 1 };
     let count = if count < 1 { 1 } else { if count > 100 { 100 } else { count } };
     let parsed = parse_order_name(args[0]);
     let order = parsed[0];
@@ -38,7 +38,7 @@ fn cmd(ob, line) {
             for person in context["room_players"] {
                 if person["name"] == player { output += destroy_room_prompt(person); break; }
             }
-            send_to_user(player, output);
+            send_raw_to_user(player, output);
         }
     }
 }

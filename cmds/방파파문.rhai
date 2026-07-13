@@ -9,7 +9,7 @@ fn cmd(ob, line) {
         send_line(ob, "☞ 방파의 방주만이 할 수 있습니다.");
         return;
     }
-    if is_empty(line) {
+    if line == "" {
         send_line(ob, "☞ 사용법 : [대상] 방파파문");
         return;
     }
@@ -42,7 +42,7 @@ fn cmd(ob, line) {
                     + player["현재내공"].to_string() + "/"
                     + player["최고내공"].to_string() + " ] "
             };
-            send_to_user(line, "당신은 파문되었습니다." + prompt);
+            send_raw_to_user(line, "\r\n당신은 파문되었습니다.\r\n" + prompt);
         }
     }
     send_python_guild_group_except(ob, msg, line);

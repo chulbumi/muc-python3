@@ -6,12 +6,12 @@ fn cmd(ob, line) {
         send_line(ob, "☞ 무슨 말인지 모르겠어요. *^_^*");
         return;
     }
-    if is_empty(line) {
+    if line == "" {
         send_line(ob, "☞ 사용법: [대상] 체인지");
         return;
     }
-    let target = trim(line);
-    if !room_player_exists(ob, target) {
+    let target = resolve_room_player_name(ob, line);
+    if target == "" {
         send_line(ob, "여기에 없나봐요^^");
         return;
     }

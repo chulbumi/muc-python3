@@ -48,6 +48,9 @@ const NON_COMMAND_SCRIPTS: &[&str] = &[
     // Python has cmds/줘.py, not cmds/주다.py. The duplicate Rhai source must
     // not create an additional command or shadow the exact `줘` command.
     "주다",
+    // Python handles these in Player.parse_command rather than CmdObj.
+    "끝",
+    "종료",
 ];
 
 /// Command permission metadata copied from the authoritative Python
@@ -191,7 +194,7 @@ pub fn create_script_command(
     call_out_scheduler: Option<Arc<CallOutScheduler>>,
 ) -> CommandFn {
     Arc::new(move |player: &mut Body, args: &[&str]| -> CommandResult {
-        tracing::debug!(script = %script_name, ?args, "Executing script command");
+        tracing::debug!(script = %script_name, "Executing script command");
         let line = args.join(" ");
         player
             .temp_mut()
@@ -286,7 +289,7 @@ pub async fn register_script_commands(
     let script_names = scripts.script_names();
     drop(scripts);
 
-    println!(
+    info!(
         "[SCRIPT_CMD] Found {} scripts to register",
         script_names.len()
     );
@@ -339,6 +342,18 @@ pub async fn register_script_commands(
             ),
         );
     }
+    if script_names.iter().any(|name| name == "끝") {
+        registry.register_internal(
+            "leave",
+            create_script_command(
+                script_storage.clone(),
+                "끝".to_string(),
+                get_other_players_desc.clone(),
+                get_other_players_map.clone(),
+                call_out_scheduler.clone(),
+            ),
+        );
+    }
 
     // Collect existing command aliases once to avoid O(n*m) complexity
     let existing_aliases: std::collections::HashSet<String> = registry
@@ -353,7 +368,7 @@ pub async fn register_script_commands(
 
     for script_name in script_names {
         if !is_player_command_script(&script_name) {
-            info!(
+            tracing::debug!(
                 "[SCRIPT_CMD] Skipping {} (not a player command)",
                 script_name
             );
@@ -362,7 +377,7 @@ pub async fn register_script_commands(
 
         // Skip if command already exists (built-in commands take priority)
         if registry.contains(&script_name) {
-            info!(
+            tracing::debug!(
                 "[SCRIPT_CMD] Skipping {} (already registered as built-in)",
                 script_name
             );
@@ -371,7 +386,7 @@ pub async fn register_script_commands(
 
         // Also check if any existing command has this as an alias
         if existing_aliases.contains(&script_name) {
-            info!(
+            tracing::debug!(
                 "[SCRIPT_CMD] Skipping {} (alias of existing command)",
                 script_name
             );
@@ -406,10 +421,10 @@ pub async fn register_script_commands(
 
         // Register the command
         registry.register(info);
-        info!("[SCRIPT_CMD] Registered command: {}", name_clone);
+        tracing::debug!("[SCRIPT_CMD] Registered command: {}", name_clone);
     }
 
-    println!("[SCRIPT_CMD] Script registration complete");
+    info!("[SCRIPT_CMD] Script registration complete");
 }
 
 #[cfg(test)]
@@ -532,6 +547,28 @@ mod tests {
         register_script_commands(&mut registry, storage, None, None, None).await;
 
         let registered_names = registry.command_names();
+        let expected_python_commands =
+            std::fs::read_dir(PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("cmds"))
+                .unwrap()
+                .flatten()
+                .filter_map(|entry| {
+                    let path = entry.path();
+                    if path.extension().and_then(|value| value.to_str()) != Some("py") {
+                        return None;
+                    }
+                    let source = std::fs::read_to_string(&path).ok()?;
+                    source
+                        .lines()
+                        .any(|line| line.trim_start().starts_with("class CmdObj("))
+                        .then(|| path.file_stem().unwrap().to_string_lossy().to_string())
+                })
+                .collect::<HashSet<_>>();
+        let registered_set = registered_names.iter().cloned().collect::<HashSet<_>>();
+        assert_eq!(expected_python_commands.len(), 189);
+        assert_eq!(
+            registered_set, expected_python_commands,
+            "player-visible Rust registry must exactly match Python CmdObj filenames"
+        );
         for name in NON_COMMAND_SCRIPTS {
             assert!(
                 !registered_names.iter().any(|registered| registered == name),
@@ -652,17 +689,18 @@ mod tests {
         }
 
         let mut body = Body::new();
+        let command = registry.get_internal("leave").unwrap();
         for name in ["끝", "종료"] {
-            let command = registry.get(name).unwrap();
+            assert!(registry.get(name).is_none(), "{name} is a parser hook");
             assert_eq!(
-                (command.handler)(&mut body, &[]),
+                (command)(&mut body, &[]),
                 CommandResult::Disconnect("\r\n다음에 또 만나요~!!!\r\n".to_string()),
                 "{name}"
             );
 
             body.act = crate::player::ActState::Fight;
             assert_eq!(
-                (command.handler)(&mut body, &[]),
+                (command)(&mut body, &[]),
                 CommandResult::Output(
                     "☞ 지금은 무림을 떠나기에 좋은 상황이 아니네요. ^_^".to_string()
                 ),
@@ -758,18 +796,21 @@ mod tests {
         register_script_commands(&mut registry, storage, None, None, None).await;
 
         for (alias, target) in crate::command::registry::PYTHON_RUNTIME_ALIASES {
+            if matches!(
+                *target,
+                "북" | "남" | "동" | "서" | "위" | "아래" | "북서" | "북동" | "남서" | "남동"
+            ) {
+                assert_eq!(registry.resolve_alias(alias), *target);
+                assert!(registry.get(alias).is_none(), "{alias} is a movement hook");
+                continue;
+            }
             let command = registry
                 .get(alias)
                 .unwrap_or_else(|| panic!("Python alias {alias} -> {target} must resolve"));
             assert_eq!(command.name, *target, "Python alias {alias}");
         }
 
-        let mut expected_names: HashSet<String> = [
-            "북", "남", "동", "서", "위", "아래", "북서", "북동", "남서", "남동", "끝", "종료",
-        ]
-        .into_iter()
-        .map(str::to_string)
-        .collect();
+        let mut expected_names = HashSet::new();
         let command_dir = PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("cmds");
         for entry in std::fs::read_dir(command_dir).expect("cmds directory must be readable") {
             let path = entry.expect("command entry").path();
@@ -790,11 +831,14 @@ mod tests {
                 .unwrap_or_else(|| panic!("Python command {name} must register"));
             assert_eq!(command.name, name, "exact Python command name {name}");
         }
+        assert!(registry.get("끝").is_none());
+        assert!(registry.get("종료").is_none());
+        assert!(registry.get_internal("leave").is_some());
 
         let actual_names: HashSet<String> = registry.command_names().into_iter().collect();
         assert_eq!(
             actual_names, expected_names,
-            "registry must expose only Python CmdObj files plus Python runtime-special commands"
+            "registry must expose only Python CmdObj files"
         );
     }
 
@@ -1184,10 +1228,15 @@ mod tests {
             crate::hangul::han_iga(self_name)
         );
         let old_room_message = format!(
-            "{} 경공술을 펼치며 하늘로 치솟아 오릅니다. '무영지신!!!'",
+            "{}\r\n{} 경공술을 펼치며 하늘로 치솟아 오릅니다. '무영지신!!!'\r\n",
+            crate::script::RAW_USER_MESSAGE_PREFIX,
             actor
         );
-        let destination_message = format!("{} 하늘에서 사뿐히 내려 앉습니다. '척~~~'", actor);
+        let destination_message = format!(
+            "{}\r\n{} 하늘에서 사뿐히 내려 앉습니다. '척~~~'\r\n",
+            crate::script::RAW_USER_MESSAGE_PREFIX,
+            actor
+        );
         assert!(matches!(
             result,
             CommandResult::OutputAndSendToUsers(ref output, ref sends)
@@ -1335,8 +1384,16 @@ mod tests {
         let result = (command.handler)(&mut body, &[]);
 
         let name_a = format!("\x1b[1m{}\x1b[0;37m", self_name);
-        let expected_old = format!("\r\n{}이 안개 속으로 사라집니다.", name_a);
-        let expected_destination = format!("{}이 안개 속에서 나타납니다.", name_a);
+        let expected_old = format!(
+            "{}\r\n\r\n{}이 안개 속으로 사라집니다.\r\n",
+            crate::script::RAW_USER_MESSAGE_PREFIX,
+            name_a
+        );
+        let expected_destination = format!(
+            "{}\r\n{}이 안개 속에서 나타납니다.\r\n",
+            crate::script::RAW_USER_MESSAGE_PREFIX,
+            name_a
+        );
         assert!(matches!(
             result,
             CommandResult::OutputAndSendToUsers(ref output, ref sends)
@@ -1608,8 +1665,11 @@ mod tests {
         assert!(matches!(
             result,
             CommandResult::OutputAndSendToUsers(ref output, ref sends)
-                if output == &format!("{own}\r\n{room}")
-                    && sends == &vec![(same_room_name.to_string(), room)]
+                if output == &format!("{own}\r\n{room}\r\n\r\n\x1b[0;37;40m[ 0/0, 0/0 ] ")
+                    && sends == &vec![(
+                        same_room_name.to_string(),
+                        format!("{}{room}\r\n", crate::script::RAW_USER_MESSAGE_PREFIX)
+                    )]
         ));
 
         let mut world = crate::world::get_world_state().write().unwrap();
@@ -1657,13 +1717,11 @@ mod tests {
             CommandResult::Output(ref output) if output == "☞ 해당 도움말이 없어요. ^^"
         ));
 
-        // Python does not trim a non-empty HELP key.  This must not resolve
-        // to the ordinary "도움말" topic.
+        // Player.parse_command strips surrounding parameter whitespace before
+        // invoking the command, so both forms resolve to the same topic.
+        let ordinary = (command.handler)(&mut body, &["도움말"]);
         let spaced = (command.handler)(&mut body, &[" 도움말 "]);
-        assert!(matches!(
-            spaced,
-            CommandResult::Output(ref output) if output == "☞ 해당 도움말이 없어요. ^^"
-        ));
+        assert_eq!(format!("{ordinary:?}"), format!("{spaced:?}"));
     }
 
     #[tokio::test]

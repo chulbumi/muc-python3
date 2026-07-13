@@ -1,12 +1,17 @@
 // Python cmds/상태보기.py. Rust supplies state; Rhai owns all presentation.
 fn status_value(v, fallback) { if v == "" { fallback } else { v } }
 
-fn render_player_status(ob, s) {
+fn render_player_status(ob, s, is_mob) {
     let personality = status_value(s["성격"], "--------");
     let sex = status_value(s["성별"], "--");
     let guild = status_value(s["소속"], "--------");
     let title = status_value(s["직위"], "--------");
     let spouse = status_value(s["배우자"], "--------");
+    let name_a = if is_mob {
+        "\x1b[33m" + s["name"] + "\x1b[37m"
+    } else {
+        "\x1b[1m" + s["name"] + "\x1b[0;37m"
+    };
     send_line(ob, "┏━━━━━━━━━━━━━━━━━━━━━━━━━┑");
     send_line(ob, "│\x1b[0m\x1b[44m\x1b[1m\x1b[37m ▷▶▷▶▷ " + pad_start(s["name"], 10, " ") + "의 현재 상태     ◁◀◁◀◁ \x1b[0m\x1b[40m\x1b[37m│");
     send_line(ob, "┝━━━━━━━━━━━━┯━━━━━━━━━━━━┥");
@@ -24,34 +29,39 @@ fn render_player_status(ob, s) {
     send_line(ob, "│\x1b[0m\x1b[47m\x1b[30m [은  전]                    " + pad_start(s["silver"].to_string(), 20, " ") + " \x1b[0m\x1b[40m\x1b[37m│");
     send_line(ob, "┕━━━━━━━━━━━━━━━━━━━━━━━━━┙");
     send_line(ob, "★ " + post_position_once(s["name"] + s["hp_script"]));
-    if s["insurance"] == 0 { send_line(ob, "★ \x1b[1m" + s["name"] + "\x1b[0;37m의 표국보험은 효력이 없습니다."); }
-    else { send_line(ob, "★ \x1b[1m" + s["name"] + "\x1b[0;37m" + han_iga(s["name"]) + " " + s["insurance"].to_string() + "번의 표국보험 혜택을 받으실 수 있습니다."); }
+    if s["insurance"] == 0 { send_line(ob, "★ " + name_a + "의 표국보험은 효력이 없습니다."); }
+    else { send_line(ob, "★ " + name_a + han_iga(s["name"]) + " " + s["insurance"].to_string() + "번의 표국보험 혜택을 받으실 수 있습니다."); }
     send_line(ob, "★ " + post_position_once(s["name"] + s["mp_script"]));
-    if s["feature"] != 0 { send_line(ob, "★ \x1b[1m" + s["name"] + "\x1b[0;37m" + han_eun(s["name"]) + " " + s["feature"].to_string() + "개의 여유 특성치를 보유하고 있습니다."); }
+    if s["feature"] != 0 { send_line(ob, "★ " + name_a + han_eun(s["name"]) + " " + s["feature"].to_string() + "개의 여유 특성치를 보유하고 있습니다."); }
 }
 
 fn cmd(ob, line) {
     if !require_admin(ob, 1000) { send_line(ob, "☞ 무슨 말인지 모르겠어요. *^_^*"); return; }
     if line == "" { send_line(ob, "☞ 운영자 명령: [대상] 상태보기"); return; }
-    let target = first_arg(line);
-    if target == get_string(ob, "이름") {
+    let query = trim(line);
+    let selected = find_admin_status_target(ob, query);
+    if selected.is_unit() || selected["kind"] == "item" {
+        send_line(ob, "☞ 무슨 말인지 모르겠어요. *^_^*"); return;
+    }
+    if selected["kind"] == "player" && selected["name"] == get_string(ob, "이름") {
         let s = admin_self_status(ob); s["name"] = s["이름"];
-        render_player_status(ob, s); return;
+        render_player_status(ob, s, false); return;
     }
-    for s in get_room_players_admin(ob) {
-        if s["name"] != target { continue; }
-        s["insurance"] = admin_insurance_count(s["level"], s["insurance_premium"]);
-        // Python accidentally calls get_hp_script(ob), not get_hp_script(obj).
-        s["hp_script"] = get_hp_status_script(ob);
-        render_player_status(ob, s); return;
+    if selected["kind"] == "player" {
+        for s in get_room_players_admin(ob) {
+            if s["name"] != selected["name"] { continue; }
+            s["insurance"] = admin_insurance_count(s["level"], s["insurance_premium"]);
+            // Python accidentally calls get_hp_script(ob), not get_hp_script(obj).
+            s["hp_script"] = get_hp_status_script(ob);
+            render_player_status(ob, s, false); return;
+        }
     }
-    let selected = find_attack_target(ob, target);
-    if !selected.is_unit() && selected["kind"] == "mob" {
+    if selected["kind"] == "mob" {
         for s in get_room_mobs_admin(ob) {
             if s["instance_id"] != selected["instance_id"] { continue; }
             s["hp_script"] = get_hp_status_script(ob);
             send_line(ob, "Index : " + s["index"]);
-            render_player_status(ob, s); return;
+            render_player_status(ob, s, true); return;
         }
     }
     send_line(ob, "☞ 무슨 말인지 모르겠어요. *^_^*");

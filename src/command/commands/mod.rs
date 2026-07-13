@@ -22,7 +22,6 @@ use std::sync::Arc;
 
 /// Registers all basic commands with the registry
 pub fn register_basic_commands(registry: &mut CommandRegistry) {
-    register_movement_commands(registry);
     register_info_commands(registry);
     register_combat_commands(registry);
 }
@@ -56,6 +55,16 @@ mod tests {
             "관리자정보",
             "adminhelp",
             "업데이트",
+            "북",
+            "남",
+            "동",
+            "서",
+            "위",
+            "아래",
+            "북서",
+            "북동",
+            "남서",
+            "남동",
         ] {
             assert!(!registry.contains(invented), "{invented}");
         }

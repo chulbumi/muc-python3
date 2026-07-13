@@ -2,15 +2,16 @@
 // Python: cmds/등록취소.py
 
 fn cmd(ob, line) {
-    if is_empty(line) {
+    let number = trim(line);
+    if number == "" {
         send_line(ob, "☞ 사용법: [물품번호] 등록취소");
         return;
     }
-    if !room_has_mob(ob, "진영") {
+    if !room_has_object(ob, "진영") {
         send_line(ob, "☞ 이곳에서는 불가능해요.");
         return;
     }
-    let result = book_cancel(ob, to_int(line));
+    let result = book_cancel(ob, parse_int_prefix(number));
     if result == "ok" { send_line(ob, "☞ 등록 취소 되었습니다."); }
     else if result == "not_owner" { send_line(ob, "☞ 자신이 등록한 물품이 아닙니다."); }
     else if result == "borrowed" { send_line(ob, "☞ 대여 중입니다."); }

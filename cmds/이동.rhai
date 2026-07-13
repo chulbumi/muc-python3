@@ -3,8 +3,9 @@
 
 fn cmd(ob, line) {
     if !require_admin(ob, 1000) { send_line(ob, "☞ 무슨 말인지 모르겠어요. *^_^*"); return; }
-    if !require_arg(ob, line) { send_line(ob, "☞ 사용법: [존이름:맵번호] 이동"); return; }
-    let spec = parse_room_spec(line);
+    let destination = trim(line);
+    if destination == "" { send_line(ob, "☞ 사용법: [존이름:맵번호] 이동"); return; }
+    let spec = parse_room_spec_exact(destination);
     if length(spec["zone"]) == 0 {
         send_line(ob, "* 이동 실패!!!");
         return;

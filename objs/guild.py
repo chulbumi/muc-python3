@@ -1,4 +1,3 @@
-import _pickle as cPickle
 from objs.object import Object
 import json
 
@@ -6,14 +5,14 @@ import json
 class Guild(Object):
     
     attr = {}
-    path = 'data/config/guild.dat'
+    path = 'data/config/guild.json'
     def __init__(self):
         self.load()
         
     def load(self):
         try:
-            f = open(self.path, "rb")
-            self.attr = cPickle.load(f, encoding="euc-kr")
+            f = open(self.path, "r", encoding="utf-8")
+            self.attr = json.load(f)
         except IOError:
             print('%s IOError' % self.path)
             return
@@ -27,8 +26,8 @@ class Guild(Object):
     
     def save(self):
         try:
-            f = open(self.path, 'wb')
-            cPickle.dump(self.attr, f)
+            f = open(self.path, 'w', encoding="utf-8")
+            json.dump(self.attr, f, ensure_ascii=False, indent=2)
         except IOError:
             print('%s IOError' % self.path)
             return

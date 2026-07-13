@@ -5,16 +5,9 @@
 //! remains in the command scripts.
 
 use serde_json::{Map, Value};
-use std::{
-    fs,
-    path::Path,
-    sync::atomic::{AtomicU64, Ordering},
-    time::{SystemTime, UNIX_EPOCH},
-};
+use std::{fs, path::Path};
 
 pub type BookEntry = Value;
-
-static NEXT_BOOK_ID: AtomicU64 = AtomicU64::new(0);
 
 pub fn dict_get<'a>(entry: &'a Value, key: &str) -> Option<&'a Value> {
     entry.as_object()?.get(key)
@@ -73,12 +66,8 @@ pub fn mark_returned(path: impl AsRef<Path>, item_id: &str) -> Result<(), String
 }
 
 fn next_book_id() -> String {
-    let millis = SystemTime::now()
-        .duration_since(UNIX_EPOCH)
-        .unwrap_or_default()
-        .as_millis();
-    let sequence = NEXT_BOOK_ID.fetch_add(1, Ordering::Relaxed);
-    format!("book-{millis:x}-{sequence:x}")
+    // Python: str(uuid.uuid4())
+    uuid::Uuid::new_v4().to_string()
 }
 
 pub fn register_item(

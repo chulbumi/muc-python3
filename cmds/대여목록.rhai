@@ -1,7 +1,7 @@
 // 대여목록.rhai - 대여목록. Python: cmds/대여목록.py
 
 fn cmd(ob, line) {
-    if !room_has_mob(ob, "진영") {
+    if !room_has_object(ob, "진영") {
         send_line(ob, "☞ 이곳에서는 불가능해요.");
         return;
     }
@@ -10,9 +10,7 @@ fn cmd(ob, line) {
         send_line(ob, "☞ 대여가능한 품목이 없어요.");
         return;
     }
-    // Python compares the command argument verbatim.  In particular, a
-    // leading/trailing space does not match an otherwise identical name.
-    let wanted = line;
+    let wanted = trim(line);
     let shown = 0;
     for entry in entries {
         let number = entry["번호"].to_int();

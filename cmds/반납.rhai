@@ -2,11 +2,11 @@
 // Python: cmds/반납.py
 
 fn cmd(ob, line) {
-    if line == "" || is_empty(line) {
+    if line == "" {
         send_line(ob, "☞ 사용법: [물품] 반납");
         return;
     }
-    if !room_has_mob(ob, "진영") {
+    if !room_has_object(ob, "진영") {
         send_line(ob, "☞ 이곳에서는 불가능해요.");
         return;
     }

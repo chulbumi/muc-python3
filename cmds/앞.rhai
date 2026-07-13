@@ -3,8 +3,9 @@
 
 fn cmd(ob, line) {
     if !require_admin(ob, 1000) { send_line(ob, "☞ 무슨 말인지 모르겠어요. *^_^*"); return; }
-    if !require_arg(ob, line) { send_line(ob, "☞ 운영자 명령: [대상] 앞"); return; }
+    // Python Player.parse_command strips the parameter before cmd() receives it.
     let target = trim(line);
+    if target == "" { send_line(ob, "☞ 운영자 명령: [대상] 앞"); return; }
     let pos = get_position_of(target);
     if length(pos["zone"]) == 0 {
         send_line(ob, "☞ 활동중인 그런 무림인이 없어요. ^^");
@@ -16,7 +17,12 @@ fn cmd(ob, line) {
         return;
     }
     let err = perform_summon_move(ob, pos["zone"], pos["room"]);
-    if err != "" { send_line(ob, "☞ 공간이동에 실패하였습니다."); }
+    if err != "" {
+        send_line(ob, "☞ 공간이동에 실패하였습니다.");
+        // Python executes clearTarget() after enterRoom() regardless of its
+        // success result.
+        clear_summon_combat(ob);
+    }
 }
 
 fn main(ob, line) {

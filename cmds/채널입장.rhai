@@ -12,11 +12,11 @@ fn channel_member_prompt(member) {
 fn cmd(ob, line) {
     if is_adult_channel_member(ob) {
         // Client.lineReceived() calls prompt(True) after the command.
-        send_line(ob, "☞ 이미 입장하셨습니다.\r\n");
+        send_line(ob, "☞ 이미 입장하셨습니다.");
         return;
     }
     if !adult_channel_join(ob) {
-        send_line(ob, "☞ 이미 입장하셨습니다.\r\n");
+        send_line(ob, "☞ 이미 입장하셨습니다.");
         return;
     }
 

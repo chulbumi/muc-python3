@@ -1,5 +1,12 @@
 // Python cmds/버려.py의 출력과 같은 방 알림을 그대로 구성한다.
 
+fn drop_prompt(person) {
+    if !person["show_prompt"] { return ""; }
+    "\r\n\x1b[0;37;40m[ " + person["hp"].to_string() + "/"
+        + person["max_hp"].to_string() + ", " + person["mp"].to_string()
+        + "/" + person["max_mp"].to_string() + " ] "
+}
+
 fn dropped_item_post(item) {
     let name_a = if item["ansi"] != "" {
         item["ansi"] + item["name"] + "\x1b[0;37m"
@@ -10,7 +17,8 @@ fn dropped_item_post(item) {
 }
 
 fn cmd(ob, line) {
-    if length(line) == 0 {
+    let target = trim(line);
+    if length(target) == 0 {
         send_line(ob, "☞ 사용법: [아이템 이름] 버려");
         return;
     }
@@ -20,13 +28,13 @@ fn cmd(ob, line) {
         return;
     }
 
-    if starts_with(line, "은전") {
+    if starts_with(target, "은전") {
         send_line(ob, "☞ 은전은 버릴 수 없어요. ^^");
         return;
     }
 
-    let all = line == "모두" || line == "전부";
-    let result = drop_inventory_python(ob, line, all);
+    let all = target == "모두" || target == "전부";
+    let result = drop_inventory_python(ob, target, all);
     if result["status"] == "blocked" {
         send_line(ob, "☞ 그 물건은 버릴 수 없어요. ^^");
         return;
@@ -78,9 +86,14 @@ fn cmd(ob, line) {
     }
 
     let room_message = join(room_lines, "\r\n");
+    let context = get_party_context();
     for player_name in get_room_players(ob) {
         if player_name != name {
-            send_to_user(player_name, room_message);
+            let prompt = "";
+            for person in context["room_players"] {
+                if person["name"] == player_name { prompt = drop_prompt(person); break; }
+            }
+            send_raw_to_user(player_name, "\r\n" + room_message + "\r\n" + prompt);
         }
     }
 }

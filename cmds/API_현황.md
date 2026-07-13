@@ -27,36 +27,37 @@
 - [x] `set_player_data(ob, key, value)` - 플레이어 데이터 설정
 - [x] `print(s)` - 디버그 출력
 
-## 필요한 API (미구현)
+## API 검증 상태
 
 ### 플레이어 액션
-- [ ] `send_line(ob, msg)` - 플레이어에게 메시지 전송 (ob.sendLine)
-- [ ] `send_room(ob, msg)` - 방에 있는 모두에게 메시지 전송 (ob.sendRoom)
-- [ ] `enter_room(ob, room, type1, type2)` - 방 이동 (ob.enterRoom)
-- [ ] `save(ob)` - 플레이어 저장 (ob.save)
+- [x] `send_line(ob, msg)` - Rhai 출력 수집
+- [x] `send_room(ob, msg)` - Rhai 출력 수집 후 방 인덱스 라우팅
+- [x] `enter_room`에 해당하는 이동 efun - 이동 전이와 검사는 Rust, 출력은 Rhai
+- [x] 저장 efun/명령 - Python JSON 형식 저장
 
 ### 데이터 접근
-- [ ] `get(ob, key)` - 객체 속성 조회 (ob['key'])
-- [ ] `set(ob, key, value)` - 객체 속성 설정 (ob[key] = value)
-- [ ] `get_int(ob, key)` - 정수 속성 조회 (getInt(ob[key]))
-- [ ] `get_string(ob, key)` - 문자열 속성 조회 (ob.getString(key))
+- [x] `get(ob, key)` - 객체 속성 조회 (ob['key'])
+- [x] `set(ob, key, value)` - 객체 속성 설정/상태 전이 efun
+- [x] `get_int(ob, key)` - 정수 속성 조회
+- [x] `get_string(ob, key)` - 문자열 속성 조회
 
 ### 환경/방 정보
-- [ ] `check_attr(env, attr)` - 방 속성 확인 (ob.env.checkAttr)
-- [ ] `get_env(ob)` - 현재 방 객체 (ob.env)
+- [x] `check_attr(env, attr)` - 방 속성 확인
+- [x] `get_env(ob)` - 현재 방/위치 데이터 접근
 
 ### 채널/플레이어 목록
-- [ ] `get_players(channel)` - 채널의 모든 플레이어 (ob.channel.players)
-- [ ] `find_player(name)` - 이름으로 플레이어 찾기
+- [x] 채널별 ordered membership 조회
+- [x] 같은 방 플레이어 조회는 방 인덱스 사용
+- [x] 전역 플레이어 조회는 Python 전역 명령에만 제한
 
 ### 유틸리티
-- [ ] `fill_space(width, s)` - 문자열 포맷팅
-- [ ] `strip_ansi(s)` - ANSI 코드 제거
-- [ ] `to_int(s)` - 문자열을 정수로 변환
+- [x] `fill_space(width, s)` - 문자열 포맷팅
+- [x] `strip_ansi(s)` - ANSI 코드 제거
+- [x] `to_int(s)` - 문자열을 정수로 변환
 
 ## 변환 현황
-- 완료: 11/190 스크립트 (5.8%)
-- 남음: 179개 파이썬 스크립트
+- `.rhai` 파일: 207개, Python 기준 파일: 190개
+- 파일 존재만으로 완료를 판정하지 않으며, placeholder와 상태 전이를 계속 대조 중
 
 ## 다음 단계
 1. 필요한 API 함수들을 모두 구현

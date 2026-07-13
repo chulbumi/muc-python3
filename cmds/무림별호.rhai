@@ -1,6 +1,26 @@
 // 무림별호.rhai - 무림별호 설정 및 개인방 생성
 // Python: cmds/무림별호.py
 
+fn nickname_notice_wire(player, message) {
+    let wire = "\r\n" + message + "\r\n";
+    if player["show_prompt"] {
+        wire += "\r\n\x1b[0;37;40m[ " + player["현재체력"].to_string() + "/"
+            + player["현재최고체력"].to_string() + ", "
+            + player["현재내공"].to_string() + "/"
+            + player["현재최고내공"].to_string() + " ] ";
+    }
+    wire
+}
+
+fn send_nickname_notice(players, target_name, message) {
+    for player in players {
+        if player["이름"].to_string() == target_name {
+            send_raw_to_user(target_name, nickname_notice_wire(player, message));
+            return;
+        }
+    }
+}
+
 fn cmd(ob, line) {
     let nickname = trim(line);
     let args = line_args(nickname);
@@ -64,9 +84,11 @@ fn cmd(ob, line) {
         + " \x1b[1m자신의 별호를 『\x1b[33m" + nickname + "\x1b[37m』"
         + han_uro(nickname) + " 칭하기 시작합니다.\x1b[0;37m";
 
-    for target_name in get_online_names() {
+    let online_players = get_all_online_players();
+    for player in online_players {
+        let target_name = player["이름"].to_string();
         if target_name != "" && target_name != name {
-            send_to_user(target_name, announce);
+            send_raw_to_user(target_name, nickname_notice_wire(player, announce));
         }
     }
     // Python은 자기 자신에게만 한 줄을 더 비운다.
@@ -92,7 +114,7 @@ fn cmd(ob, line) {
     send_line(ob, "당신이 경공술을 펼치며 하늘로 치솟아 오릅니다. '무영지신!!!'");
     for target_name in old_room_players {
         if target_name != "" && target_name != name {
-            send_to_user(target_name, actor + " 경공술을 펼치며 하늘로 치솟아 오릅니다. '무영지신!!!'");
+            send_nickname_notice(online_players, target_name, actor + " 경공술을 펼치며 하늘로 치솟아 오릅니다. '무영지신!!!'");
         }
     }
 
@@ -112,7 +134,7 @@ fn cmd(ob, line) {
 
     for target_name in get_room_players(ob) {
         if target_name != "" && target_name != name {
-            send_to_user(target_name, actor + " 하늘에서 사뿐히 내려 앉습니다. '척~~~'");
+            send_nickname_notice(online_players, target_name, actor + " 하늘에서 사뿐히 내려 앉습니다. '척~~~'");
         }
     }
 }

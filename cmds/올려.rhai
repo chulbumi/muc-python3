@@ -2,7 +2,7 @@
 // [힘|민첩성|맷집|명중|회피|필살|운|내공|체력] 특성치 1 소모, ob[line], ob[line+'특성치'] 증가. 명중/회피/필살/운 100 상한, 민첩성 2800 상한.
 
 fn cmd(ob, line) {
-    let ln = trim(line);
+    let ln = line;
     if ln == "" {
         send_line(ob, "☞ 사용법: [힘|민첩성|맷집|명중|회피|필살|운|내공|체력] 올려");
         return;
@@ -12,7 +12,7 @@ fn cmd(ob, line) {
         send_line(ob, "☞ 사용법: [힘|민첩성|맷집|명중|회피|필살|운|내공|체력] 올려");
         return;
     }
-    if get_int(ob, "특성치") <= 0 {
+    if get_int(ob, "특성치") == 0 {
         send_line(ob, "☞ 더이상 올릴 수 있는 여유 특성치가 없습니다.");
         return;
     }
@@ -25,8 +25,9 @@ fn cmd(ob, line) {
         send_line(ob, "☞ 더이상 올릴 수 없습니다.");
         return;
     }
-    let x = get_int(ob, ln + "특성치");
-    let base = if x == 0 && contains(l1, " " + ln + " ") { get_int(ob, ln) } else { x };
+    let key = ln + "특성치";
+    let x = get_int(ob, key);
+    let base = if python_value_is_empty(ob, key) && contains(l1, " " + ln + " ") { get_int(ob, ln) } else { x };
     let xval = base + 1;
     set_value(ob, ln + "특성치", xval);
     set_value(ob, "특성치", get_int(ob, "특성치") - 1);

@@ -24,13 +24,25 @@ fn view_box_data(ob, box, detailed) {
             let option = item["option"].to_string();
             let cell = "[" + fill_space_front_euc_kr(4, (i + 1).to_string()) + "] " + name
                 + if option == "" { " " } else { " " + option };
-            message += fill_space_euc_kr(38, cell);
-            column += 1;
-            if column == 2 && i + 1 < len(items) {
+            let padded = fill_space_euc_kr(38, cell);
+            if column == 1 && euc_kr_len(padded) > 38 {
+                message += "\r\n";
+            }
+            message += padded;
+            if euc_kr_len(cell) > 38 {
+                message += "\r\n";
+                column = 0;
+            } else {
+                column += 1;
+            }
+            if column == 2 {
                 message += "\r\n";
                 column = 0;
             }
             i += 1;
+        }
+        if ends_with(message, "\r\n") {
+            message = substring(message, 0, len(message) - 2);
         }
         send_line(ob, message);
     } else {
@@ -48,15 +60,37 @@ fn view_box_data(ob, box, detailed) {
             else { counts[found] += 1; }
         }
         let message = "";
+        let column = 0;
         let i = 0;
         while i < len(names) {
             let count = counts[i];
+            let ansi_count = if len(names[i]) != len(strip_ansi(names[i])) {
+                "\x1b[0;36m"
+            } else {
+                ""
+            };
             let cell = "\x1b[1;36m·\x1b[0;36m" + names[i]
                 + if count == 1 { "\x1b[0;37m" }
-                  else { " " + count.to_string() + "개\x1b[0;37m" };
-            message += fill_space_euc_kr(22, cell);
-            if (i + 1) % 3 == 0 && i + 1 < len(names) { message += "\r\n"; }
+                  else { " " + ansi_count + count.to_string() + "개\x1b[0;37m" };
+            let padded = fill_space_euc_kr(22, cell);
+            if column == 1 && euc_kr_len(padded) > 22 {
+                message += "\r\n";
+            }
+            message += padded;
+            if euc_kr_len(cell) > 22 {
+                message += "\r\n";
+                column = 0;
+            } else {
+                column += 1;
+            }
+            if column == 3 {
+                message += "\r\n";
+                column = 0;
+            }
             i += 1;
+        }
+        if len(names) % 3 == 0 && len(message) >= 2 {
+            message = substring(message, 0, len(message) - 2);
         }
         send_line(ob, message);
     }
@@ -80,8 +114,17 @@ fn main(ob, line) {
     if line.trim() == "" {
         let r = view_map_data(ob);
         if r["ok"] {
-            for row in split(r["text"], "\r\n") {
-                send_line(ob, row);
+            let rows = split(r["text"], "\r\n");
+            let i = 0;
+            while i < len(rows) {
+                // build_room_lines uses a terminal CRLF only to delimit its
+                // final Python sendLine. split exposes that delimiter as an
+                // extra empty row; sending it again adds one blank line
+                // before the command prompt.
+                if i + 1 < len(rows) || rows[i] != "" {
+                    send_line(ob, rows[i]);
+                }
+                i += 1;
             }
         } else {
             if r["err"] == "no_position" {
@@ -95,8 +138,21 @@ fn main(ob, line) {
         return;
     }
 
+    let words = line_args(line);
+    if line == "호위" {
+        guard_view_command(ob, "");
+        return;
+    }
+    if len(words) > 1 && words[1] == "호위" {
+        guard_view_command(ob, words[0]);
+        return;
+    }
+
     let box = find_view_box(ob, line);
     if box["found"] {
+        if get_int(ob, "관리자등급") >= 1000 {
+            send_line(ob, "Index : " + box["인덱스"].to_string());
+        }
         let detailed = line == "무기고" || line == "화초장" || line == "한옥장" || line == "진열장";
         view_box_data(ob, box, detailed);
         return;
@@ -134,6 +190,17 @@ fn main(ob, line) {
     let target_name = to_target["name"];
     let target_msg = to_target["msg"];
     if target_name != "" {
-        send_to_player(target_name, target_msg);
+        let payload = "\r\n" + target_msg + "\r\n";
+        for player in get_room_view_players(ob) {
+            if player["name"] == target_name {
+                if player["show_prompt"] {
+                    payload += "\r\n\x1b[0;37;40m[ " + player["hp"].to_string() + "/"
+                        + player["max_hp"].to_string() + ", " + player["mp"].to_string()
+                        + "/" + player["max_mp"].to_string() + " ] ";
+                }
+                break;
+            }
+        }
+        send_raw_to_player(target_name, payload);
     }
 }

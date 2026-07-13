@@ -14,35 +14,29 @@ fn cmd(ob, line) {
         return;
     }
 
-    let target_name = words[0];
+    let target_name = resolve_room_player_name(ob, words[0]);
     let new_position = words[1];
     let own_name = get_string(ob, "이름");
+    if target_name == "" {
+        if selected_room_object_kind(ob, words[0]) != "" {
+            // Python does not call is_player here; a selected ordinary item
+            // reaches the following 소속 comparison.
+            send_line(ob, "☞ 당신의 소속이 아닙니다.");
+        } else {
+            send_line(ob, "☞ 이곳에 그런 무림인이 없습니다.");
+        }
+        return;
+    }
     if target_name == own_name {
         send_line(ob, "☞ 자기 자신입니다.");
         return;
     }
-    let my_location = get_my_position(ob);
-    let target = #{};
-    let online = get_all_online_players();
-    for player in online {
-        if player["이름"].to_string() == target_name
-                && player["투명상태"] != 1
-                && player["zone"].to_string() == my_location["zone"].to_string()
-                && player["room"].to_string() == my_location["room"].to_string() {
-            target = player;
-            break;
-        }
-    }
-    if len(target) == 0 {
-        send_line(ob, "☞ 이곳에 그런 무림인이 없습니다.");
-        return;
-    }
     let guild = get_string(ob, "소속");
-    if target["소속"].to_string() != guild {
+    if get_room_player_attr(ob, target_name, "소속") != guild {
         send_line(ob, "☞ 당신의 소속이 아닙니다.");
         return;
     }
-    let old_position = target["직위"].to_string();
+    let old_position = get_room_player_attr(ob, target_name, "직위").to_string();
     if old_position == new_position {
         send_line(ob, "☞ 같은 직위입니다.");
         return;

@@ -18,10 +18,12 @@ fn cmd(ob, line) {
 
     let tanker = self;
     if line != leader["name"] {
+        let resolved = resolve_room_player_name(ob, line);
         tanker = ();
         for member in ctx["party_members"] {
-            if member["name"] == line { tanker = member; break; }
+            if member["name"] == resolved { tanker = member; break; }
         }
+        if tanker.is_unit() && self["name"] == resolved { tanker = self; }
     }
     if tanker.is_unit() { send_line(ob, "☞ 당신의 무리원이 아니에요."); return; }
 
@@ -33,7 +35,14 @@ fn cmd(ob, line) {
         }
     }
     if fighter.is_unit() { send_line(ob, "☞ 전투중인 무리원이 없어요. ^^"); return; }
-    party_request_set_group_combat_targets(ob, [tanker["id"]], fighter["combat_target_ids"], tanker["id"]);
+    party_request_set_group_combat_targets(
+        ob,
+        [tanker["id"]],
+        fighter["combat_target_ids"],
+        fighter["combat_target_instance_ids"],
+        tanker["id"],
+        false
+    );
 
     let message = "\x1b[1m" + tanker["name"] + "\x1b[0;37m"
         + han_iga(tanker["name"]) + " 무리의 방어로 지정 되었습니다.";

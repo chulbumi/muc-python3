@@ -11,11 +11,11 @@ fn channel_member_prompt(member) {
 
 fn cmd(ob, line) {
     if !is_adult_channel_member(ob) {
-        send_line(ob, "☞ 먼저 채널에 입장하세요.\r\n");
+        send_line(ob, "☞ 먼저 채널에 입장하세요.");
         return;
     }
     if !adult_channel_leave(ob) {
-        send_line(ob, "☞ 먼저 채널에 입장하세요.\r\n");
+        send_line(ob, "☞ 먼저 채널에 입장하세요.");
         return;
     }
 

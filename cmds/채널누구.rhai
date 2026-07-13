@@ -42,7 +42,7 @@ fn cmd(ob, line) {
     send_line(ob, "└─────────────────────────────────────┘");
     send_line(ob, message);
     send_line(ob, " ──────────────────────────────────────");
-    send_line(ob, " ★ 총 " + int_to_str(cnt) + "명의 무림인이 활동하고 있습니다.\r\n");
+    send_line(ob, " ★ 총 " + int_to_str(cnt) + "명의 무림인이 활동하고 있습니다.");
 }
 
 fn main(ob, line) {

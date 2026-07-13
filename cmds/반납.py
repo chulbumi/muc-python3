@@ -5,8 +5,7 @@ from objs.cmd import Command
 class CmdObj(Command):
 
     def cmd(self, ob, line):
-        import pickle
-        import uuid
+        import json
 
         if line == '':
             ob.sendLine('☞ 사용법: [물품] 반납')
@@ -29,8 +28,8 @@ class CmdObj(Command):
             return
 
         try:
-            with open("data/config/book.dat", "rb") as fr:
-                data = pickle.load(fr)
+            with open("data/config/book.json", "r", encoding="utf-8") as fr:
+                data = json.load(fr)
         except:
             ob.sendLine('☞ 반납 가능한 물품이 없습니다.')
             return
@@ -41,19 +40,15 @@ class CmdObj(Command):
 
         for itm in data:
             match = False
-            if type(item['고유번호']) == type(''):
-                if itm['고유번호'] == uuid.UUID(item['고유번호']):
-                    match = True
-            else:
-                if itm['고유번호'] == item['고유번호']:
-                    match = True
+            if str(itm['고유번호']) == str(item['고유번호']):
+                match = True
             if match == True:
                 itm["대여가능"] = True
                 itm["대여"] =''
                 ob.remove(item)
 
-                with open("data/config/book.dat", "wb") as fw:
-                    pickle.dump(data, fw)
+                with open("data/config/book.json", "w", encoding="utf-8") as fw:
+                    json.dump(data, fw, ensure_ascii=False, indent=2)
                 ob.sendLine('☞ 반납이 완료 되었습니다.')
                 return
 

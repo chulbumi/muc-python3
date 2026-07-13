@@ -108,6 +108,36 @@ class MUDHarnessRegressionTests(unittest.TestCase):
 
         self.assertEqual(exit_code, 1)
 
+    def test_quick_comparison_rejects_same_length_but_different_output(self):
+        class Connection:
+            logged_in = True
+            character_name = "비교테스터"
+
+            def __init__(self, output):
+                self.output = output
+
+            def execute_command(self, command, wait_time=1.0):
+                return self.output
+
+        class Runner:
+            def __init__(self):
+                self.py_conn = Connection("파이썬")
+                self.rust_conn = Connection("러스트")
+
+            def _check_servers(self):
+                pass
+
+            def _connect_servers(self):
+                return True
+
+            def _cleanup(self):
+                pass
+
+        with contextlib.redirect_stdout(io.StringIO()):
+            result = mud_test_skill.MUDTestSkill()._run_quick_test(Runner())
+
+        self.assertFalse(result)
+
     def test_standalone_runner_failure_becomes_nonzero_exit(self):
         class FailingRunner:
             def __init__(self, config):

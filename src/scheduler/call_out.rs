@@ -207,7 +207,7 @@ pub struct CallOutScheduler {
     /// Resolution for checking due tasks
     _resolution: Duration,
     /// Optional runner to execute Rhai script functions when task.script is Some
-    script_runner: Option<Arc<ScriptRunnerFn>>,
+    script_runner: RwLock<Option<Arc<ScriptRunnerFn>>>,
 }
 
 impl CallOutScheduler {
@@ -221,8 +221,15 @@ impl CallOutScheduler {
             registry: Arc::new(RwLock::new(CallOutRegistry::new())),
             _broadcaster: broadcaster,
             _resolution: resolution,
-            script_runner,
+            script_runner: RwLock::new(script_runner),
         }
+    }
+
+    /// Install the script runner after the scheduler has been wrapped in an
+    /// Arc. This lets delayed Rhai callbacks schedule their own follow-up
+    /// call_outs, matching Twisted's nested reactor.callLater calls.
+    pub fn set_script_runner(&self, runner: Arc<ScriptRunnerFn>) {
+        *self.script_runner.write() = Some(runner);
     }
 
     /// Create with default resolution (100ms), no script runner
@@ -389,7 +396,8 @@ impl CallOutScheduler {
         debug!("Executing call_out: {}::{}", task.target, task.function);
 
         // Rhai 스크립트 함수: script_runner로 호출 (점프_착지 등 스크립트에 정의된 함수)
-        if let (Some(ref run), Some(ref script)) = (&self.script_runner, &task.script) {
+        let runner = self.script_runner.read().clone();
+        if let (Some(run), Some(ref script)) = (runner, &task.script) {
             match run(
                 &task.target,
                 Some(script.as_str()),

@@ -596,6 +596,15 @@ pub(crate) fn immediate_exit_destinations(zone: &str, room: &str) -> Vec<(String
 /// ordering and explicit reverse-direction markers.  The command script only
 /// formats the returned direction list.
 pub(crate) fn python_map_explore(body: &Body, excluded: &str) -> Array {
+    let mut rng = rand::thread_rng();
+    python_map_explore_with_roller(body, excluded, &mut |length| rng.gen_range(0..length))
+}
+
+pub(crate) fn python_map_explore_with_roller(
+    body: &Body,
+    excluded: &str,
+    roller: &mut impl FnMut(usize) -> usize,
+) -> Array {
     let Some((zone, start)) = current_body_position(body) else {
         return Array::new();
     };
@@ -612,10 +621,19 @@ pub(crate) fn python_map_explore(body: &Body, excluded: &str) -> Array {
         };
         let mut edges = Vec::new();
         for exit in accessible_exits(&info) {
+            // Python explorer iterates Room.exitList, where hidden directions
+            // still carry their trailing `$` and therefore never equal one of
+            // the eight accepted compass names.
+            if exit.hidden {
+                continue;
+            }
             if !compass.contains(&exit.name.as_str()) {
                 continue;
             }
-            let Some(destination) = exit.destinations.first() else {
+            let Some(destination) = exit
+                .destinations
+                .get(roller(exit.destinations.len()).min(exit.destinations.len() - 1))
+            else {
                 continue;
             };
             let Some((dest_zone, dest_room)) = resolve_exit_destination(&zone, &info, destination)
@@ -1007,6 +1025,19 @@ fn python_map_mark(
 }
 
 pub(crate) fn python_map_text(zone: &str, room: &str) -> String {
+    let Some(info) = room_info(zone, room) else {
+        return String::new();
+    };
+    // Python 지도.cmd는 재귀 표식을 시작하기 전에 exitList에서 `$`로
+    // 끝나는 숨김 출구를 제외해 하나라도 남는지 검사한다.
+    let has_visible_exit = json_strings(info.get("출구")).into_iter().any(|line| {
+        line.split_whitespace()
+            .next()
+            .is_some_and(|name| !name.ends_with('$'))
+    });
+    if !has_visible_exit {
+        return String::new();
+    }
     let mut grid = vec!["  ".to_string(); 132];
     let mut visited = HashSet::new();
     python_map_mark(zone, room, 60, &mut grid, &mut visited);

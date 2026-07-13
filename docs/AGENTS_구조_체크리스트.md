@@ -33,7 +33,7 @@
 | Scheduler | `src/scheduler/` | `CallOutScheduler`, `HeartBeatRegistry` (레지스트리만, **실행 미연동**) |
 | Script 엔진 | `src/script/mod.rs` | Rhai Engine, efun 등록, `ScriptStorage`, `load_script_file` (data/script 텍스트) |
 | World | `src/world/` | Room, Mob cache/instance, **event.rs**(이벤트/autoscript **Rust 파서**) |
-| Master | `src/master/mod.rs` | create/reset/init 등 **스텁** (Mudlib 호출 미구현) |
+| Master | `src/master/mod.rs` | `cmds/master.rhai` apply 호출 및 반환형 검증 |
 
 ### 2.2 게임라이브러리(Mudlib) + Rhai
 
@@ -81,8 +81,8 @@
 | 항목 | 현재 | 전환 방향 |
 |------|------|-----------|
 | **위치** | `src/scheduler/heart_beat.rs`, `src/master/mod.rs` | |
-| **heart_beat** | `HeartBeatRegistry`에 등록만 하고, `process_object()`는 `has_script(object_id)` 체크 후 **Rhai `heart_beat()` 호출 안 함**. `GameLoop`에서 `HeartBeatManager.process_all()` **호출 없음** | 1) GameLoop에서 `process_all()` 호출 2) 몹/오브젝트별 `heart_beat.rhai` 또는 `lib/std/mob.rhai`의 `heart_beat()`를 **실제로** 실행 |
-| **create/reset/init** | `Master::create`, `Master::reset`, `Master::init` — scope에 인자만 넣고 **Mudlib 쪽 함수 호출 미구현** | 오브젝트 생성/리셋/접촉 시 `lib/std/mob.rhai`, `room.rhai` 등의 `create()`, `reset()`, `init()`를 Rhai로 호출 |
+| **heart_beat** | `HeartBeatRegistry.process_object()`가 등록된 Rhai 스크립트의 `heart_beat()`를 호출한다. GameLoop 전역 wiring은 별도 검증 대상 | 등록 주체와 GameLoop 호출 시점을 실제 서버에서 추가 검증 |
+| **create/reset/init** | `Master::create`, `Master::reset`, `Master::init`가 `cmds/master.rhai` apply를 호출하고 반환값을 검증 | 객체별 `lib/std/*.rhai` 호출은 객체 lifecycle wiring의 후속 범위 |
 
 ### 3.5 몹 부가 스크립트 (RawMobData 필드)
 
@@ -121,19 +121,19 @@
 | **몹 이벤트** | — | `world/event.rs` `do_event` ($출력, $위치이동, $이벤트확인, $아이템주기, $스크립트호출 등) |
 | **초기도우미** | — | `network/client.rs` doumi $줄, $틱, $키입력, $이름/암호/성별획득 |
 | **Autoscript** | — | `world/event.rs` `run_autoscript_chunk` ($아이템확인, $옵션확인, $무기강화, $아이템삭제 등) |
-| **몹 heart_beat** | lib/std/mob.rhai 스켈레톤 | `HeartBeatRegistry.process_object`가 Rhai 호출 안 함, GameLoop 연동 없음 |
-| **create/reset/init** | lib/std/*.rhai 스켈레톤 | `Master::create/reset/init`가 Mudlib 호출 안 함 |
+| **몹 heart_beat** | 등록된 Rhai 스크립트 | Registry가 `heart_beat()` 호출. 몹 자동 등록 및 GameLoop wiring은 미완료 |
+| **create/reset/init** | `cmds/master.rhai` apply | Master apply 호출 완료. 객체별 `lib/std` lifecycle wiring은 미완료 |
 
 ---
 
 ## 6. 권장 조치 (우선순위)
 
-1. **Master apply와 lib/std 연동**  
-   - `create`, `reset`, `init`에서 오브젝트 타입별 `lib/std/*.rhai`의 `create()`, `reset()`, `init()`를 Rhai로 호출.
+1. **객체 lifecycle과 lib/std 연동**
+   - Master apply 호출은 연결되었으므로, 오브젝트 타입별 `lib/std/*.rhai`의 `create()`, `reset()`, `init()`를 실제 객체 생성 시점에 연결.
 
 2. **Heart beat 실제 동작**  
    - GameLoop에서 `HeartBeatManager.process_all()` 호출.  
-   - `process_object`에서 해당 오브젝트의 `heart_beat()` Rhai 함수 실행.  
+   - `process_object`의 스크립트 호출은 연결되었으므로, GameLoop에서 manager를 실제 호출.
    - 몹 스폰/리젠 시 `set_heart_beat(true)` 등으로 등록.
 
 3. **몹 이벤트의 Rhai 전환**  

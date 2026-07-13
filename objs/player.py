@@ -32,6 +32,7 @@ from include.define import *
 from lib.hangul import *
 from lib.loader import load_script, save_script
 from lib.func import *
+from lib.password import hash_password, is_bcrypt, verify_password
 
 from client import queue
 
@@ -1211,7 +1212,7 @@ class Player(Body):
         return True
 
     def get_oldpass(self, line, *args):
-        if line.strip() != str(self['암호']):
+        if not verify_password(self['암호'], line.strip()):
             self.sendLine('☞ 현재의 암호가 맞지 않아요. ^^')
             self.INTERACTIVE = 1
             self.input_to(self.parse_command)
@@ -1230,14 +1231,15 @@ class Player(Body):
             self.INTERACTIVE = 1
             self.input_to(self.parse_command)
             return
-        self['암호'] = line
+        self['암호'] = hash_password(line)
+        self.save(False)
         self.write('☞ 암호가 변경되었습니다.')
         self.INTERACTIVE = 1
         self.input_to(self.parse_command)
         
     def get_pass(self, line, *args):
         self.loginRetry += 1
-        if len(line) == 0 or str(self.get('암호')) != line:
+        if len(line) == 0 or not verify_password(self.get('암호'), line):
             if self.loginRetry >= 3:
                 self.write('\r\n')
                 self.channel.transport.loseConnection()
@@ -1245,6 +1247,9 @@ class Player(Body):
             self.write('잘못된 암호 입니다.\r\n존함암호ː')
             return
         del self.loginRetry
+        if not is_bcrypt(self.get('암호')):
+            self.set('암호', hash_password(line))
+            self.save(False)
 
         from client import Client
         for p in Client.players:
@@ -1300,15 +1305,17 @@ class Player(Body):
         if len(line) < 3:
             self.write('\r\n☞ 3자 이상 입력하세요.\r\n존함암호ː')
             return
-        self.set('암호', line)
+        self._new_password = line
         self.write('\r\n암호확인ː')
         self.input_to(self.getNewpass2)
 
     def getNewpass2(self, line, *args):
-        if line != self.get('암호'):
+        if line != self._new_password:
             self.write('\r\n☞ 존함의 암호가 일치하지 않는군요.\r\n존함암호ː')
             self.input_to(self.getNewpass)
             return
+        self.set('암호', hash_password(self._new_password))
+        del self._new_password
         self.input_to(self.doNothing)
         self.autoscript.run()
         #self.write('\r\n노인이 말합니다. "그런데 그아이는 남자인가? 여자인가?"\r\n성별(남/여)ː')
@@ -2505,4 +2512,3 @@ def init_commands():
         cmdClass = locals()['CmdObj']
         cmdName =  split(script)[-1][:-3]
         cmdList[cmdName] = cmdClass()
-

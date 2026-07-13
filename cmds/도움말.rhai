@@ -3,7 +3,8 @@
 
 fn cmd(ob, line) {
     // Python indexes HELP with the non-empty argument exactly as received.
-    let topic = if is_empty(line) { "도움말" } else { line };
+    let normalized = trim(line);
+    let topic = if normalized == "" { "도움말" } else { normalized };
     let txt = get_help(topic);
     if length(txt) > 0 {
         send_line(ob, txt);

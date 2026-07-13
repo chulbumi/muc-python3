@@ -9,8 +9,8 @@
 pub mod processor;
 
 pub use processor::{
-    apply_skill_effects, calculate_mob_damage, calculate_player_damage, calculate_skill_damage,
-    calculate_skill_damage_against, check_hit, find_mob_in_room, process_mob_strike,
-    process_player_attack, process_player_strike, start_combat, CombatAction, CombatRound,
-    SkillDamageResult, SkillEffectResult, SkillEffectType,
+    apply_skill_effects, calculate_mob_damage, calculate_player_damage, calculate_pvp_damage,
+    calculate_pvp_skill_damage, calculate_skill_damage, calculate_skill_damage_against, check_hit,
+    find_mob_in_room, process_mob_strike, process_player_attack, process_player_strike,
+    start_combat, CombatAction, CombatRound, SkillDamageResult, SkillEffectResult, SkillEffectType,
 };

@@ -2,7 +2,7 @@
 //!
 //! Run with: cargo run --example test_loader
 
-use muc_engine::loader::{load_json, load_script, save_json, ScriptValue, ScriptValueInner};
+use muc_engine::loader::{load_json, load_script, save_json, ScriptValueInner};
 use std::collections::HashMap;
 
 #[tokio::main]

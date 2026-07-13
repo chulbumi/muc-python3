@@ -11,7 +11,6 @@ fn cmd(ob, line) {
         let gid = ids[i];
         let n = guild_get(gid, "이름");
         let leader = guild_get(gid, "방주이름");
-        if leader == "" { leader = guild_get(gid, "방주리스트"); }
         let guild_name = if length(n) > 0 { n } else { gid };
         let buf = "[" + guild_name + "]";
         let buf_pad = buf + repeat(" ", if length(buf) < 12 { 12 - length(buf) } else { 0 });

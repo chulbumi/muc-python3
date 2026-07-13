@@ -11,7 +11,9 @@ fn cmd(ob, line) {
         send_line(ob, "☞ 사용법: [대상] [키] [값] 옵설정");
         return;
     }
-    let result = set_inventory_option(ob, words[0], words[1], to_int(words[2]));
+    let parsed = strict_int(words[2]);
+    if !parsed["valid"] { return; }
+    let result = set_inventory_option(ob, words[0], words[1], parsed["value"]);
     if result == "ok" { send_line(ob, "☞ 설정되었습니다."); }
     else { send_line(ob, "☞ 그런 아이템이 소지품에 없어요."); }
 }

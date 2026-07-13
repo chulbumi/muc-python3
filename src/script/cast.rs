@@ -4,7 +4,7 @@
 //! runtime objects and applies the state transitions performed by
 //! `cmds/시전.py`.
 
-use super::{current_body_position, parse_config_string, reaction_names};
+use super::{current_body_position, reaction_names};
 use crate::object::Value;
 use crate::player::{ActState, ActiveSkill, Body, SkillTraining};
 use crate::world::skill::Skill;
@@ -21,12 +21,21 @@ use std::cell::RefCell;
 #[derive(Clone, Copy)]
 pub(crate) struct CastRoomPlayerRef {
     body: *mut Body,
+    interactive: i32,
 }
 
 impl CastRoomPlayerRef {
     pub(crate) fn new(body: &mut Body) -> Self {
         Self {
             body: body as *mut Body,
+            interactive: 1,
+        }
+    }
+
+    pub(crate) fn new_with_interactive(body: &mut Body, interactive: i32) -> Self {
+        Self {
+            body: body as *mut Body,
+            interactive,
         }
     }
 }
@@ -47,6 +56,21 @@ fn other_player_refs() -> Vec<CastRoomPlayerRef> {
     CAST_ROOM_PLAYERS
         .with(|cell| cell.borrow().clone())
         .unwrap_or_default()
+}
+
+pub(super) fn with_room_player_body_mut<R>(
+    name: &str,
+    visit: impl FnOnce(&mut Body) -> R,
+) -> Option<R> {
+    for player_ref in other_player_refs() {
+        // SAFETY: refs are installed only while the clients mutex is held and
+        // never include the command actor.
+        let player = unsafe { &mut *player_ref.body };
+        if player.get_name() == name {
+            return Some(visit(player));
+        }
+    }
+    None
 }
 
 /// Snapshot one live player from the already-scoped same-room command
@@ -114,6 +138,19 @@ fn player_target_names(body: &Body) -> Vec<String> {
         }
     }
     names
+}
+
+fn target_instance_ids(body: &Body) -> Vec<u64> {
+    body.temp()
+        .get("_combat_target_instance_ids")
+        .and_then(Value::as_str)
+        .map(|value| {
+            value
+                .split('\n')
+                .filter_map(|entry| entry.parse::<u64>().ok())
+                .collect()
+        })
+        .unwrap_or_default()
 }
 
 fn leading_order(value: &str) -> i64 {
@@ -196,13 +233,25 @@ fn mob_matches(
 }
 
 fn item_matches(item: &crate::object::Object, query: &str) -> bool {
+    let (exact, prefixes) = item_match_counts(item, query);
+    exact || prefixes > 0
+}
+
+fn item_match_counts(item: &crate::object::Object, query: &str) -> (bool, i64) {
     if item.getInt("투명상태") == 1 {
-        return false;
+        return (false, 0);
     }
     let reactions = reaction_names(&item.getString("반응이름"));
-    item.getName() == query
-        || reactions.iter().any(|alias| alias == query)
-        || reactions.iter().any(|alias| alias.starts_with(query))
+    let exact = item.getName() == query || reactions.iter().any(|alias| alias == query);
+    let prefixes = if exact {
+        0
+    } else {
+        reactions
+            .iter()
+            .filter(|alias| alias.starts_with(query))
+            .count() as i64
+    };
+    (exact, prefixes)
 }
 
 fn string_array(values: impl IntoIterator<Item = String>) -> rhai::Array {
@@ -216,6 +265,7 @@ fn body_target_map(body: &Body, id: &str, current_ids: &[String]) -> Map {
     map.insert("name".into(), Dynamic::from(body.get_name()));
     map.insert("act".into(), Dynamic::from(body.act.to_i32() as i64));
     map.insert("mob_type".into(), Dynamic::from(0i64));
+    map.insert("instance_id".into(), Dynamic::from(0_i64));
     map.insert(
         "targets".into(),
         Dynamic::from(string_array(player_target_names(body))),
@@ -230,7 +280,7 @@ fn body_target_map(body: &Body, id: &str, current_ids: &[String]) -> Map {
 fn mob_target_map(
     instance: &MobInstance,
     data: &crate::world::RawMobData,
-    current_ids: &[String],
+    current_instance_ids: &[u64],
     room_index: usize,
 ) -> Map {
     let mut map = Map::new();
@@ -243,6 +293,18 @@ fn mob_target_map(
     map.insert("name".into(), Dynamic::from(instance.name.clone()));
     map.insert("act".into(), Dynamic::from(instance.act as i64));
     map.insert("mob_type".into(), Dynamic::from(data.mob_type));
+    let attack_forbidden = data
+        .attributes
+        .get("공격금지")
+        .is_some_and(|value| match value {
+            serde_json::Value::Null => false,
+            serde_json::Value::Bool(value) => *value,
+            serde_json::Value::Number(value) => value.as_f64() != Some(0.0),
+            serde_json::Value::String(value) => !value.is_empty(),
+            serde_json::Value::Array(value) => !value.is_empty(),
+            serde_json::Value::Object(value) => !value.is_empty(),
+        });
+    map.insert("attack_forbidden".into(), Dynamic::from(attack_forbidden));
     map.insert("room_index".into(), Dynamic::from(room_index as i64));
     map.insert(
         "targets".into(),
@@ -250,10 +312,7 @@ fn mob_target_map(
     );
     map.insert(
         "current".into(),
-        Dynamic::from(
-            current_ids.iter().any(|entry| entry == &instance.mob_key)
-                || current_ids.iter().any(|entry| entry == &instance.name),
-        ),
+        Dynamic::from(current_instance_ids.contains(&instance.instance_id)),
     );
     map
 }
@@ -272,7 +331,13 @@ pub(super) fn find_cast_target(caster: &Body, query: &str) -> Dynamic {
     if name.is_empty() {
         return Dynamic::UNIT;
     }
-    let current_ids = target_ids(caster);
+    let mut current_ids = target_ids(caster);
+    if let Some(target) = super::combat_commands::pvp_target(caster) {
+        if !current_ids.contains(&target) {
+            current_ids.push(target);
+        }
+    }
+    let current_instance_ids = target_instance_ids(caster);
     let (zone, room) = match current_body_position(caster) {
         Some(position) => position,
         None => return Dynamic::UNIT,
@@ -309,7 +374,7 @@ pub(super) fn find_cast_target(caster: &Body, query: &str) -> Dynamic {
             }
             count += 1;
             if count == order {
-                return Dynamic::from(mob_target_map(mob, data, &current_ids, room_index));
+                return Dynamic::from(mob_target_map(mob, data, &current_instance_ids, room_index));
             }
         }
         return Dynamic::UNIT;
@@ -323,6 +388,18 @@ pub(super) fn find_cast_target(caster: &Body, query: &str) -> Dynamic {
     if !ordered_objects.is_empty() {
         let mobs = world.mob_cache.get_all_mobs_in_room(&zone, &room);
         let floor_items = world.get_room_objs(&zone, &room);
+        let mut exact_count = 0i64;
+        let mut prefix_count = 0i64;
+        let mut reaches_order = |exact: bool, prefixes: i64| {
+            if exact {
+                exact_count += 1;
+                exact_count == order
+            } else {
+                let previous = prefix_count;
+                prefix_count += prefixes;
+                previous < order && order <= prefix_count
+            }
+        };
         for object in ordered_objects {
             match object {
                 RoomObjectRef::Mob(instance_id) => {
@@ -341,8 +418,13 @@ pub(super) fn find_cast_target(caster: &Body, query: &str) -> Dynamic {
                         continue;
                     }
                     let matches = mob_matches(mob, data, &name);
-                    if matches.0 || matches.1 > 0 {
-                        return Dynamic::from(mob_target_map(mob, data, &current_ids, room_index));
+                    if reaches_order(matches.0, matches.1) {
+                        return Dynamic::from(mob_target_map(
+                            mob,
+                            data,
+                            &current_instance_ids,
+                            room_index,
+                        ));
                     }
                 }
                 RoomObjectRef::FloorItem(pointer) => {
@@ -353,7 +435,8 @@ pub(super) fn find_cast_target(caster: &Body, query: &str) -> Dynamic {
                         continue;
                     };
                     if let Ok(item) = item.lock() {
-                        if item_matches(&item, &name) {
+                        let matches = item_match_counts(&item, &name);
+                        if reaches_order(matches.0, matches.1) {
                             return Dynamic::UNIT;
                         }
                     }
@@ -379,7 +462,7 @@ pub(super) fn find_cast_target(caster: &Body, query: &str) -> Dynamic {
                     }
                     let (exact, prefix_count) = player_matches(player, &name);
                     let corpse_match = name == "시체" && player.act == ActState::Death;
-                    if corpse_match || exact || prefix_count > 0 {
+                    if reaches_order(corpse_match || exact, prefix_count) {
                         return Dynamic::from(body_target_map(
                             player,
                             &player.get_name(),
@@ -388,10 +471,7 @@ pub(super) fn find_cast_target(caster: &Body, query: &str) -> Dynamic {
                     }
                 }
                 RoomObjectRef::SummonedUser(id) => {
-                    let Some(user) = world
-                        .summoned_users()
-                        .iter()
-                        .find(|user| user.id == id)
+                    let Some(user) = world.summoned_users().iter().find(|user| user.id == id)
                     else {
                         continue;
                     };
@@ -400,7 +480,7 @@ pub(super) fn find_cast_target(caster: &Body, query: &str) -> Dynamic {
                     }
                     let (exact, prefix_count) = player_matches(&user.body, &name);
                     let corpse_match = name == "시체" && user.body.act == ActState::Death;
-                    if corpse_match || exact || prefix_count > 0 {
+                    if reaches_order(corpse_match || exact, prefix_count) {
                         return Dynamic::from(body_target_map(
                             &user.body,
                             &user.body.get_name(),
@@ -417,12 +497,30 @@ pub(super) fn find_cast_target(caster: &Body, query: &str) -> Dynamic {
                         continue;
                     };
                     if let Ok(box_value) = box_object.lock() {
-                        if item_matches(&box_value, &name) {
+                        let matches = item_match_counts(&box_value, &name);
+                        if reaches_order(matches.0, matches.1) {
                             return Dynamic::UNIT;
                         }
                     };
                 }
-                RoomObjectRef::Box(_) => {}
+                RoomObjectRef::Box(pointer) => {
+                    let Some(boxes) = super::box_commands::installed_boxes_for_room(&zone, &room)
+                    else {
+                        continue;
+                    };
+                    let Some(box_object) = boxes
+                        .iter()
+                        .find(|object| std::sync::Arc::as_ptr(object) as usize == pointer)
+                    else {
+                        continue;
+                    };
+                    if let Ok(box_value) = box_object.lock() {
+                        let matches = item_match_counts(&box_value, &name);
+                        if reaches_order(matches.0, matches.1) {
+                            return Dynamic::UNIT;
+                        }
+                    };
+                }
             }
         }
     }
@@ -450,14 +548,14 @@ pub(super) fn find_cast_target(caster: &Body, query: &str) -> Dynamic {
             mob_matched = true;
             mob_exact_count += 1;
             if mob_result.is_none() && mob_exact_count == order {
-                mob_result = Some(mob_target_map(mob, data, &current_ids, room_index));
+                mob_result = Some(mob_target_map(mob, data, &current_instance_ids, room_index));
             }
         } else if prefix_count > 0 {
             mob_matched = true;
             let previous = mob_prefix_count;
             mob_prefix_count += prefix_count;
             if mob_result.is_none() && previous < order && order <= mob_prefix_count {
-                mob_result = Some(mob_target_map(mob, data, &current_ids, room_index));
+                mob_result = Some(mob_target_map(mob, data, &current_instance_ids, room_index));
             }
         }
     }
@@ -541,6 +639,7 @@ pub(super) fn find_cast_target(caster: &Body, query: &str) -> Dynamic {
 
 fn current_cast_target(caster: &Body) -> Dynamic {
     let ids = target_ids(caster);
+    let instance_ids = target_instance_ids(caster);
     let Some(id) = ids.first() else {
         return Dynamic::UNIT;
     };
@@ -555,10 +654,16 @@ fn current_cast_target(caster: &Body) -> Dynamic {
             .iter()
             .enumerate()
         {
-            if (&mob.mob_key == id || &mob.name == id) && mob.alive && mob.act != 2 && mob.act != 3
+            if (instance_ids
+                .first()
+                .is_some_and(|instance_id| *instance_id == mob.instance_id)
+                || (instance_ids.is_empty() && (&mob.mob_key == id || &mob.name == id)))
+                && mob.alive
+                && mob.act != 2
+                && mob.act != 3
             {
                 if let Some(data) = world.mob_cache.get_mob(&mob.mob_key) {
-                    return Dynamic::from(mob_target_map(mob, data, &ids, room_index));
+                    return Dynamic::from(mob_target_map(mob, data, &instance_ids, room_index));
                 }
             }
         }
@@ -1049,12 +1154,63 @@ fn combat_start_event(instance: &MobInstance, data: &crate::world::RawMobData) -
     Dynamic::from(event)
 }
 
-fn apply_combat(caster: &mut Body, skill_name: &str, target_id: &str) -> Map {
+fn apply_combat(
+    caster: &mut Body,
+    skill_name: &str,
+    target_id: &str,
+    target_instance_id: i64,
+) -> Map {
     let Some(skill) = get_skill(skill_name) else {
         return base_result("missing_skill");
     };
     if caster.skill.is_some() {
         return base_result("busy");
+    }
+    if let Some(result) = with_room_player_body_mut(target_id, |target| {
+        if target.act == ActState::Death || target.get_int("투명상태") == 1 {
+            return base_result("missing_target");
+        }
+        if super::combat_commands::pvp_target(target).is_some_and(|name| name != caster.get_name())
+            || !target_ids(target).is_empty()
+        {
+            return base_result("target_busy");
+        }
+        if let Err(status) = check_and_pay_cost(caster, &skill) {
+            return base_result(status);
+        }
+        let caster_was_stand = caster.act == ActState::Stand;
+        let target_was_stand = target.act == ActState::Stand;
+        let new_target = super::combat_commands::pvp_target(caster).as_deref() != Some(target_id);
+        caster.get_skill(skill_name);
+        for key in ["_skill_end", "_skill_step", "_skill_turn"] {
+            caster.temp_mut().insert(key.to_string(), Value::Int(0));
+        }
+        caster.set("힘경험치", caster.get_int("힘경험치") + skill.bonus);
+        caster.temp_mut().insert(
+            super::combat_commands::PVP_TARGET.to_string(),
+            Value::String(target_id.to_string()),
+        );
+        target.temp_mut().insert(
+            super::combat_commands::PVP_TARGET.to_string(),
+            Value::String(caster.get_name()),
+        );
+        caster.act = ActState::Fight;
+        target.act = ActState::Fight;
+        if new_target {
+            caster.dex = 0;
+            target.dex = 0;
+        }
+        let mut result = base_result("ok");
+        result.insert("new_target".into(), Dynamic::from(new_target));
+        result.insert("caster_was_stand".into(), Dynamic::from(caster_was_stand));
+        result.insert("target_was_stand".into(), Dynamic::from(target_was_stand));
+        result.insert("target_name".into(), Dynamic::from(target_id.to_string()));
+        result.insert("target_start".into(), Dynamic::from(String::new()));
+        result.insert("linked".into(), Dynamic::from(rhai::Array::new()));
+        result.insert("advance".into(), Dynamic::from(caster.get_dex() >= 4200));
+        result
+    }) {
+        return result;
     }
     let Some((zone, room)) = current_body_position(caster) else {
         return base_result("missing_target");
@@ -1077,10 +1233,14 @@ fn apply_combat(caster: &mut Body, skill_name: &str, target_id: &str) -> Map {
     let Some(instances) = world.mob_cache.get_all_mobs_in_room_mut(&zone, &room) else {
         return base_result("missing_target");
     };
-    let Some(target_index) = instances
-        .iter()
-        .position(|mob| mob.mob_key == target_id && mob.alive)
-    else {
+    let Some(target_index) = instances.iter().position(|mob| {
+        mob.alive
+            && if target_instance_id > 0 {
+                mob.instance_id == target_instance_id as u64
+            } else {
+                mob.mob_key == target_id
+            }
+    }) else {
         return base_result("missing_target");
     };
     if let Err(status) = check_and_pay_cost(caster, &skill) {
@@ -1089,9 +1249,8 @@ fn apply_combat(caster: &mut Body, skill_name: &str, target_id: &str) -> Map {
 
     let caster_was_stand = caster.act == ActState::Stand;
     let target_was_stand = instances[target_index].act == 0;
-    let new_target = !target_ids(caster)
-        .iter()
-        .any(|id| id == target_id || id == &instances[target_index].name);
+    let selected_instance_id = instances[target_index].instance_id;
+    let new_target = !target_instance_ids(caster).contains(&selected_instance_id);
 
     caster.get_skill(skill_name);
     for key in ["_skill_end", "_skill_step", "_skill_turn"] {
@@ -1107,6 +1266,7 @@ fn apply_combat(caster: &mut Body, skill_name: &str, target_id: &str) -> Map {
     let mut linked_events = rhai::Array::new();
     if new_target {
         add_target_id(caster, target_id);
+        super::combat_commands::add_target_instance_id(caster, selected_instance_id);
         caster.temp_mut().insert(
             "_attack_target_key".to_string(),
             Value::String(target_id.to_string()),
@@ -1135,6 +1295,7 @@ fn apply_combat(caster: &mut Body, skill_name: &str, target_id: &str) -> Map {
                 continue;
             }
             add_target_id(caster, &mob.mob_key);
+            super::combat_commands::add_target_instance_id(caster, mob.instance_id);
             if !mob.targets.iter().any(|name| name == &caster.get_name()) {
                 mob.targets.push(caster.get_name());
             }
@@ -1198,10 +1359,12 @@ fn cast_room_players(caster: &Body) -> rhai::Array {
     own.insert("name".into(), Dynamic::from(caster.get_name()));
     own.insert(
         "reject_fight".into(),
-        Dynamic::from(
-            parse_config_string(&caster.get_string("설정상태")).contains_key("타인전투출력거부"),
-        ),
+        Dynamic::from(super::config_is_enabled(
+            &caster.get_string("설정상태"),
+            "타인전투출력거부",
+        )),
     );
+    own.insert("show_prompt".into(), Dynamic::from(false));
     players.push(Dynamic::from(own));
     for player_ref in other_player_refs() {
         let player = unsafe { &*player_ref.body };
@@ -1209,39 +1372,29 @@ fn cast_room_players(caster: &Body) -> rhai::Array {
         map.insert("name".into(), Dynamic::from(player.get_name()));
         map.insert(
             "reject_fight".into(),
+            Dynamic::from(super::config_is_enabled(
+                &player.get_string("설정상태"),
+                "타인전투출력거부",
+            )),
+        );
+        map.insert(
+            "show_prompt".into(),
             Dynamic::from(
-                parse_config_string(&player.get_string("설정상태"))
-                    .contains_key("타인전투출력거부"),
+                player_ref.interactive == 1
+                    && !super::config_is_enabled(&player.get_string("설정상태"), "엘피출력"),
             ),
         );
+        map.insert("hp".into(), Dynamic::from(player.get_hp()));
+        map.insert("max_hp".into(), Dynamic::from(player.get_max_hp()));
+        map.insert("mp".into(), Dynamic::from(player.get_mp()));
+        map.insert("max_mp".into(), Dynamic::from(player.get_max_mp()));
         players.push(Dynamic::from(map));
     }
     players
 }
 
 fn cast_room_has_attr(caster: &Body, key: &str) -> bool {
-    let Some((zone, room)) = current_body_position(caster) else {
-        return false;
-    };
-    let Ok(world) = get_world_state().read() else {
-        return false;
-    };
-    if world
-        .room_attrs
-        .get(&format!("{}:{}", zone, room))
-        .is_some_and(|attrs| attrs.contains_key(key))
-    {
-        return true;
-    }
-    world
-        .room_cache
-        .get_room_cached(&zone, &room)
-        .and_then(|room| {
-            room.read()
-                .ok()
-                .map(|room| room.properties.iter().any(|property| property == key))
-        })
-        .unwrap_or(false)
+    super::combat_commands::room_has_attr(caster, key)
 }
 
 pub(super) fn register_cast_efuns(engine: &mut Engine, body_ptr: *mut Body) {
@@ -1273,8 +1426,8 @@ pub(super) fn register_cast_efuns(engine: &mut Engine, body_ptr: *mut Body) {
     let ptr = body_ptr;
     engine.register_fn(
         "cast_apply_combat",
-        move |_ob: &mut Map, skill: &str, target_id: &str| -> Map {
-            apply_combat(unsafe { &mut *ptr }, skill, target_id)
+        move |_ob: &mut Map, skill: &str, target_id: &str, instance_id: i64| -> Map {
+            apply_combat(unsafe { &mut *ptr }, skill, target_id, instance_id)
         },
     );
     let ptr = body_ptr;
@@ -1459,6 +1612,59 @@ mod tests {
     }
 
     #[test]
+    fn named_target_honors_runtime_box_and_mob_integrated_order() {
+        let caster_name = "시전상자순서시전자";
+        let zone = "시전상자순서존";
+        let room = "1";
+        let (mob_name, mob_id) = {
+            let mut world = get_world_state().write().unwrap();
+            let data = world
+                .mob_cache
+                .load_mob("절강성", "7")
+                .expect("repository mob fixture");
+            let mob = MobInstance::new(
+                "절강성:7".to_string(),
+                zone.to_string(),
+                room,
+                &data,
+            );
+            let id = mob.instance_id;
+            world.mob_cache.add_mob_instance(mob);
+            world.record_test_room_object(zone, room, RoomObjectRef::Mob(id));
+            world.set_player_position(
+                caster_name,
+                PlayerPosition::new(zone.to_string(), room.to_string()),
+            );
+            (data.name, id)
+        };
+        let runtime_box = std::sync::Arc::new(std::sync::Mutex::new(
+            crate::object::Object::new(),
+        ));
+        runtime_box.lock().unwrap().set("이름", mob_name.as_str());
+        super::super::box_commands::register_installed_box(zone, room, runtime_box);
+        let mut caster = Body::new();
+        caster.set("이름", caster_name);
+
+        assert!(
+            find_cast_target(&caster, &mob_name).is_unit(),
+            "Python selects the newer same-name runtime Box before 시전 checks target type"
+        );
+        get_world_state().write().unwrap().record_test_room_object(
+            zone,
+            room,
+            RoomObjectRef::Mob(mob_id),
+        );
+        let selected = find_cast_target(&caster, &mob_name).cast::<Map>();
+        assert_eq!(selected["kind"].clone().into_string().unwrap(), "mob");
+        assert_eq!(selected["instance_id"].as_int().unwrap(), mob_id as i64);
+
+        get_world_state()
+            .write()
+            .unwrap()
+            .remove_player_position(caster_name);
+    }
+
+    #[test]
     fn named_target_uses_only_provable_single_type_order() {
         let caster_name = "시전단일종류시전자";
         let zone = "시전단일종류검사존";
@@ -1605,12 +1811,24 @@ mod tests {
         let observer_name = "출력거부관전자";
         let mut target = Body::new();
         target.set("이름", target_name);
+        target.set("체력", 321_i64);
+        target.set("최고체력", 456_i64);
+        target.set("내공", 12_i64);
+        target.set("최고내공", 34_i64);
         let mut observer = Body::new();
         observer.set("이름", observer_name);
         observer.set("설정상태", "타인전투출력거부 1");
+        let mut accepting_observer = Body::new();
+        accepting_observer.set("이름", "시전관전자");
+        accepting_observer.set("설정상태", "타인전투출력거부 0");
+        accepting_observer.set("체력", 77_i64);
+        accepting_observer.set("최고체력", 88_i64);
+        accepting_observer.set("내공", 5_i64);
+        accepting_observer.set("최고내공", 6_i64);
         set_cast_room_players(vec![
             CastRoomPlayerRef::new(&mut target),
             CastRoomPlayerRef::new(&mut observer),
+            CastRoomPlayerRef::new(&mut accepting_observer),
         ]);
         {
             let mut world = get_world_state().write().unwrap();
@@ -1639,14 +1857,21 @@ mod tests {
         assert_eq!(target.active_skills[0].name, "무극강기");
         assert_eq!(output.len(), 1);
         assert!(output[0].starts_with("당신이 \x1b[1;36m진기"));
-        assert!(matches!(
-            special,
-            Some(crate::command::CommandResult::OutputAndSendToUsers(ref own, ref sends))
-                if own == &output[0]
-                    && sends.len() == 1
-                    && sends[0].0 == target_name
-                    && sends[0].1.contains("당신의 주위에")
-        ));
+        assert!(
+            matches!(
+                special,
+                Some(crate::command::CommandResult::OutputAndSendToUsers(ref own, ref sends))
+                    if own == &output[0]
+                        && sends.len() == 2
+                        && sends[0].0 == target_name
+                        && sends[0].1.contains("당신의 주위에")
+                        && sends[0].1.ends_with("\r\n\x1b[0;37;40m[ 321/4056, 12/34 ] ")
+                        && sends[1].0 == "시전관전자"
+                        && sends[1].1.ends_with("\r\n\x1b[0;37;40m[ 77/88, 5/6 ] ")
+                        && sends.iter().all(|(name, _)| name != observer_name)
+            ),
+            "unexpected cast deliveries: {special:?}"
+        );
 
         clear_cast_room_players();
         get_world_state()
@@ -1729,16 +1954,59 @@ mod tests {
         body.set("체력", 1_000i64);
         body.set("최고체력", 1_000i64);
         body.skill_list.push("강룡십팔장".to_string());
+        let mut observer = Body::new();
+        observer.set("이름", "전투시전관전자");
+        observer.set("체력", 55_i64);
+        observer.set("최고체력", 66_i64);
+        observer.set("내공", 7_i64);
+        observer.set("최고내공", 8_i64);
+        let mut rejecting_observer = Body::new();
+        rejecting_observer.set("이름", "전투시전거부관전자");
+        rejecting_observer.set("설정상태", "타인전투출력거부 1");
+        rejecting_observer.set("체력", 11_i64);
+        rejecting_observer.set("최고체력", 22_i64);
+        rejecting_observer.set("내공", 3_i64);
+        rejecting_observer.set("최고내공", 4_i64);
+        set_cast_room_players(vec![
+            CastRoomPlayerRef::new(&mut observer),
+            CastRoomPlayerRef::new(&mut rejecting_observer),
+        ]);
 
         let line = format!("{} 강룡십팔장", mob_name);
         let (output, special) = storage
             .execute("시전", &mut body, &line, None, None, None)
             .unwrap();
 
-        assert!(special.is_none());
+        let sends = match special {
+            Some(crate::command::CommandResult::OutputAndSendToUsers(_, sends)) => sends,
+            other => panic!("expected room deliveries, got {other:?}"),
+        };
+        for (name, prompt) in [
+            ("전투시전관전자", "\0MUC_RAW_USER\0\r\n\x1b[0;37;40m[ 55/66, 7/8 ] "),
+            ("전투시전거부관전자", "\0MUC_RAW_USER\0\r\n\x1b[0;37;40m[ 11/22, 3/4 ] "),
+        ] {
+            let messages = sends
+                .iter()
+                .filter(|(recipient, _)| recipient == name)
+                .map(|(_, message)| message.as_str())
+                .collect::<Vec<_>>();
+            assert_eq!(messages.len(), 4, "{name}: {messages:?}");
+            assert!(messages[0].contains("雙手"));
+            assert!(messages[1].contains("주먹을 쥐며 공격 합니다."));
+            assert!(messages[2].starts_with(&format!(
+                "\0MUC_RAW_USER\0\r\n\x1b[33m{}\x1b[37m",
+                mob_name
+            )));
+            assert_eq!(messages[3], prompt);
+        }
         assert_eq!(body.get_int("내공"), 700);
         assert_eq!(body.skill.as_deref(), Some("강룡십팔장"));
         assert_eq!(body.act, ActState::Fight);
+        assert_eq!(
+            target_instance_ids(&body).len(),
+            1,
+            "a cast-started fight must retain the exact mob instance"
+        );
         assert_eq!(
             body.temp()
                 .get("_attack_target_key")
@@ -1760,8 +2028,100 @@ mod tests {
             assert_eq!(mob.targets, vec![player_name.to_string()]);
         }
 
+        // On a later cast in an existing fight Python uses
+        // sendRoomFightScript: rejectors are skipped and normal observers get
+        // the script and lpPrompt in one delivery.
+        body.skill = None;
+        let (repeat_output, repeat_special) = storage
+            .execute("시전", &mut body, "강룡십팔장", None, None, None)
+            .unwrap();
+        let repeat_sends = match repeat_special {
+            Some(crate::command::CommandResult::OutputAndSendToUsers(_, sends)) => sends,
+            other => panic!("expected existing-fight room delivery, got {other:?}, output={repeat_output:?}, temp={:?}", body.temp()),
+        };
+        assert_eq!(repeat_sends.len(), 1, "{repeat_sends:?}");
+        assert_eq!(repeat_sends[0].0, "전투시전관전자");
+        assert!(repeat_sends[0].1.contains("雙手"));
+        assert!(repeat_sends[0]
+            .1
+            .ends_with("\r\n\x1b[0;37;40m[ 55/66, 7/8 ] "));
+
         let mut world = get_world_state().write().unwrap();
         world.remove_player_position(player_name);
         world.kill_mob(zone, room, &mob_key);
+        clear_cast_room_players();
+    }
+
+    #[test]
+    fn rhai_combat_cast_starts_reciprocal_pvp_and_pays_cost_once() {
+        let suffix = std::process::id();
+        let caster_name = format!("비무시전자-{suffix}");
+        let target_name = format!("비무시전대상-{suffix}");
+        let mut caster = Body::new();
+        caster.set("이름", caster_name.as_str());
+        caster.set("내공", 1_000_i64);
+        caster.set("최고내공", 1_000_i64);
+        caster.set("체력", 1_000_i64);
+        caster.set("최고체력", 1_000_i64);
+        caster.skill_list.push("강룡십팔장".to_string());
+        let mut target = Body::new();
+        target.set("이름", target_name.as_str());
+        target.set("체력", 1_000_i64);
+        target.set("최고체력", 1_000_i64);
+        {
+            let mut world = get_world_state().write().unwrap();
+            world.set_player_position(
+                &caster_name,
+                PlayerPosition::new("낙양성".to_string(), "56".to_string()),
+            );
+            world.set_player_position(
+                &target_name,
+                PlayerPosition::new("낙양성".to_string(), "56".to_string()),
+            );
+        }
+        set_cast_room_players(vec![CastRoomPlayerRef::new(&mut target)]);
+        let storage = ScriptStorage::default();
+        let line = format!("{target_name} 강룡십팔장");
+        let (denied, _) = storage
+            .execute("시전", &mut caster, &line, None, None, None)
+            .unwrap();
+        assert_eq!(
+            denied,
+            vec!["☞ 지금은 \x1b[1m\x1b[31m살겁\x1b[0m\x1b[37m\x1b[40m을 일으키기에 부적합한 상황 이라네"]
+        );
+        assert_eq!(caster.get_mp(), 1_000);
+        assert!(super::super::combat_commands::pvp_target(&caster).is_none());
+        {
+            let mut world = get_world_state().write().unwrap();
+            world.set_player_position(
+                &caster_name,
+                PlayerPosition::new("낙양성".to_string(), "1000".to_string()),
+            );
+            world.set_player_position(
+                &target_name,
+                PlayerPosition::new("낙양성".to_string(), "1000".to_string()),
+            );
+        }
+        set_cast_room_players(vec![CastRoomPlayerRef::new(&mut target)]);
+        let (output, _) = storage
+            .execute("시전", &mut caster, &line, None, None, None)
+            .unwrap();
+        assert_eq!(caster.get_mp(), 700);
+        assert_eq!(caster.skill.as_deref(), Some("강룡십팔장"));
+        assert_eq!(
+            super::super::combat_commands::pvp_target(&caster).as_deref(),
+            Some(target_name.as_str())
+        );
+        assert_eq!(
+            super::super::combat_commands::pvp_target(&target).as_deref(),
+            Some(caster_name.as_str())
+        );
+        assert_eq!(caster.act, ActState::Fight);
+        assert_eq!(target.act, ActState::Fight);
+        assert!(output[0].starts_with("당신의 \x1b[1;32m雙手"));
+        clear_cast_room_players();
+        let mut world = get_world_state().write().unwrap();
+        world.remove_player_position(&caster_name);
+        world.remove_player_position(&target_name);
     }
 }

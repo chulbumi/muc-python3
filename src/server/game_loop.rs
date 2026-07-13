@@ -16,12 +16,15 @@ use crate::combat::processor::{calculate_exp_reward_for_level, calculate_gold_re
 use crate::combat::{calculate_skill_damage_against, process_mob_strike, process_player_strike};
 use crate::command::handler::PendingInput;
 use crate::command::CommandRegistry;
-use crate::network::client::handle_game_command;
-use crate::network::client::{ClientState, DISCONNECT_SENTINEL};
+use crate::network::client::{handle_game_command, send_collected_user_message};
+use crate::network::client::{Client, ClientState, DISCONNECT_SENTINEL};
 use crate::network::Broadcaster;
 use crate::player::{ActState, Body, Player};
 use crate::scheduler::CallOutScheduler;
-use crate::script::save_body_to_json;
+use crate::script::{
+    clear_cast_room_players, clear_precomputed_all_online, save_body_to_json,
+    set_cast_room_players, set_precomputed_all_online, CastRoomPlayerRef,
+};
 use crate::world::event::{run_script_chunk, run_script_chunk_rhai, ScriptNext};
 use crate::world::{get_world_state, RoomCache};
 
@@ -80,6 +83,37 @@ struct PendingMobReward {
     damage_map: std::collections::HashMap<String, i64>,
     mob_key: String,
     mob_data: crate::world::RawMobData,
+}
+
+static ADMIN_MOB_REWARDS: std::sync::LazyLock<std::sync::Mutex<Vec<PendingMobReward>>> =
+    std::sync::LazyLock::new(|| std::sync::Mutex::new(Vec::new()));
+
+/// Run the same death snapshot/drop generation used by a lethal combat tick,
+/// then defer connected-player reward application to the next game tick.
+pub(crate) fn queue_admin_mob_death(
+    mob: &mut crate::world::MobInstance,
+    data: &crate::world::RawMobData,
+) -> bool {
+    if !mob.alive {
+        return false;
+    }
+    let mut round = crate::combat::CombatRound::new();
+    let mut rewards = Vec::new();
+    award_mob_death(mob, data, &mut round, &mut rewards);
+    if rewards.is_empty() {
+        return false;
+    }
+    let mut queued = ADMIN_MOB_REWARDS.lock().unwrap();
+    queued.extend(
+        rewards
+            .into_iter()
+            .filter(|reward| !reward.targets.is_empty() || !reward.damage_map.is_empty()),
+    );
+    if queued.len() > 1_024 {
+        let excess = queued.len() - 1_024;
+        queued.drain(..excess);
+    }
+    true
 }
 
 impl GameLoop {
@@ -233,7 +267,9 @@ impl GameLoop {
                         player.body.set("위치", "낙양성:7");
                         player.body.set("현재방", "낙양성:7");
                     }
-                    if player.body.act == ActState::Fight {
+                    if player.body.act == ActState::Fight
+                        && crate::script::combat_commands::pvp_target(&player.body).is_none()
+                    {
                         let messages = process_combat_tick(player, &mut pending_rewards);
                         for (room, message) in messages {
                             room_messages.push((room, message));
@@ -285,6 +321,29 @@ impl GameLoop {
                 }
             }
         }
+        // Claim only administrator deaths that belong to this broadcaster.
+        // This also prevents independent test/server instances from consuming
+        // another instance's deferred reward snapshot.
+        let connected_names = clients
+            .values()
+            .filter_map(|client| client.player.as_ref().map(|player| player.body.get_name()))
+            .collect::<std::collections::HashSet<_>>();
+        let mut queued_admin = ADMIN_MOB_REWARDS.lock().unwrap();
+        let mut retained = Vec::new();
+        for reward in queued_admin.drain(..) {
+            if reward
+                .targets
+                .iter()
+                .any(|target| connected_names.contains(target))
+            {
+                pending_rewards.push(reward);
+            } else {
+                retained.push(reward);
+            }
+        }
+        *queued_admin = retained;
+        drop(queued_admin);
+        process_pvp_ticks(&mut clients, &mut self.combat_render, &mut self.newly_dead);
         if !pending_rewards.is_empty() {
             let positions = get_world_state().read().ok();
             let snapshots = clients
@@ -809,6 +868,38 @@ impl GameLoop {
                                 }
                             }
                         }
+                        crate::world::RoomMobMessageKind::Respawn => {
+                            let player_names = get_world_state()
+                                .read()
+                                .ok()
+                                .map(|world| {
+                                    world.get_players_in_room(&message.zone, &message.room)
+                                })
+                                .unwrap_or_default();
+                            let mut clients = broadcaster.clients.lock();
+                            for player_name in player_names {
+                                let Some(client) = clients.values_mut().find(|client| {
+                                    client.player.as_ref().is_some_and(|player| {
+                                        player.body.get_name() == player_name
+                                    })
+                                }) else {
+                                    continue;
+                                };
+                                let Some(player) = client.player.as_mut() else {
+                                    continue;
+                                };
+                                crate::script::combat_commands::queue_combat_presentation_event(
+                                    &mut player.body,
+                                    serde_json::json!({
+                                        "kind": "room_mob_respawn",
+                                        "text": message.message,
+                                    }),
+                                );
+                                if !self.combat_render.contains(&client.addr) {
+                                    self.combat_render.push(client.addr);
+                                }
+                            }
+                        }
                     }
                 }
             }
@@ -1067,8 +1158,9 @@ fn process_one_mob_phase(
             "script": script, "damage": absorbed,
         }));
     }
-    if mob.active_attack_skill.is_none() && !data.skills.is_empty() {
-        let selected = rand::Rng::gen_range(&mut rand::thread_rng(), 0..data.skills.len());
+    let learned_candidates = mob_skill_candidates(mob, data);
+    if mob.active_attack_skill.is_none() && !learned_candidates.is_empty() {
+        let selected = rand::Rng::gen_range(&mut rand::thread_rng(), 0..learned_candidates.len());
         let roll = rand::Rng::gen_range(&mut rand::thread_rng(), 0..=100);
         try_start_mob_attack_skill(mob, data, selected, roll);
     }
@@ -1095,10 +1187,23 @@ fn process_one_mob_phase(
                 }
                 crate::world::skill::PatternAction::Wait => {}
                 crate::world::skill::PatternAction::Attack => {
+                    let training_level = mob
+                        .skill_map
+                        .get(&skill.name)
+                        .map(|training| training.level)
+                        .unwrap_or(1);
+                    let mastery_bonus = match training_level {
+                        11 => 10.0,
+                        12 => 20.0,
+                        _ => 0.0,
+                    };
                     let chance = skill.probability as f64
+                        + training_level as f64
+                            * crate::script::get_murim_config_float("기술확률배수")
                         - ((mob.level - player.get_int("레벨") + 90).div_euclid(3)) as f64
                         + data.hit as f64 * 0.2
-                        - player.get_miss() as f64 * 0.2;
+                        - player.get_miss() as f64 * 0.2
+                        + mastery_bonus;
                     if chance < rand::Rng::gen_range(&mut rand::thread_rng(), 0..=100) as f64 {
                         round.presentation_events.push(serde_json::json!({
                             "kind": "mob_fail", "mob": mob_name, "player": player_name,
@@ -1533,10 +1638,7 @@ fn process_combat_tick(
             player.body.clear_target(None);
             player.body.act = ActState::Stand;
             player.body.temp_mut().remove("_combat_target_ids");
-            player
-                .body
-                .temp_mut()
-                .remove("_combat_target_instance_ids");
+            player.body.temp_mut().remove("_combat_target_instance_ids");
             player.body.temp_mut().remove("_attack_target_key");
             player.body.temp_mut().remove("_attack_target");
             player.body.temp_mut().remove("_attack_target_index");
@@ -1625,7 +1727,8 @@ pub(crate) fn try_start_mob_attack_skill(
     if mob.active_attack_skill.is_some() {
         return false;
     }
-    let Some((skill_name, hp_threshold, probability)) = data.skills.get(selected) else {
+    let candidates = mob_skill_candidates(mob, data);
+    let Some((skill_name, hp_threshold, probability)) = candidates.get(selected) else {
         return false;
     };
     let Some(skill) = crate::world::skill::get_skill(skill_name) else {
@@ -1642,6 +1745,20 @@ pub(crate) fn try_start_mob_attack_skill(
     mob.active_attack_skill = Some(skill);
     mob.combat_dex = 0;
     true
+}
+
+fn mob_skill_candidates(
+    mob: &crate::world::MobInstance,
+    data: &crate::world::RawMobData,
+) -> Vec<(String, i64, i64)> {
+    let mut candidates = data.skills.clone();
+    candidates.extend(
+        mob.learned_skills
+            .iter()
+            .filter(|name| !data.skills.iter().any(|(saved, _, _)| saved == *name))
+            .map(|name| (name.clone(), 100, 100)),
+    );
+    candidates
 }
 
 fn expire_mob_skill_effects(mob: &mut crate::world::MobInstance, now: i64) {
@@ -1669,13 +1786,13 @@ pub(crate) fn try_start_mob_defense_skill(
     player: &mut Body,
     roll: &mut dyn FnMut() -> i64,
 ) -> Option<(String, i64)> {
-    for (skill_name, hp_threshold, probability) in &data.skills {
-        let Some(skill) = crate::world::skill::get_skill(skill_name) else {
+    for (skill_name, hp_threshold, probability) in mob_skill_candidates(mob, data) {
+        let Some(skill) = crate::world::skill::get_skill(&skill_name) else {
             continue;
         };
         if matches!(skill.skill_type, crate::world::skill::SkillType::Combat)
-            || mob.hp > mob.max_hp.saturating_mul(*hp_threshold).div_euclid(100)
-            || *probability < roll()
+            || mob.hp > mob.max_hp.saturating_mul(hp_threshold).div_euclid(100)
+            || probability < roll()
             || skill.mp_cost > mob.mp
             || mob.skill_effects.iter().any(|effect| {
                 effect.name == skill.name
@@ -1689,6 +1806,16 @@ pub(crate) fn try_start_mob_defense_skill(
             continue;
         }
         mob.mp -= skill.mp_cost;
+        let training_level = mob
+            .skill_map
+            .get(&skill.name)
+            .map(|training| training.level)
+            .unwrap_or(1);
+        let duration = skill.defense_time.saturating_add(
+            skill
+                .defense_time_increase
+                .saturating_mul(training_level.saturating_sub(1)),
+        );
         let mut absorbed = 0_i64;
         if let Some(against_name) = &skill.against_skill {
             if let Some(against) = crate::world::skill::get_skill(against_name) {
@@ -1714,7 +1841,15 @@ pub(crate) fn try_start_mob_defense_skill(
                     "내공감소" => {
                         let mut effect = crate::player::ActiveSkill::new(
                             against.name.clone(),
-                            against.defense_time.max(0) as i32,
+                            against
+                                .defense_time
+                                .saturating_add(
+                                    against
+                                        .defense_time_increase
+                                        .saturating_mul(training_level.saturating_sub(1)),
+                                )
+                                .clamp(i32::MIN as i64, i32::MAX as i64)
+                                as i32,
                         );
                         effect.mp_bonus = against.mp_bonus as i32;
                         effect.max_mp_bonus = against.max_mp_bonus as i32;
@@ -1726,7 +1861,15 @@ pub(crate) fn try_start_mob_defense_skill(
                     "체력감소" => {
                         let mut effect = crate::player::ActiveSkill::new(
                             against.name.clone(),
-                            against.defense_time.max(0) as i32,
+                            against
+                                .defense_time
+                                .saturating_add(
+                                    against
+                                        .defense_time_increase
+                                        .saturating_mul(training_level.saturating_sub(1)),
+                                )
+                                .clamp(i32::MIN as i64, i32::MAX as i64)
+                                as i32,
                         );
                         effect.hp_bonus = against.hp_bonus as i32;
                         effect.max_hp_bonus = against.max_hp_bonus as i32;
@@ -1739,7 +1882,6 @@ pub(crate) fn try_start_mob_defense_skill(
                 }
             }
         }
-        let duration = skill.defense_time.max(0);
         let effect = crate::world::MobSkillEffect {
             name: skill.name.clone(),
             anti_type: skill.deny.clone(),
@@ -1795,6 +1937,471 @@ fn recover_like_python(body: &mut Body) {
     }
 }
 
+fn finish_pvp_death(body: &mut Body) {
+    body.act = ActState::Death;
+    body.unwear_all();
+    body.clear_targets_death();
+    body.clear_skills();
+    body.set_death_step(0);
+    crate::script::combat_commands::clear_pvp_target(body);
+}
+
+fn pvp_skill_phase(attacker: &mut Body, defender: &mut Body) -> (i64, bool) {
+    let Some(skill_name) = attacker.skill.clone() else {
+        return (0, true);
+    };
+    let Some(skill) = crate::world::skill::get_skill(&skill_name) else {
+        attacker.stop_skill();
+        return (0, true);
+    };
+    let training_level = attacker
+        .get_skill_training(&skill_name)
+        .map(|training| training.level as i32)
+        .unwrap_or(1);
+    let mut runtime = skill.clone();
+    runtime.end = attacker
+        .temp()
+        .get("_skill_turn")
+        .and_then(|value| match value {
+            crate::object::Value::Int(value) => Some((*value - 1).max(0) as i32),
+            _ => None,
+        })
+        .unwrap_or(0);
+    let (steps, more, remaining_dex) = runtime.get_script(i64::from(attacker.dex));
+    attacker.dex = remaining_dex.clamp(0, i32::MAX as i64) as i32;
+    let has_wait = steps
+        .iter()
+        .any(|step| matches!(step.action, crate::world::skill::PatternAction::Wait));
+    let attacker_name = attacker.get_name();
+    let defender_name = defender.get_name();
+    let mut total_damage = 0_i64;
+    for step in steps {
+        if matches!(step.action, crate::world::skill::PatternAction::Opening) {
+            crate::script::combat_commands::queue_combat_presentation_event(
+                attacker,
+                serde_json::json!({
+                    "kind": "pvp_skill_form_out", "target": defender_name,
+                    "script": step.message, "weapon": attacker.get_weapon_name(),
+                }),
+            );
+            crate::script::combat_commands::queue_combat_presentation_event(
+                defender,
+                serde_json::json!({
+                    "kind": "pvp_skill_form_in", "attacker": attacker_name,
+                    "script": step.message, "weapon": attacker.get_weapon_name(),
+                }),
+            );
+            continue;
+        }
+        if !matches!(step.action, crate::world::skill::PatternAction::Attack) {
+            continue;
+        }
+        let result =
+            crate::combat::calculate_pvp_skill_damage(attacker, defender, &skill, training_level);
+        let (out_kind, in_kind, script, damage) = if result.hit {
+            (
+                "pvp_skill_out",
+                "pvp_skill_in",
+                step.message,
+                result.final_damage,
+            )
+        } else {
+            (
+                "pvp_skill_fail_out",
+                "pvp_skill_fail_in",
+                skill.fail_message.clone(),
+                0,
+            )
+        };
+        crate::script::combat_commands::queue_combat_presentation_event(
+            attacker,
+            serde_json::json!({
+                "kind": out_kind, "target": defender_name,
+                "script": script.clone(), "damage": damage, "weapon": attacker.get_weapon_name(),
+            }),
+        );
+        crate::script::combat_commands::queue_combat_presentation_event(
+            defender,
+            serde_json::json!({
+                "kind": in_kind, "attacker": attacker_name,
+                "script": script, "damage": damage, "weapon": attacker.get_weapon_name(),
+            }),
+        );
+        let mut training = crate::combat::CombatRound::new();
+        crate::combat::processor::apply_player_attack_training(attacker, result.hit, &mut training);
+        for event in training.presentation_events {
+            crate::script::combat_commands::queue_combat_presentation_event(attacker, event);
+        }
+        if result.hit {
+            total_damage = total_damage.saturating_add(result.final_damage);
+        }
+    }
+    if !more {
+        let (_, leveled, _) = crate::script::skill_up_python(attacker, &skill);
+        if leveled {
+            crate::script::combat_commands::queue_combat_presentation_event(
+                attacker,
+                serde_json::json!({ "kind": "skill_level_up" }),
+            );
+        }
+        attacker.stop_skill();
+        attacker.temp_mut().remove("_skill_turn");
+    } else {
+        attacker.temp_mut().insert(
+            "_skill_turn".to_string(),
+            crate::object::Value::Int(i64::from(runtime.end + 1)),
+        );
+    }
+    (total_damage, !more || has_wait)
+}
+
+fn pvp_strike(attacker: &mut Body, defender: &mut Body) -> i64 {
+    attacker.dex += (attacker.get_dex() + 700).clamp(i32::MIN as i64, i32::MAX as i64) as i32;
+    let (mut total_damage, run_normal) = pvp_skill_phase(attacker, defender);
+    if !run_normal {
+        return total_damage;
+    }
+    if attacker.dex < 700 {
+        return total_damage;
+    }
+    attacker.dex %= 700;
+    let attacker_name = attacker.get_name();
+    let defender_name = defender.get_name();
+    let weapon = attacker.get_weapon_name();
+    let weapon_type = attacker.get_fight_script_type();
+    let chance = 100.0
+        - ((defender.get_int("레벨") - attacker.get_int("레벨") + 90).div_euclid(3)) as f64
+        + attacker.get_hit() as f64 * 0.2
+        - defender.get_miss() as f64 * 0.2;
+    if chance < rand::random::<u8>() as f64 * (100.0 / u8::MAX as f64) {
+        crate::script::combat_commands::queue_combat_presentation_event(
+            attacker,
+            serde_json::json!({
+                "kind": "pvp_miss_out", "target": defender_name,
+                "weapon": weapon, "weapon_type": weapon_type,
+            }),
+        );
+        crate::script::combat_commands::queue_combat_presentation_event(
+            defender,
+            serde_json::json!({
+                "kind": "pvp_miss_in", "attacker": attacker_name,
+                "weapon": weapon, "weapon_type": weapon_type,
+            }),
+        );
+        let mut training = crate::combat::CombatRound::new();
+        crate::combat::processor::apply_player_attack_training(attacker, false, &mut training);
+        for event in training.presentation_events {
+            crate::script::combat_commands::queue_combat_presentation_event(attacker, event);
+        }
+        return total_damage;
+    }
+    let damage = crate::combat::calculate_pvp_damage(attacker, defender);
+    total_damage = total_damage.saturating_add(damage);
+    crate::script::combat_commands::queue_combat_presentation_event(
+        attacker,
+        serde_json::json!({
+            "kind": "pvp_attack_out", "target": defender_name,
+            "damage": damage, "weapon": weapon, "weapon_type": weapon_type,
+        }),
+    );
+    crate::script::combat_commands::queue_combat_presentation_event(
+        defender,
+        serde_json::json!({
+            "kind": "pvp_attack_in", "attacker": attacker_name,
+            "damage": damage, "weapon": weapon, "weapon_type": weapon_type,
+        }),
+    );
+    let mut training = crate::combat::CombatRound::new();
+    crate::combat::processor::apply_player_attack_training(attacker, true, &mut training);
+    for event in training.presentation_events {
+        crate::script::combat_commands::queue_combat_presentation_event(attacker, event);
+    }
+    total_damage
+}
+
+/// Resolve one PvP action against the opponent's tick-start state.
+///
+/// `pvp_strike` also queues the messages received by the defender.  Run it on
+/// a snapshot and copy only those presentation events back to the live body;
+/// combat state changed by the first resolved action must not influence the
+/// opponent's action in the same tick.
+fn pvp_strike_against_snapshot(
+    attacker: &mut Body,
+    defender: &mut Body,
+    defender_at_tick_start: &Body,
+) -> i64 {
+    let mut view = defender_at_tick_start.clone();
+    view.temp_mut()
+        .remove(crate::script::combat_commands::COMBAT_PRESENTATION_EVENTS);
+    let damage = pvp_strike(attacker, &mut view);
+    let events = view
+        .temp_mut()
+        .remove(crate::script::combat_commands::COMBAT_PRESENTATION_EVENTS)
+        .and_then(|value| value.as_str().map(str::to_string))
+        .and_then(|serialized| serde_json::from_str::<Vec<serde_json::Value>>(&serialized).ok())
+        .unwrap_or_default();
+    for event in events {
+        crate::script::combat_commands::queue_combat_presentation_event(defender, event);
+    }
+    damage
+}
+
+fn apply_simultaneous_pvp_damage(
+    first: &mut Body,
+    second: &mut Body,
+    damage_to_first: i64,
+    damage_to_second: i64,
+) -> (bool, bool) {
+    let first_died = damage_to_first >= first.get_hp();
+    let second_died = damage_to_second >= second.get_hp();
+    if damage_to_first > 0 {
+        first.minus_hp(damage_to_first);
+    }
+    if damage_to_second > 0 {
+        second.minus_hp(damage_to_second);
+    }
+    if first_died {
+        finish_pvp_death(first);
+        crate::script::combat_commands::queue_combat_presentation_event(
+            first,
+            serde_json::json!({ "kind": "player_death" }),
+        );
+    }
+    if second_died {
+        finish_pvp_death(second);
+        crate::script::combat_commands::queue_combat_presentation_event(
+            second,
+            serde_json::json!({ "kind": "player_death" }),
+        );
+    }
+    if first_died || second_died {
+        crate::script::combat_commands::clear_pvp_target(first);
+        crate::script::combat_commands::clear_pvp_target(second);
+    }
+    (first_died, second_died)
+}
+
+fn process_pvp_ticks(
+    clients: &mut std::collections::HashMap<SocketAddr, Client>,
+    render: &mut Vec<SocketAddr>,
+    newly_dead: &mut Vec<SocketAddr>,
+) {
+    let names = clients
+        .iter()
+        .filter_map(|(addr, client)| {
+            let player = client.player.as_ref()?;
+            (client.state == ClientState::Active && !client.disconnect_requested)
+                .then(|| (player.body.get_name(), *addr))
+        })
+        .collect::<std::collections::HashMap<_, _>>();
+    let mut pairs = Vec::new();
+    let mut orphaned = Vec::new();
+    for (name, addr) in &names {
+        let Some(target) = clients
+            .get(addr)
+            .and_then(|client| client.player.as_ref())
+            .and_then(|player| crate::script::combat_commands::pvp_target(&player.body))
+        else {
+            continue;
+        };
+        let Some(target_addr) = names.get(&target).copied() else {
+            orphaned.push(*addr);
+            continue;
+        };
+        let reciprocal = clients
+            .get(&target_addr)
+            .and_then(|client| client.player.as_ref())
+            .and_then(|player| crate::script::combat_commands::pvp_target(&player.body));
+        if reciprocal.as_deref() == Some(name) {
+            if addr < &target_addr {
+                pairs.push((*addr, target_addr));
+            }
+        } else {
+            orphaned.push(*addr);
+        }
+    }
+
+    for addr in orphaned {
+        if let Some(body) = clients
+            .get_mut(&addr)
+            .and_then(|client| client.player.as_mut())
+            .map(|player| &mut player.body)
+        {
+            crate::script::combat_commands::clear_pvp_target(body);
+        }
+    }
+
+    for (first_addr, second_addr) in pairs {
+        let Some(mut first_client) = clients.remove(&first_addr) else {
+            continue;
+        };
+        let Some(second_client) = clients.get_mut(&second_addr) else {
+            clients.insert(first_addr, first_client);
+            continue;
+        };
+        let (Some(first), Some(second)) =
+            (first_client.player.as_mut(), second_client.player.as_mut())
+        else {
+            clients.insert(first_addr, first_client);
+            continue;
+        };
+        let same_room = get_world_state().read().is_ok_and(|world| {
+            let first_position = world.get_player_position(&first.body.get_name());
+            let second_position = world.get_player_position(&second.body.get_name());
+            first_position
+                .zip(second_position)
+                .is_some_and(|(first, second)| {
+                    first.zone == second.zone && first.room == second.room
+                })
+        });
+        if !same_room || first.body.act == ActState::Death || second.body.act == ActState::Death {
+            crate::script::combat_commands::clear_pvp_target(&mut first.body);
+            crate::script::combat_commands::clear_pvp_target(&mut second.body);
+        } else {
+            // Both actions are resolved against the same tick-start combat
+            // state. Damage is committed only after both sides have acted, so
+            // client/hash iteration order can never suppress a lethal return.
+            let first_at_tick_start = first.body.clone();
+            let second_at_tick_start = second.body.clone();
+            let damage_to_second = pvp_strike_against_snapshot(
+                &mut first.body,
+                &mut second.body,
+                &second_at_tick_start,
+            );
+            let damage_to_first = pvp_strike_against_snapshot(
+                &mut second.body,
+                &mut first.body,
+                &first_at_tick_start,
+            );
+            apply_simultaneous_pvp_damage(
+                &mut first.body,
+                &mut second.body,
+                damage_to_first,
+                damage_to_second,
+            );
+        }
+        for (addr, player) in [
+            (first_addr, first_client.player.as_ref()),
+            (second_addr, second_client.player.as_ref()),
+        ] {
+            if player.is_some_and(|player| {
+                player
+                    .body
+                    .temp()
+                    .contains_key(crate::script::combat_commands::COMBAT_PRESENTATION_EVENTS)
+            }) && !render.contains(&addr)
+            {
+                render.push(addr);
+            }
+            if player.is_some_and(|player| player.body.act == ActState::Death)
+                && !newly_dead.contains(&addr)
+            {
+                newly_dead.push(addr);
+            }
+        }
+        clients.insert(first_addr, first_client);
+    }
+}
+
+fn render_combat_presentation(
+    broadcaster: &Arc<Broadcaster>,
+    command_registry: &Arc<CommandRegistry>,
+    addr: SocketAddr,
+) {
+    let result = {
+        let mut clients = broadcaster.clients.lock();
+        let actor_name = clients
+            .get(&addr)
+            .and_then(|client| client.player.as_ref())
+            .map(|player| player.body.get_name())
+            .unwrap_or_default();
+        let room_names = get_world_state()
+            .read()
+            .ok()
+            .and_then(|world| {
+                world
+                    .get_player_position(&actor_name)
+                    .cloned()
+                    .map(|position| {
+                        world.get_players_in_room(&position.zone, &position.room)
+                    })
+            })
+            .unwrap_or_default();
+        let mut observers = Vec::new();
+        let mut online = rhai::Array::new();
+        for (client_addr, client) in clients.iter_mut() {
+            if client.state != ClientState::Active {
+                continue;
+            }
+            let Some(other) = client.player.as_mut() else {
+                continue;
+            };
+            let mut details = rhai::Map::new();
+            details.insert("이름".into(), rhai::Dynamic::from(other.body.get_name()));
+            details.insert(
+                "show_prompt".into(),
+                rhai::Dynamic::from(
+                    other.interactive == 1
+                        && !crate::script::config_is_enabled(
+                            &other.body.get_string("설정상태"),
+                            "엘피출력",
+                        ),
+                ),
+            );
+            details.insert(
+                "현재체력".into(),
+                rhai::Dynamic::from(other.body.get_hp()),
+            );
+            details.insert(
+                "현재최고체력".into(),
+                rhai::Dynamic::from(other.body.get_max_hp()),
+            );
+            details.insert(
+                "현재내공".into(),
+                rhai::Dynamic::from(other.body.get_mp()),
+            );
+            details.insert(
+                "현재최고내공".into(),
+                rhai::Dynamic::from(other.body.get_max_mp()),
+            );
+            online.push(rhai::Dynamic::from(details));
+            if *client_addr != addr && room_names.contains(&other.body.get_name()) {
+                observers.push(CastRoomPlayerRef::new_with_interactive(
+                    &mut other.body,
+                    other.interactive,
+                ));
+            }
+        }
+        set_cast_room_players(observers);
+        set_precomputed_all_online(online);
+        let result = clients
+            .get_mut(&addr)
+            .and_then(|client| client.player.as_mut())
+            .and_then(|player| {
+                command_registry
+                    .get_internal("combat_tick")
+                    .map(|handler| handler(&mut player.body, &[]))
+            });
+        clear_cast_room_players();
+        clear_precomputed_all_online();
+        result
+    };
+    match result {
+        Some(crate::command::CommandResult::Output(output)) if !output.is_empty() => {
+            let _ = broadcaster.send_to(addr, &(output + "\r\n"));
+        }
+        Some(crate::command::CommandResult::OutputAndSendToUsers(output, deliveries)) => {
+            if !output.is_empty() {
+                let _ = broadcaster.send_to(addr, &(output + "\r\n"));
+            }
+            for (name, message) in deliveries {
+                send_collected_user_message(broadcaster, &name, &message);
+            }
+        }
+        _ => {}
+    }
+}
+
 /// Run the connected-client loop and the existing call-out scheduler on the same one-second
 /// cadence as Python's reactor loop.
 pub async fn run_game_loop(
@@ -1816,34 +2423,7 @@ pub async fn run_game_loop(
         }
         game_loop.tick(&broadcaster);
         for addr in game_loop.take_combat_render() {
-            let result = {
-                let mut clients = broadcaster.clients.lock();
-                let Some(player) = clients
-                    .get_mut(&addr)
-                    .and_then(|client| client.player.as_mut())
-                else {
-                    continue;
-                };
-                command_registry
-                    .get_internal("combat_tick")
-                    .map(|handler| handler(&mut player.body, &[]))
-            };
-            match result {
-                Some(crate::command::CommandResult::Output(output)) if !output.is_empty() => {
-                    let _ = broadcaster.send_to(addr, &(output + "\r\n"));
-                }
-                Some(crate::command::CommandResult::OutputAndSendToUsers(output, deliveries)) => {
-                    if !output.is_empty() {
-                        let _ = broadcaster.send_to(addr, &(output + "\r\n"));
-                    }
-                    for (name, message) in deliveries {
-                        if let Some(target) = broadcaster.find_addr_by_player_name(&name) {
-                            let _ = broadcaster.send_to(target, &(message + "\r\n"));
-                        }
-                    }
-                }
-                _ => {}
-            }
+            render_combat_presentation(&broadcaster, &command_registry, addr);
         }
         for addr in game_loop.take_newly_dead() {
             let result = {
@@ -2000,6 +2580,85 @@ mod tests {
 
     fn addr(port: u16) -> SocketAddr {
         SocketAddr::new(IpAddr::V4(Ipv4Addr::LOCALHOST), port)
+    }
+
+    #[tokio::test]
+    async fn combat_renderer_supplies_live_room_prompt_and_routes_raw_wire() {
+        let suffix = std::process::id();
+        let zone = format!("틱망존-{suffix}");
+        let actor_name = format!("틱망공격자-{suffix}");
+        let observer_name = format!("틱망관전자-{suffix}");
+        let actor_addr = addr(18301);
+        let observer_addr = addr(18302);
+        let (actor_tx, mut actor_rx) = mpsc::unbounded_channel();
+        let (observer_tx, mut observer_rx) = mpsc::unbounded_channel();
+        let make_client = |address, sender, name: &str, hp| {
+            let mut client = Client::new(address, sender);
+            client.complete_login();
+            let mut player = Player::new();
+            player.state = STATE_ACTIVE;
+            player.interactive = 1;
+            player.body.set("이름", name);
+            player.body.set("체력", hp);
+            player.body.set("최고체력", 45_i64);
+            player.body.set("내공", 7_i64);
+            player.body.set("최고내공", 9_i64);
+            player
+                .body
+                .set("설정상태", "엘피출력 0 타인전투출력거부 0");
+            client.player = Some(player);
+            client
+        };
+        let mut actor_client = make_client(actor_addr, actor_tx, &actor_name, 40_i64);
+        crate::script::combat_commands::queue_combat_presentation_event(
+            &mut actor_client.player.as_mut().unwrap().body,
+            serde_json::json!({"kind": "anger_100"}),
+        );
+        let broadcaster = Arc::new(Broadcaster::new());
+        broadcaster.add_client(actor_client);
+        broadcaster.add_client(make_client(
+            observer_addr,
+            observer_tx,
+            &observer_name,
+            31_i64,
+        ));
+        {
+            let mut world = get_world_state().write().unwrap();
+            world.set_player_position(
+                &actor_name,
+                crate::world::PlayerPosition::new(zone.clone(), "1".into()),
+            );
+            world.set_player_position(
+                &observer_name,
+                crate::world::PlayerPosition::new(zone, "1".into()),
+            );
+        }
+        let storage = Arc::new(tokio::sync::RwLock::new(crate::script::ScriptStorage::default()));
+        let mut registry = CommandRegistry::new();
+        crate::command::commands::script::register_script_commands(
+            &mut registry,
+            storage,
+            None,
+            None,
+            None,
+        )
+        .await;
+
+        render_combat_presentation(&broadcaster, &Arc::new(registry), actor_addr);
+        let _ = actor_rx.try_recv();
+        let mut wire = String::new();
+        while let Ok(message) = observer_rx.try_recv() {
+            wire.push_str(&message);
+        }
+        assert_eq!(
+            wire,
+            format!(
+                "\r\n\x1b[1m{actor_name}\x1b[0;37m 갑자기 \x1b[1;40;31m괴성\x1b[0;40;37m을 지르며 \x1b[1;40;31m난동\x1b[0;40;37m을 부립니다. '끄오오오오오~~'\r\n\r\n\x1b[0;37;40m[ 31/45, 7/9 ] "
+            )
+        );
+        let mut world = get_world_state().write().unwrap();
+        world.remove_player_position(&actor_name);
+        world.remove_player_position(&observer_name);
     }
 
     #[test]
@@ -2199,6 +2858,282 @@ mod tests {
         client.state = ClientState::Active;
         client.set_player(player);
         (client, rx)
+    }
+
+    #[test]
+    fn pvp_tick_applies_lethal_damage_simultaneously_and_allows_double_death() {
+        let first_name = "비무첫째";
+        let second_name = "비무둘째";
+        let (mut first_client, _first_rx) = active_client(41301, first_name, ActState::Fight);
+        let (mut second_client, _second_rx) = active_client(41302, second_name, ActState::Fight);
+        let first = first_client.player.as_mut().unwrap();
+        first.body.set("힘", 20_i64);
+        first.body.set("명중", 10_000_i64);
+        first.body.set("최고내공", 100_i64);
+        first.body.temp_mut().insert(
+            crate::script::combat_commands::PVP_TARGET.to_string(),
+            crate::object::Value::String(second_name.to_string()),
+        );
+        let second = second_client.player.as_mut().unwrap();
+        second.body.set("힘", 20_i64);
+        second.body.set("명중", 10_000_i64);
+        second.body.set("최고내공", 100_i64);
+        second.body.temp_mut().insert(
+            crate::script::combat_commands::PVP_TARGET.to_string(),
+            crate::object::Value::String(first_name.to_string()),
+        );
+        let zone = format!("비무회귀존-{}", std::process::id());
+        {
+            let mut world = get_world_state().write().unwrap();
+            world.set_player_position(
+                first_name,
+                crate::world::PlayerPosition::new(zone.clone(), "1".to_string()),
+            );
+            world.set_player_position(
+                second_name,
+                crate::world::PlayerPosition::new(zone, "1".to_string()),
+            );
+        }
+        let mut clients = std::collections::HashMap::from([
+            (addr(41301), first_client),
+            (addr(41302), second_client),
+        ]);
+        let mut render = Vec::new();
+        let mut dead = Vec::new();
+        process_pvp_ticks(&mut clients, &mut render, &mut dead);
+        let first = &clients[&addr(41301)].player.as_ref().unwrap().body;
+        let second = &clients[&addr(41302)].player.as_ref().unwrap().body;
+        assert_eq!(first.act, ActState::Death);
+        assert_eq!(second.act, ActState::Death);
+        assert!(render.contains(&addr(41301)));
+        assert!(render.contains(&addr(41302)));
+        assert!(crate::script::combat_commands::pvp_target(first).is_none());
+        assert!(crate::script::combat_commands::pvp_target(second).is_none());
+        assert_eq!(dead.len(), 2);
+        let mut world = get_world_state().write().unwrap();
+        world.remove_player_position(first_name);
+        world.remove_player_position(second_name);
+    }
+
+    #[test]
+    fn pvp_tick_result_is_independent_of_which_player_has_the_lower_connection_address() {
+        for (case, first_port, second_port) in
+            [("정방향", 41321, 41322), ("역방향", 41324, 41323)]
+        {
+            let first_name = format!("비무순서첫째{case}");
+            let second_name = format!("비무순서둘째{case}");
+            let (mut first_client, _first_rx) =
+                active_client(first_port, &first_name, ActState::Fight);
+            let (mut second_client, _second_rx) =
+                active_client(second_port, &second_name, ActState::Fight);
+            for (client, target) in [
+                (&mut first_client, second_name.as_str()),
+                (&mut second_client, first_name.as_str()),
+            ] {
+                let body = &mut client.player.as_mut().unwrap().body;
+                body.set("힘", 20_i64);
+                body.set("명중", 10_000_i64);
+                body.set("최고내공", 100_i64);
+                body.temp_mut().insert(
+                    crate::script::combat_commands::PVP_TARGET.to_string(),
+                    crate::object::Value::String(target.to_string()),
+                );
+            }
+            let zone = format!("비무순서존-{case}-{}", std::process::id());
+            {
+                let mut world = get_world_state().write().unwrap();
+                for name in [&first_name, &second_name] {
+                    world.set_player_position(
+                        name,
+                        crate::world::PlayerPosition::new(zone.clone(), "1".to_string()),
+                    );
+                }
+            }
+            let mut clients = std::collections::HashMap::from([
+                (addr(first_port), first_client),
+                (addr(second_port), second_client),
+            ]);
+            let mut dead = Vec::new();
+            process_pvp_ticks(&mut clients, &mut Vec::new(), &mut dead);
+            assert_eq!(
+                clients[&addr(first_port)].player.as_ref().unwrap().body.act,
+                ActState::Death
+            );
+            assert_eq!(
+                clients[&addr(second_port)]
+                    .player
+                    .as_ref()
+                    .unwrap()
+                    .body
+                    .act,
+                ActState::Death
+            );
+            assert_eq!(dead.len(), 2);
+            let mut world = get_world_state().write().unwrap();
+            world.remove_player_position(&first_name);
+            world.remove_player_position(&second_name);
+        }
+    }
+
+    #[test]
+    fn simultaneous_pvp_commit_has_no_first_actor_survival_advantage() {
+        fn fighter(name: &str, target: &str) -> Body {
+            let mut body = Body::new();
+            body.set("이름", name);
+            body.set("체력", 50_i64);
+            body.set("최고체력", 50_i64);
+            body.act = ActState::Fight;
+            body.temp_mut().insert(
+                crate::script::combat_commands::PVP_TARGET.to_string(),
+                crate::object::Value::String(target.to_string()),
+            );
+            body
+        }
+        let mut first = fighter("동시첫째", "동시둘째");
+        let mut second = fighter("동시둘째", "동시첫째");
+        assert_eq!(
+            apply_simultaneous_pvp_damage(&mut first, &mut second, 50, 50),
+            (true, true)
+        );
+        assert_eq!(first.act, ActState::Death);
+        assert_eq!(second.act, ActState::Death);
+
+        let mut reversed_first = fighter("동시둘째", "동시첫째");
+        let mut reversed_second = fighter("동시첫째", "동시둘째");
+        assert_eq!(
+            apply_simultaneous_pvp_damage(&mut reversed_first, &mut reversed_second, 50, 50,),
+            (true, true)
+        );
+        assert_eq!(reversed_first.act, ActState::Death);
+        assert_eq!(reversed_second.act, ActState::Death);
+    }
+
+    #[test]
+    fn one_sided_pvp_death_clears_both_targets_and_survivor_fight_state() {
+        let mut defeated = Body::new();
+        defeated.set("이름", "패자");
+        defeated.set("체력", 10_i64);
+        defeated.set("최고체력", 10_i64);
+        defeated.act = ActState::Fight;
+        defeated.temp_mut().insert(
+            crate::script::combat_commands::PVP_TARGET.to_string(),
+            crate::object::Value::String("승자".to_string()),
+        );
+        let mut survivor = Body::new();
+        survivor.set("이름", "승자");
+        survivor.set("체력", 100_i64);
+        survivor.set("최고체력", 100_i64);
+        survivor.act = ActState::Fight;
+        survivor.temp_mut().insert(
+            crate::script::combat_commands::PVP_TARGET.to_string(),
+            crate::object::Value::String("패자".to_string()),
+        );
+
+        assert_eq!(
+            apply_simultaneous_pvp_damage(&mut defeated, &mut survivor, 10, 1),
+            (true, false)
+        );
+        assert_eq!(defeated.act, ActState::Death);
+        assert_eq!(survivor.act, ActState::Stand);
+        assert!(crate::script::combat_commands::pvp_target(&defeated).is_none());
+        assert!(crate::script::combat_commands::pvp_target(&survivor).is_none());
+    }
+
+    #[test]
+    fn pvp_tick_clears_stale_fight_when_target_disconnects_or_leaves_room() {
+        let survivor_name = "비무잔류자";
+        let missing_name = "비무이탈자";
+        let (mut survivor_client, _rx) =
+            active_client(41311, survivor_name, ActState::Fight);
+        survivor_client
+            .player
+            .as_mut()
+            .unwrap()
+            .body
+            .temp_mut()
+            .insert(
+                crate::script::combat_commands::PVP_TARGET.to_string(),
+                crate::object::Value::String(missing_name.to_string()),
+            );
+        let mut clients = std::collections::HashMap::from([(addr(41311), survivor_client)]);
+        process_pvp_ticks(&mut clients, &mut Vec::new(), &mut Vec::new());
+        let survivor = &clients[&addr(41311)].player.as_ref().unwrap().body;
+        assert_eq!(survivor.act, ActState::Stand);
+        assert!(crate::script::combat_commands::pvp_target(survivor).is_none());
+
+        let (mut first_client, _first_rx) = active_client(41312, "다른방첫째", ActState::Fight);
+        let (mut second_client, _second_rx) = active_client(41313, "다른방둘째", ActState::Fight);
+        for (client, target) in [
+            (&mut first_client, "다른방둘째"),
+            (&mut second_client, "다른방첫째"),
+        ] {
+            client.player.as_mut().unwrap().body.temp_mut().insert(
+                crate::script::combat_commands::PVP_TARGET.to_string(),
+                crate::object::Value::String(target.to_string()),
+            );
+        }
+        {
+            let mut world = get_world_state().write().unwrap();
+            world.set_player_position(
+                "다른방첫째",
+                crate::world::PlayerPosition::new("비무이탈존".to_string(), "1".to_string()),
+            );
+            world.set_player_position(
+                "다른방둘째",
+                crate::world::PlayerPosition::new("비무이탈존".to_string(), "2".to_string()),
+            );
+        }
+        let mut clients = std::collections::HashMap::from([
+            (addr(41312), first_client),
+            (addr(41313), second_client),
+        ]);
+        process_pvp_ticks(&mut clients, &mut Vec::new(), &mut Vec::new());
+        for address in [addr(41312), addr(41313)] {
+            let body = &clients[&address].player.as_ref().unwrap().body;
+            assert_eq!(body.act, ActState::Stand);
+            assert!(crate::script::combat_commands::pvp_target(body).is_none());
+        }
+        let mut world = get_world_state().write().unwrap();
+        world.remove_player_position("다른방첫째");
+        world.remove_player_position("다른방둘째");
+    }
+
+    #[test]
+    fn pvp_skill_pattern_advances_and_produces_deferred_damage() {
+        let mut attacker = Body::new();
+        attacker.set("이름", "비무무공공격자");
+        attacker.set("힘", 100_i64);
+        attacker.set("명중", 10_000_i64);
+        attacker.set("최고내공", 1_000_i64);
+        attacker.skill_map.insert(
+            "강룡십팔장".to_string(),
+            crate::player::SkillTraining::new(12, 0),
+        );
+        attacker.get_skill("강룡십팔장");
+        let mut defender = Body::new();
+        defender.set("이름", "비무무공방어자");
+        defender.set("레벨", 1_i64);
+        defender.set("체력", 10_000_i64);
+        defender.set("최고체력", 10_000_i64);
+        let mut deferred_damage = 0_i64;
+        for _ in 0..20 {
+            attacker.dex = attacker.dex.saturating_add(1_400);
+            let (damage, _) = pvp_skill_phase(&mut attacker, &mut defender);
+            deferred_damage = deferred_damage.saturating_add(damage);
+            assert_eq!(
+                defender.get_hp(),
+                10_000,
+                "phase calculation must not commit damage"
+            );
+            if attacker.skill.is_none() {
+                break;
+            }
+        }
+        assert!(deferred_damage > 0);
+        assert!(
+            attacker.skill.is_none(),
+            "the PvP skill pattern must finish"
+        );
     }
 
     fn unique_temp_dir(label: &str) -> PathBuf {
@@ -2460,12 +3395,7 @@ mod tests {
             world
                 .mob_cache
                 .insert_mob_data(mob_key.clone(), data.clone());
-            let mob = crate::world::MobInstance::new(
-                mob_key.clone(),
-                zone.clone(),
-                &room,
-                &data,
-            );
+            let mob = crate::world::MobInstance::new(mob_key.clone(), zone.clone(), &room, &data);
             mob_instance_id = mob.instance_id;
             world.mob_cache.add_mob_instance(mob);
             world.set_player_position(
@@ -2703,6 +3633,71 @@ mod tests {
     }
 
     #[test]
+    fn admin_mob_death_uses_the_normal_reward_and_auto_loot_tick() {
+        let contributor = format!("관리죽임기여자-{}", std::process::id());
+        let zone = format!("관리죽임보상존-{}", std::process::id());
+        let room = "1".to_string();
+        let mob_key = format!("{zone}:보상표적");
+        let mut data = crate::world::RawMobData::new();
+        data.name = "관리죽임보상표적".into();
+        data.zone = zone.clone();
+        data.level = 10;
+        data.gold = 20;
+        data.hp = 100;
+        data.max_hp = 100;
+        let mut mob = crate::world::MobInstance::new(mob_key.clone(), zone.clone(), &room, &data);
+        mob.targets.push(contributor.clone());
+        mob.record_player_damage(&contributor, 50);
+        mob.inventory
+            .push(crate::script::object_from_item_json("1").unwrap().0);
+        let instance_id = mob.instance_id;
+        {
+            let mut world = get_world_state().write().unwrap();
+            world
+                .mob_cache
+                .insert_mob_data(mob_key.clone(), data.clone());
+            world.mob_cache.add_mob_instance(mob);
+            world.set_player_position(
+                &contributor,
+                crate::world::PlayerPosition::new(zone.clone(), room.clone()),
+            );
+            let mobs = world
+                .mob_cache
+                .get_all_mobs_in_room_mut(&zone, &room)
+                .unwrap();
+            let selected = mobs
+                .iter_mut()
+                .find(|mob| mob.instance_id == instance_id)
+                .unwrap();
+            assert!(queue_admin_mob_death(selected, &data));
+            assert!(!selected.alive);
+        }
+
+        let broadcaster = Broadcaster::new();
+        let (mut client, _rx) = active_client(41169, &contributor, ActState::Stand);
+        let player = client.player.as_mut().unwrap();
+        player.body.set("레벨", 1_i64);
+        player.body.set("은전", 0_i64);
+        player.body.set("힘", 100_i64);
+        player.body.set("설정상태", "자동습득 1");
+        broadcaster.add_client(client);
+        let mut loop_ = GameLoop::new(GameLoopConfig::default());
+        loop_.tick_at(&broadcaster, Instant::now());
+        let clients = broadcaster.clients.lock();
+        let body = &clients[&addr(41169)].player.as_ref().unwrap().body;
+        assert!(body.get_int("은전") > 0);
+        assert!(body.object.objs.iter().any(|item| {
+            item.lock()
+                .is_ok_and(|item| item.getString("인덱스") == "1")
+        }));
+        drop(clients);
+        let mut world = get_world_state().write().unwrap();
+        world.remove_player_position(&contributor);
+        world.mob_cache.remove_instance(&zone, &room, &mob_key);
+        world.mob_cache.remove_mob(&mob_key);
+    }
+
+    #[test]
     fn active_auto_skill_does_not_recharge_cost_each_heartbeat() {
         crate::world::skill::reload_skill_cache().unwrap();
         let name = format!("무공비용주기-{}", std::process::id());
@@ -2796,6 +3791,35 @@ mod tests {
     }
 
     #[test]
+    fn runtime_taught_mob_skill_becomes_a_safe_combat_candidate() {
+        crate::world::skill::reload_skill_cache().unwrap();
+        let mut data = crate::world::RawMobData::new();
+        data.name = "전수무공몹".to_string();
+        data.hp = 1_000;
+        data.max_hp = 1_000;
+        data.inner_power = 1_000;
+        let mut mob = crate::world::MobInstance::new(
+            "시험:전수무공몹".to_string(),
+            "시험".to_string(),
+            "1",
+            &data,
+        );
+        mob.learned_skills.push("강룡십팔장".to_string());
+        assert_eq!(
+            mob_skill_candidates(&mob, &data),
+            vec![("강룡십팔장".to_string(), 100, 100)]
+        );
+        assert!(try_start_mob_attack_skill(&mut mob, &data, 0, 100));
+        assert_eq!(
+            mob.active_attack_skill
+                .as_ref()
+                .map(|skill| skill.name.as_str()),
+            Some("강룡십팔장")
+        );
+        assert_eq!(mob.mp, 700);
+    }
+
+    #[test]
     fn mob_defense_skill_applies_once_and_expires_with_modifier_rollback() {
         crate::world::skill::reload_skill_cache().unwrap();
         let mut data = crate::world::RawMobData::new();
@@ -2810,14 +3834,23 @@ mod tests {
             "1",
             &data,
         );
+        mob.skill_map.insert(
+            "금강불괴".to_string(),
+            crate::player::SkillTraining::new(3, 199_999),
+        );
         let mut player = Body::new();
 
+        let started_at = chrono::Utc::now().timestamp();
         let script = try_start_mob_defense_skill(&mut mob, &data, &mut player, &mut || 100);
         assert!(script.unwrap().0.contains("금강불괴"));
         assert_eq!(mob.mp, 350);
         assert_eq!(mob.str_modifier, 15);
         assert_eq!(mob.arm_modifier, 100);
         assert_eq!(mob.skill_effects.len(), 1);
+        assert!(
+            (started_at + 40..=started_at + 41).contains(&mob.skill_effects[0].expires_at),
+            "3성 금강불괴는 30 + 5*(3-1)초여야 합니다"
+        );
         assert!(try_start_mob_defense_skill(&mut mob, &data, &mut player, &mut || 0).is_none());
 
         let expiry = mob.skill_effects[0].expires_at;

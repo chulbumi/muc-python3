@@ -63,10 +63,29 @@ fn cmd(ob, line) {
         + " 말합니다 : '" + m1 + "'";
     // Python Room.sendRoom includes the speaking player as well.
     send_line(ob, room_msg);
+    // Room.sendRoom defaults to prompt=True and includes the speaker.
+    // The network command loop supplies the speaker's final second prompt;
+    // preserve the first Room.lpPrompt here when it is enabled.
+    if get_user_config(ob, "엘피출력") != "1" {
+        let vitals = return_vitals(ob);
+        send_line(ob, "\r\n\x1b[0;37;40m[ " + vitals["hp"].to_string() + "/"
+            + vitals["max_hp"].to_string() + ", " + vitals["mp"].to_string() + "/"
+            + vitals["max_mp"].to_string() + " ] ");
+    }
+    let details = get_cast_room_players(ob);
     for player_name in get_room_players(ob) {
-        if player_name != name {
-            send_to_user(player_name, room_msg);
+        if player_name == name { continue; }
+        let prompt = "";
+        for player in details {
+            if player["name"] == player_name && player["show_prompt"] {
+                prompt = "\r\n\x1b[0;37;40m[ " + player["hp"].to_string() + "/"
+                    + player["max_hp"].to_string() + ", " + player["mp"].to_string() + "/"
+                    + player["max_mp"].to_string() + " ] ";
+            }
         }
+        // Python sendRoom first performs sendLine(room_msg), then lpPrompt.
+        // This is the complete wire; a normal wrapper would add CRLF twice.
+        send_raw_to_user(player_name, room_msg + "\r\n" + prompt);
     }
 }
 

@@ -35,7 +35,11 @@ fn cmd(ob, line) {
         return;
     }
 
-    let result = run_guard_anger(ob, target["id"], target["room_index"]);
+    let result = if target["kind"] == "player" {
+        run_guard_anger_player(ob, target["id"])
+    } else {
+        run_guard_anger(ob, target["id"], target["instance_id"])
+    };
     if result["status"] != "ok" {
         send_line(ob, "☞ 공격할 그런 대상이 없습니다.");
         return;

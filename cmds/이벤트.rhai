@@ -7,20 +7,17 @@ fn cmd(ob, line) {
         send_line(ob, "☞ 무슨 말인지 모르겠어요. *^_^*");
         return;
     }
-    if line == "" || is_empty(line) {
+    let target = trim(line);
+    if target == "" {
         send_line(ob, "☞ 사용법: [대상] 이벤트");
         return;
     }
-    let events = get_obj_attr(ob, line, "이벤트설정리스트");
+    let events = get_room_target_event_lines(ob, target);
     if events.is_unit() {
         send_line(ob, "☞ 그런 대상이 없어요!");
         return;
     }
-    if events.is_string() {
-        for event_line in split(events, "\r\n") {
-            send_line(ob, event_line);
-        }
-    }
+    for event_line in events { send_line(ob, event_line); }
 }
 
 fn main(ob, line) {

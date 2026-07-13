@@ -177,6 +177,7 @@ pub struct RevealedFloorItem {
 pub enum RoomMobMessageKind {
     Speech,
     CorpseGone,
+    Respawn,
 }
 
 /// Data-only record of a Python `Item.update()` expiration.  Rhai owns the
@@ -189,8 +190,9 @@ pub struct ExpiredFloorItem {
 }
 
 /// A loaded room branch that Rust cannot yet update with Python `Room.update()`
-/// semantics.  `리부팅` must not stop the server after only a partial or
-/// guessed update, so callers treat every variant as a structural block.
+/// semantics. The updater preflights these branches to avoid partial world
+/// mutation; the server may still continue an administrator-requested reboot
+/// because this one-tick room state is transient and is not persisted.
 #[derive(Debug, Clone, PartialEq, Eq, thiserror::Error)]
 pub enum RebootRoomUpdateBlock {
     #[error("loaded room disappeared from cache: {zone}:{room}")]
@@ -272,7 +274,11 @@ impl WorldState {
         }
     }
 
-    pub fn add_summoned_user(&mut self, body: crate::player::Body, position: PlayerPosition) -> u64 {
+    pub fn add_summoned_user(
+        &mut self,
+        body: crate::player::Body,
+        position: PlayerPosition,
+    ) -> u64 {
         let id = self.next_summoned_user_id;
         self.next_summoned_user_id = self.next_summoned_user_id.saturating_add(1);
         self.record_room_object(
@@ -280,12 +286,41 @@ impl WorldState {
             &position.room,
             RoomObjectRef::SummonedUser(id),
         );
-        self.summoned_users.push(SummonedUser { id, body, position });
+        self.summoned_users
+            .push(SummonedUser { id, body, position });
         id
     }
 
     pub fn summoned_users(&self) -> &[SummonedUser] {
         &self.summoned_users
+    }
+
+    pub fn summoned_user_mut(&mut self, id: u64) -> Option<&mut SummonedUser> {
+        self.summoned_users.iter_mut().find(|user| user.id == id)
+    }
+
+    pub fn take_summoned_user_by_name(&mut self, name: &str) -> Option<SummonedUser> {
+        let index = self
+            .summoned_users
+            .iter()
+            .position(|user| user.body.get_name() == name)?;
+        let user = self.summoned_users.remove(index);
+        self.remove_room_object(
+            &user.position.zone,
+            &user.position.room,
+            &RoomObjectRef::SummonedUser(user.id),
+        );
+        Some(user)
+    }
+
+    pub fn restore_summoned_user(&mut self, mut user: SummonedUser, position: PlayerPosition) {
+        user.position = position;
+        self.record_room_object(
+            &user.position.zone,
+            &user.position.room,
+            RoomObjectRef::SummonedUser(user.id),
+        );
+        self.summoned_users.push(user);
     }
 
     pub fn summoned_users_in_room(&self, zone: &str, room: &str) -> Vec<&SummonedUser> {
@@ -314,16 +349,24 @@ impl WorldState {
         true
     }
 
+    pub fn remove_summoned_user_by_id(&mut self, id: u64) -> bool {
+        let Some(index) = self.summoned_users.iter().position(|user| user.id == id) else {
+            return false;
+        };
+        let user = self.summoned_users.remove(index);
+        self.remove_room_object(
+            &user.position.zone,
+            &user.position.room,
+            &RoomObjectRef::SummonedUser(user.id),
+        );
+        true
+    }
+
     /// Safe counterpart of Python `사용자몹제거`: select only a socket-less
     /// summoned Player in the administrator's current room.  The legacy code
     /// could also detach a real connected player from channel.players, which
     /// is an unsafe Python bug and is intentionally not reproduced.
-    pub fn remove_summoned_user_in_room(
-        &mut self,
-        zone: &str,
-        room: &str,
-        query: &str,
-    ) -> bool {
+    pub fn remove_summoned_user_in_room(&mut self, zone: &str, room: &str, query: &str) -> bool {
         let first = query.split_whitespace().next().unwrap_or("");
         if first.is_empty() || first.chars().all(|ch| ch.is_ascii_digit()) {
             return false;
@@ -342,9 +385,9 @@ impl WorldState {
             let name = user.body.get_name();
             let aliases = user.body.get_string("반응이름");
             (name == first
-                || aliases.split(['\r', '\n']).any(|alias| {
-                    !alias.is_empty() && (alias == first || alias.starts_with(first))
-                }))
+                || aliases
+                    .split(['\r', '\n'])
+                    .any(|alias| !alias.is_empty() && (alias == first || alias.starts_with(first))))
             .then_some(id)
         });
         let Some(id) = selected else { return false };
@@ -383,6 +426,13 @@ impl WorldState {
             .unwrap_or_default()
     }
 
+    pub fn get_summoned_user_name(&self, id: u64) -> Option<String> {
+        self.summoned_users
+            .iter()
+            .find(|user| user.id == id)
+            .map(|user| user.body.get_name())
+    }
+
     fn record_room_object(&mut self, zone: &str, room: &str, object: RoomObjectRef) {
         let objects = self
             .room_object_order
@@ -411,6 +461,28 @@ impl WorldState {
         );
     }
 
+    /// Reconcile floor objects inserted through a bulk operation with the
+    /// unified Python Room.objs order. `room_objs` is newest-first, so unseen
+    /// entries are recorded oldest-first to preserve every prepend event.
+    pub fn sync_floor_item_order(&mut self, zone: &str, room: &str) {
+        let floor = self.get_room_objs(zone, room);
+        let recorded = self.get_room_object_order(zone, room);
+        for item in floor.iter().rev() {
+            let reference = RoomObjectRef::FloorItem(Arc::as_ptr(item) as usize);
+            if !recorded.contains(&reference) {
+                self.record_room_object(zone, room, reference);
+            }
+        }
+    }
+
+    pub fn remove_floor_item_record(&mut self, zone: &str, room: &str, item: &Arc<Mutex<Object>>) {
+        self.remove_room_object(
+            zone,
+            room,
+            &RoomObjectRef::FloorItem(Arc::as_ptr(item) as usize),
+        );
+    }
+
     /// Record an installed Box after Python `Room.insert(box)`.
     pub fn record_box(&mut self, zone: &str, room: &str, object: &Arc<Mutex<Object>>) {
         self.record_room_object(zone, room, RoomObjectRef::Box(Arc::as_ptr(object) as usize));
@@ -424,6 +496,20 @@ impl WorldState {
                 self.room_object_order.remove(&key);
             }
         }
+    }
+
+    /// Remove one concrete mob object from a room, including its Python-style
+    /// `Room.objs` ordering entry.
+    pub fn remove_room_mob_instance(&mut self, zone: &str, room: &str, instance_id: u64) -> bool {
+        let Some(mobs) = self.mob_cache.get_all_mobs_in_room_mut(zone, room) else {
+            return false;
+        };
+        let Some(index) = mobs.iter().position(|mob| mob.instance_id == instance_id) else {
+            return false;
+        };
+        mobs.remove(index);
+        self.remove_room_object(zone, room, &RoomObjectRef::Mob(instance_id));
+        true
     }
 
     /// Get or create stackable items on a room's floor. Key: "zone:room", inner: 인덱스 -> 수량.
@@ -775,6 +861,7 @@ impl WorldState {
     ) -> Vec<RoomMobMessage> {
         let now = chrono::Utc::now().timestamp();
         let mut corpse_drops = Vec::new();
+        let mut respawning_instances = Vec::new();
         for (zone, room) in rooms {
             let templates = self
                 .mob_cache
@@ -791,6 +878,15 @@ impl WorldState {
                 continue;
             };
             for mob in mobs {
+                if !mob.alive
+                    && now.saturating_sub(mob.death_time)
+                        >= templates
+                            .get(&mob.mob_key)
+                            .map(|data| data.corpse_time.saturating_add(data.regen))
+                            .unwrap_or(i64::MAX)
+                {
+                    respawning_instances.push(mob.instance_id);
+                }
                 if mob.alive || mob.act != 2 {
                     continue;
                 }
@@ -816,6 +912,40 @@ impl WorldState {
             }
         }
         self.mob_cache.update_respawns_in_rooms_at(rooms, now);
+        let mut respawn_notices = Vec::new();
+        for (instance_id, old_zone, old_room, origin_zone, origin_room) in self
+            .mob_cache
+            .return_respawned_to_origins(&respawning_instances)
+        {
+            // Python removes the regenerated object from its wandering room
+            // and inserts it at the front of its fixed origin room.
+            self.remove_room_object(&old_zone, &old_room, &RoomObjectRef::Mob(instance_id));
+            self.record_room_object(
+                &origin_zone,
+                &origin_room,
+                RoomObjectRef::Mob(instance_id),
+            );
+        }
+        for instance_id in respawning_instances {
+            let Some(mob) = self
+                .mob_cache
+                .all_instances()
+                .find(|mob| mob.instance_id == instance_id)
+            else {
+                continue;
+            };
+            let description = self
+                .mob_cache
+                .get_mob(&mob.mob_key)
+                .map(|data| data.desc3.clone())
+                .unwrap_or_default();
+            respawn_notices.push((
+                mob.zone.clone(),
+                mob.room.clone(),
+                mob.name.clone(),
+                description,
+            ));
+        }
 
         let mut messages = Vec::new();
         for (zone, room, mob_name, drop_age, items) in corpse_drops {
@@ -831,7 +961,9 @@ impl WorldState {
                         ansi: object.getString("안시"),
                     });
                 }
-                self.get_room_objs_mut(&zone, &room).push(item.clone());
+                // Python repeatedly calls Room.insert(), so every revealed
+                // corpse item becomes the newest room object.
+                self.get_room_objs_mut(&zone, &room).insert(0, item.clone());
                 self.record_floor_item(&zone, &room, &item);
             }
             messages.push(RoomMobMessage {
@@ -841,6 +973,16 @@ impl WorldState {
                 message: String::new(),
                 mob_name,
                 revealed_items,
+            });
+        }
+        for (zone, room, mob_name, description) in respawn_notices {
+            messages.push(RoomMobMessage {
+                zone,
+                room,
+                kind: RoomMobMessageKind::Respawn,
+                message: description,
+                mob_name,
+                revealed_items: Vec::new(),
             });
         }
         for (zone, room) in rooms {
@@ -1334,6 +1476,42 @@ mod world_state_tests {
     }
 
     #[test]
+    fn runtime_box_and_summoned_user_lifecycle_preserves_prepend_and_removal() {
+        let mut world = WorldState::new();
+        let runtime_box = Arc::new(Mutex::new(Object::new()));
+        world.record_box("시험존", "1", &runtime_box);
+        let mut body = crate::player::Body::new();
+        body.set("이름", "소환사용자");
+        let summoned_id = world.add_summoned_user(
+            body,
+            PlayerPosition::new("시험존".to_string(), "1".to_string()),
+        );
+        assert_eq!(
+            world.get_room_object_order("시험존", "1"),
+            [
+                RoomObjectRef::SummonedUser(summoned_id),
+                RoomObjectRef::Box(Arc::as_ptr(&runtime_box) as usize),
+            ]
+        );
+
+        let extracted = world.take_summoned_user_by_name("소환사용자").unwrap();
+        assert_eq!(
+            world.get_room_object_order("시험존", "1"),
+            [RoomObjectRef::Box(Arc::as_ptr(&runtime_box) as usize)]
+        );
+        world.restore_summoned_user(
+            extracted,
+            PlayerPosition::new("시험존".to_string(), "2".to_string()),
+        );
+        assert_eq!(
+            world.get_room_object_order("시험존", "2"),
+            [RoomObjectRef::SummonedUser(summoned_id)]
+        );
+        assert!(world.remove_summoned_user_by_id(summoned_id));
+        assert!(world.get_room_object_order("시험존", "2").is_empty());
+    }
+
+    #[test]
     fn occupied_room_mob_tick_recovers_like_python_without_unspecified_talk() {
         let mut world = WorldState::new();
         let mut data = RawMobData::new();
@@ -1368,31 +1546,166 @@ mod world_state_tests {
         let key = "시험존:시체몹".to_string();
         world.mob_cache.insert_mob_data(key.clone(), data.clone());
         let item = Arc::new(Mutex::new(Object::new()));
-        item.lock().unwrap().set("이름", "유품검");
+        item.lock().unwrap().set("이름", "첫유품");
+        let second_item = Arc::new(Mutex::new(Object::new()));
+        second_item.lock().unwrap().set("이름", "둘째유품");
         let mut mob = MobInstance::new(key, "시험존".to_string(), "1", &data);
         mob.alive = false;
         mob.act = 2;
         mob.death_time = chrono::Utc::now().timestamp() - 2;
         mob.inventory.push(item.clone());
+        mob.inventory.push(second_item.clone());
         world.mob_cache.add_mob_instance(mob);
 
         let updates = world.update_occupied_room_mobs(&[("시험존".into(), "1".into())]);
         assert_eq!(updates.len(), 1);
         assert_eq!(updates[0].kind, RoomMobMessageKind::CorpseGone);
         assert_eq!(updates[0].mob_name, "시체몹");
-        assert_eq!(updates[0].revealed_items[0].name, "유품검");
-        assert_eq!(world.get_room_objs("시험존", "1").len(), 1);
+        assert_eq!(updates[0].revealed_items[0].name, "첫유품");
+        assert_eq!(updates[0].revealed_items[1].name, "둘째유품");
+        let floor = world.get_room_objs("시험존", "1");
+        assert_eq!(floor.len(), 2);
+        assert!(Arc::ptr_eq(&floor[0], &second_item));
+        assert!(Arc::ptr_eq(&floor[1], &item));
         assert!(matches!(
             item.lock().unwrap().temp.get(FLOOR_ITEM_DROP_TIME_KEY),
             Some(Value::Float(value)) if *value >= chrono::Utc::now().timestamp() as f64 - 1.0
         ));
-        assert!(matches!(
-            world.get_room_object_order("시험존", "1").first(),
-            Some(RoomObjectRef::FloorItem(_))
-        ));
+        assert_eq!(
+            world.get_room_object_order("시험존", "1"),
+            [
+                RoomObjectRef::FloorItem(Arc::as_ptr(&second_item) as usize),
+                RoomObjectRef::FloorItem(Arc::as_ptr(&item) as usize),
+            ]
+        );
         let mob = world.mob_cache.get_all_mobs_in_room("시험존", "1")[0];
         assert_eq!(mob.act, 3);
         assert!(mob.inventory.is_empty());
+    }
+
+    #[test]
+    fn wandering_mob_regen_returns_to_origin_and_prepends_room_order() {
+        let mut world = WorldState::new();
+        let mut data = RawMobData::new();
+        data.name = "귀소몹".to_string();
+        data.desc3 = "귀소몹이 원래 자리에서 다시 나타납니다.".to_string();
+        data.corpse_time = 0;
+        data.regen = 0;
+        let key = "시험존:귀소몹".to_string();
+        world.mob_cache.insert_mob_data(key.clone(), data.clone());
+        let instance = MobInstance::new(key.clone(), "시험존".to_string(), "1", &data);
+        let instance_id = instance.instance_id;
+        world.mob_cache.add_mob_instance(instance);
+        world.record_room_object("시험존", "1", RoomObjectRef::Mob(instance_id));
+
+        assert_eq!(
+            world
+                .mob_cache
+                .move_instance("시험존", "1", &key, "시험존", "2", 1),
+            Some(instance_id)
+        );
+        world.remove_room_object("시험존", "1", &RoomObjectRef::Mob(instance_id));
+        world.record_room_object("시험존", "2", RoomObjectRef::Mob(instance_id));
+        world.set_player_position(
+            "원래방목격자",
+            PlayerPosition::new("시험존".to_string(), "1".to_string()),
+        );
+        {
+            let mob = world
+                .mob_cache
+                .get_all_mobs_in_room_mut("시험존", "2")
+                .unwrap()
+                .iter_mut()
+                .find(|mob| mob.instance_id == instance_id)
+                .unwrap();
+            mob.kill();
+            mob.death_time = chrono::Utc::now().timestamp() - 1;
+        }
+
+        let messages =
+            world.update_occupied_room_mobs(&[("시험존".to_string(), "2".to_string())]);
+
+        assert!(world
+            .mob_cache
+            .get_all_mobs_in_room("시험존", "2")
+            .iter()
+            .all(|mob| mob.instance_id != instance_id));
+        let origin_mob = world
+            .mob_cache
+            .get_all_mobs_in_room("시험존", "1")
+            .into_iter()
+            .find(|mob| mob.instance_id == instance_id)
+            .unwrap();
+        assert!(origin_mob.alive);
+        assert_eq!(origin_mob.act, 0);
+        assert_eq!(origin_mob.origin_zone, "시험존");
+        assert_eq!(origin_mob.origin_room, "1");
+        assert_eq!(
+            world.get_room_object_order("시험존", "1"),
+            [
+                RoomObjectRef::Mob(instance_id),
+                RoomObjectRef::Player("원래방목격자".to_string()),
+            ]
+        );
+        assert!(world
+            .get_room_object_order("시험존", "2")
+            .iter()
+            .all(|object| object != &RoomObjectRef::Mob(instance_id)));
+        assert!(messages.iter().any(|message| {
+            message.kind == RoomMobMessageKind::Respawn
+                && message.zone == "시험존"
+                && message.room == "1"
+                && message.message == "귀소몹이 원래 자리에서 다시 나타납니다."
+        }));
+    }
+
+    #[test]
+    fn stationary_mob_regen_keeps_numeric_and_unified_room_order() {
+        let mut world = WorldState::new();
+        let mut data = RawMobData::new();
+        data.name = "제자리몹".to_string();
+        data.corpse_time = 0;
+        data.regen = 0;
+        let key = "시험존:제자리몹".to_string();
+        world.mob_cache.insert_mob_data(key.clone(), data.clone());
+        let first = MobInstance::new(key.clone(), "시험존".to_string(), "1", &data);
+        let first_id = first.instance_id;
+        let second = MobInstance::new(key, "시험존".to_string(), "1", &data);
+        let second_id = second.instance_id;
+        world.mob_cache.add_mob_instance(first);
+        world.mob_cache.add_mob_instance(second);
+        world.record_room_object("시험존", "1", RoomObjectRef::Mob(first_id));
+        world.record_room_object("시험존", "1", RoomObjectRef::Mob(second_id));
+        let numeric_order_before = world
+            .mob_cache
+            .get_all_mobs_in_room("시험존", "1")
+            .into_iter()
+            .map(|mob| mob.instance_id)
+            .collect::<Vec<_>>();
+        {
+            let mobs = world
+                .mob_cache
+                .get_all_mobs_in_room_mut("시험존", "1")
+                .unwrap();
+            mobs[0].kill();
+            mobs[0].death_time = chrono::Utc::now().timestamp() - 1;
+        }
+
+        world.update_occupied_room_mobs(&[("시험존".to_string(), "1".to_string())]);
+
+        assert_eq!(
+            world
+                .mob_cache
+                .get_all_mobs_in_room("시험존", "1")
+                .into_iter()
+                .map(|mob| mob.instance_id)
+                .collect::<Vec<_>>(),
+            numeric_order_before
+        );
+        assert_eq!(
+            world.get_room_object_order("시험존", "1"),
+            [RoomObjectRef::Mob(second_id), RoomObjectRef::Mob(first_id)]
+        );
     }
 
     #[test]

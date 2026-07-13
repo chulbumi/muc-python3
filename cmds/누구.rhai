@@ -40,7 +40,9 @@ fn cmd(ob, line) {
             }
         }
         let name = c["이름"];
-        line_buf = line_buf + "  " + fill_space(12, buf) + " " + fill_space(10, name);
+        // Python lib.func.fillSpace는 ANSI를 제외한 EUC-KR 바이트 폭으로
+        // 열을 맞춘다. Unicode 글자 수로 채우면 한글 이름마다 열이 벌어진다.
+        line_buf = line_buf + "  " + fill_space_euc_kr(12, buf) + " " + fill_space_euc_kr(10, name);
         cnt = cnt + 1;
         if cnt % 3 == 0 {
             lines.push(line_buf);

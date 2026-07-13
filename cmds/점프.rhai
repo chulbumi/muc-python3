@@ -4,7 +4,7 @@
 // Rhai 식별자는 ASCII만 허용 → jump_land (점프_착지)
 fn jump_land(ob) {
     set_value(ob, "cooltime", 0);
-    send_line(ob, "당신은 안전하게 착지합니다. 만세^^v");
+    send_line(ob, "당신은 안전하게 착지합니다. ^^v");
 }
 
 fn cmd(ob, line) {
@@ -16,7 +16,7 @@ fn cmd(ob, line) {
     }
     set_value(ob, "cooltime", 1);
     send_line(ob, "당신이 부웅~~ 날아 오릅니다");
-    call_out(ob["이름"], "jump_land", 2);
+    call_out(get_connection_token(ob), "jump_land", 2);
 }
 
 fn main(ob, line) {

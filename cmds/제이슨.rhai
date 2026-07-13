@@ -6,7 +6,8 @@ fn cmd(ob, line) {
         send_line(ob, "☞ 무슨 말인지 모르겠어요. *^_^*");
         return;
     }
-    print(get_body_attrs_json(ob));
+    // Python prints decoded j1 and the original ASCII j separately.
+    console_print_twice(get_body_attrs_json(ob));
 }
 
 fn main(ob, line) {

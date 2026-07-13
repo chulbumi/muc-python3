@@ -26,7 +26,7 @@ fn cmd(ob, line) {
     send_line(ob, "\x1b[0m\x1b[47m\x1b[30m▶ 은전 : "
         + pad_start(view["silver"].to_string(), 20, " ") + " 개 \x1b[0m\x1b[37m\x1b[40m");
     // Python 소소.py는 관리자 대상 조회에서도 금전만큼은 조회자가 가진 값을 출력한다.
-    let gold = get_int(ob, "금전");
+    let gold = get_score_gold(ob);
     if gold > 0 {
         send_line(ob, "\x1b[0m\x1b[47m\x1b[30m▶ 금전 : "
             + pad_start(gold.to_string(), 20, " ") + " 개 \x1b[0m\x1b[37m\x1b[40m");

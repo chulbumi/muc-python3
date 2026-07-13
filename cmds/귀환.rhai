@@ -1,6 +1,19 @@
 // 귀환.rhai - 귀환지로 이동
 // Python: cmds/귀환.py, objs/player.py enterRoom(..., "귀환", "귀환")
 
+fn return_observer_prompt(player_name) {
+    for player in get_all_online_players() {
+        if player["이름"] == player_name {
+            if !player["show_prompt"] { return ""; }
+            return "\r\n\x1b[0;37;40m[ " + player["현재체력"].to_string() + "/"
+                + player["현재최고체력"].to_string() + ", "
+                + player["현재내공"].to_string() + "/"
+                + player["현재최고내공"].to_string() + " ] ";
+        }
+    }
+    ""
+}
+
 fn cmd(ob, line) {
     // 이동 전 방 대상은 이동을 적용하기 전에만 알 수 있다.
     let old_room_players = get_room_players(ob);
@@ -63,14 +76,17 @@ fn cmd(ob, line) {
                 if player_name != "" && player_name != name {
                     // Python exitRoom의 사용자 이동스크립은 sendRoom에 이미
                     // CRLF가 붙은 문자열을 넘겨 방 수신자 앞에 두 줄을 둔다.
-                    send_to_user(player_name, "\r\n" + to_room);
+                    send_raw_to_user(player_name, "\r\n\r\n" + to_room + "\r\n"
+                        + return_observer_prompt(player_name));
                 }
             }
         } else {
             send_line(ob, "당신이 경공술을 펼치며 하늘로 치솟아 오릅니다. '무영지신!!!'");
             for player_name in old_room_players {
                 if player_name != "" && player_name != name {
-                    send_to_user(player_name, actor + " 경공술을 펼치며 하늘로 치솟아 오릅니다. '무영지신!!!'");
+                    send_raw_to_user(player_name, "\r\n" + actor
+                        + " 경공술을 펼치며 하늘로 치솟아 오릅니다. '무영지신!!!'\r\n"
+                        + return_observer_prompt(player_name));
                 }
             }
         }
@@ -101,13 +117,16 @@ fn cmd(ob, line) {
             let to_room = post_position_once(return_replace(entry_script, "[공]", name_a));
             for player_name in new_room_players {
                 if player_name != "" && player_name != name {
-                    send_to_user(player_name, to_room);
+                    send_raw_to_user(player_name, "\r\n" + to_room + "\r\n"
+                        + return_observer_prompt(player_name));
                 }
             }
         } else {
             for player_name in new_room_players {
                 if player_name != "" && player_name != name {
-                    send_to_user(player_name, actor + " 하늘에서 사뿐히 내려 앉습니다. '척~~~'");
+                    send_raw_to_user(player_name, "\r\n" + actor
+                        + " 하늘에서 사뿐히 내려 앉습니다. '척~~~'\r\n"
+                        + return_observer_prompt(player_name));
                 }
             }
         }
@@ -131,7 +150,8 @@ fn cmd(ob, line) {
         send_line(ob, hazard_output);
         for player_name in get_room_players(ob) {
             if player_name != "" && player_name != name {
-                send_to_user(player_name, to_room);
+                send_raw_to_user(player_name, "\r\n" + to_room + "\r\n"
+                    + return_observer_prompt(player_name));
             }
         }
         if !apply_return_hazard(ob, damage) {

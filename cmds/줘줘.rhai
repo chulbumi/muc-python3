@@ -15,12 +15,23 @@ fn cmd(ob, line) {
     let my_name = get_string(ob, "이름");
 
     if item_arg == "은전" {
-        let target_name = find_give_player(ob, requested_target);
+        let target_name = resolve_room_player_name(ob, requested_target);
         if target_name == "" {
             send_line(ob, "☞ 물품을 건내줄 무림인을 찾을 수 없어요. ^^");
             return;
         }
-        let amount = if len(words) >= 3 && to_int(words[2]) > 0 { to_int(words[2]) } else { 1 };
+        let parsed_amount = if len(words) >= 3 { to_int(words[2]) } else { 1 };
+        // Python only rewrites exactly zero; a negative admin grant reduces
+        // the recipient's silver and is observable state.
+        let amount = if parsed_amount == 0 { 1 } else { parsed_amount };
+        if target_name == my_name {
+            grant_self_silver(ob, amount);
+            send_line(ob, "당신이 \x1b[1m" + my_name + "\x1b[0;37m에게 은전 "
+                + amount.to_string() + "개를 줍니다.");
+            send_line(ob, "\r\n\x1b[1m" + my_name + "\x1b[0;37m" + han_iga(my_name)
+                + " 당신에게 은전 " + amount.to_string() + "개를 줍니다.");
+            return;
+        }
         request_grant_silver(ob, target_name, amount);
         return;
     }
@@ -32,7 +43,7 @@ fn cmd(ob, line) {
         send_line(ob, "☞ 그런 아이템이 소지품에 없어요.");
         return;
     }
-    let target_name = find_give_player(ob, requested_target);
+    let target_name = resolve_room_player_name(ob, requested_target);
     if target_name == "" {
         send_line(ob, "☞ 물품을 건내줄 무림인을 찾을 수 없어요. ^^");
         return;

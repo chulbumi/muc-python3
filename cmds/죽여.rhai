@@ -10,7 +10,7 @@ fn cmd(ob, line) {
         return;
     }
     let target = find_attack_target(ob, line);
-    if target.is_unit() || target["kind"] != "mob" {
+    if target.is_unit() || target["kind"] != "mob" || target["attack_forbidden"] {
         send_line(ob, "☞ 강호에는 공격할 수 있는것과 없는것이 있지!");
         return;
     }
@@ -25,11 +25,13 @@ fn cmd(ob, line) {
     } else {
         "\r\n\x1b[1;37m" + result["death_script"] + "\x1b[0;37m"
     };
-    // Python Room.writeRoom includes the command issuer.
-    send_line(ob, text);
-    send_room(ob, text);
-    send_line(ob, "\r\n");
-    send_room(ob, "\r\n");
+    // Python Room.writeRoom writes these bytes verbatim, including the
+    // issuer, and then writes a second CRLF. Generic send_to_user would wrap
+    // the payload in another CRLF pair, so use the opaque raw delivery path.
+    let context = get_party_context();
+    for player in context["room_players"] {
+        party_send_raw(ob, player["id"], text + "\r\n");
+    }
 }
 
 fn main(ob, line) { cmd(ob, line); }

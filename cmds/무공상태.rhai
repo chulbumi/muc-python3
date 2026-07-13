@@ -12,7 +12,8 @@ fn pad_num(value, width) {
 }
 
 fn cmd(ob, line) {
-    let target_view = get_mugong_view(ob, line);
+    let target = trim(line);
+    let target_view = get_mugong_view(ob, target);
     if !target_view["ok"] {
         send_line(ob, "☞ 당신의 안광으로는 그런것을 볼수 없다네");
         return;
@@ -22,7 +23,7 @@ fn cmd(ob, line) {
     send_line(ob, " \x1b[1m\x1b[32mЖ \x1b[37m" + target_name
         + "\x1b[0;37m의 무공집결 상태 \x1b[1m\x1b[32mЖ\x1b[0m\x1b[37m");
 
-    let active = get_target_active_mugong_status(ob, line);
+    let active = get_target_active_mugong_status(ob, target);
     if len(active) == 0 {
         send_line(ob, "──────────────────────────────");
         send_line(ob, get_murim_config("무공시전없음").to_string());

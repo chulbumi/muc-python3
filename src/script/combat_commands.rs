@@ -4,7 +4,9 @@
 //! Rhai commands.  This module resolves room objects and performs only the
 //! state transitions that the current Rust world model can prove equivalent.
 
-use super::cast::{add_target_id, find_cast_target, room_player_level_dex, target_ids};
+use super::cast::{
+    add_target_id, find_cast_target, room_player_level_dex, target_ids, with_room_player_body_mut,
+};
 use super::current_body_position;
 use super::return_home::{
     entry_event_is_supported, first_hazard, json_string, property_limit, python_int,
@@ -23,6 +25,24 @@ use std::time::{Duration, SystemTime, UNIX_EPOCH};
 const RUNAWAY_KEY: &str = "_runaway";
 const RUNAWAY_STARTED_KEY: &str = "_runaway_started_millis";
 pub(crate) const COMBAT_PRESENTATION_EVENTS: &str = "_combat_presentation_events";
+pub(crate) const PVP_TARGET: &str = "_pvp_target";
+
+pub(crate) fn pvp_target(body: &Body) -> Option<String> {
+    body.temp()
+        .get(PVP_TARGET)
+        .and_then(Value::as_str)
+        .filter(|name| !name.is_empty())
+        .map(str::to_string)
+}
+
+pub(crate) fn clear_pvp_target(body: &mut Body) {
+    body.temp_mut().remove(PVP_TARGET);
+    if body.act == ActState::Fight && combat_target_ids(body).is_empty() {
+        body.act = ActState::Stand;
+        body.dex = 0;
+        body.stop_skill();
+    }
+}
 
 pub(crate) fn combat_target_ids(body: &Body) -> Vec<String> {
     target_ids(body)
@@ -41,7 +61,7 @@ pub(crate) fn combat_target_instance_ids(body: &Body) -> Vec<u64> {
         .unwrap_or_default()
 }
 
-fn add_target_instance_id(body: &mut Body, id: u64) {
+pub(crate) fn add_target_instance_id(body: &mut Body, id: u64) {
     let mut ids = combat_target_instance_ids(body);
     if !ids.contains(&id) {
         ids.push(id);
@@ -230,7 +250,7 @@ fn effective_room_int(
     )
 }
 
-fn room_has_attr(body: &Body, key: &str) -> bool {
+pub(super) fn room_has_attr(body: &Body, key: &str) -> bool {
     let Some((zone, room)) = current_body_position(body) else {
         return false;
     };
@@ -241,7 +261,12 @@ fn room_has_attr(body: &Body, key: &str) -> bool {
 
 fn combat_target_count(body: &Body) -> i64 {
     let stored = target_ids(body).len();
-    stored.max(body.targets.len()) as i64
+    let count = stored.max(body.targets.len());
+    if pvp_target(body).is_some() {
+        count.max(1) as i64
+    } else {
+        count as i64
+    }
 }
 
 fn attack_result(status: &str) -> Map {
@@ -253,6 +278,53 @@ fn attack_result(status: &str) -> Map {
     result.insert("target_start".into(), Dynamic::from(String::new()));
     result.insert("linked".into(), Dynamic::from(Array::new()));
     result.insert("immediate_skills".into(), Dynamic::from(Array::new()));
+    result
+}
+
+fn start_pvp_attack(body: &mut Body, target_name: &str) -> Map {
+    let mut result = attack_result("not_found");
+    if target_name.is_empty() || target_name == body.get_name() || body.act == ActState::Death {
+        return result;
+    }
+    let attacker_name = body.get_name();
+    let attacker_was_stand = body.act == ActState::Stand;
+    let Some(target_result) = with_room_player_body_mut(target_name, |target| {
+        if target.act == ActState::Death || target.get_int("투명상태") == 1 {
+            return None;
+        }
+        if pvp_target(target).is_some_and(|name| name != attacker_name)
+            || !combat_target_ids(target).is_empty()
+        {
+            return Some(("busy", false, String::new()));
+        }
+        let target_was_stand = target.act == ActState::Stand;
+        target
+            .temp_mut()
+            .insert(PVP_TARGET.to_string(), Value::String(attacker_name.clone()));
+        target.act = ActState::Fight;
+        target.dex = 0;
+        Some(("ok", target_was_stand, target.get_weapon_name()))
+    }) else {
+        return result;
+    };
+    let Some((status, target_was_stand, target_weapon)) = target_result else {
+        return result;
+    };
+    if status != "ok" {
+        result.insert("status".into(), Dynamic::from(status));
+        return result;
+    }
+    body.temp_mut().insert(
+        PVP_TARGET.to_string(),
+        Value::String(target_name.to_string()),
+    );
+    body.act = ActState::Fight;
+    body.dex = 0;
+    result.insert("status".into(), Dynamic::from("ok"));
+    result.insert("caster_was_stand".into(), Dynamic::from(attacker_was_stand));
+    result.insert("target_was_stand".into(), Dynamic::from(target_was_stand));
+    result.insert("target_name".into(), Dynamic::from(target_name.to_string()));
+    result.insert("target_weapon".into(), Dynamic::from(target_weapon));
     result
 }
 
@@ -715,6 +787,11 @@ fn first_target_stats(
     zone: &str,
     room: &str,
 ) -> Option<(i64, i64)> {
+    if let Some(name) = pvp_target(body) {
+        if let Some(stats) = room_player_level_dex(&name) {
+            return Some(stats);
+        }
+    }
     let ids = target_ids(body);
     let id = ids
         .first()
@@ -847,6 +924,14 @@ fn clear_fight_for_move(
     room: &str,
 ) {
     let player_name = body.get_name();
+    if let Some(target_name) = pvp_target(body) {
+        let _ = with_room_player_body_mut(&target_name, |target| {
+            if pvp_target(target).as_deref() == Some(player_name.as_str()) {
+                clear_pvp_target(target);
+            }
+        });
+        body.temp_mut().remove(PVP_TARGET);
+    }
     if let Some(mobs) = world.mob_cache.get_all_mobs_in_room_mut(zone, room) {
         for mob in mobs {
             mob.targets.retain(|name| name != &player_name);
@@ -1252,6 +1337,13 @@ pub(super) fn register_combat_command_efuns(
         },
     );
     let ptr = body_ptr;
+    engine.register_fn(
+        "start_pvp_attack",
+        move |_ob: &mut Map, target_name: &str| -> Map {
+            start_pvp_attack(unsafe { &mut *ptr }, target_name)
+        },
+    );
+    let ptr = body_ptr;
     engine.register_fn("runaway_cooling_down", move |_ob: &mut Map| -> bool {
         runaway_cooling_down(unsafe { &mut *ptr })
     });
@@ -1273,6 +1365,99 @@ pub(super) fn register_combat_command_efuns(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn pvp_start_sets_reciprocal_live_player_state_and_rejects_busy_target() {
+        let mut attacker = Body::new();
+        attacker.set("이름", "비무공격자");
+        let mut defender = Body::new();
+        defender.set("이름", "비무방어자");
+        super::super::cast::set_cast_room_players(vec![
+            super::super::cast::CastRoomPlayerRef::new(&mut defender),
+        ]);
+        let started = start_pvp_attack(&mut attacker, "비무방어자");
+        assert_eq!(started["status"].clone_cast::<String>(), "ok");
+        assert_eq!(pvp_target(&attacker).as_deref(), Some("비무방어자"));
+        assert_eq!(pvp_target(&defender).as_deref(), Some("비무공격자"));
+        assert_eq!(attacker.act, ActState::Fight);
+        assert_eq!(defender.act, ActState::Fight);
+        clear_pvp_target(&mut attacker);
+        clear_pvp_target(&mut defender);
+        super::super::cast::clear_cast_room_players();
+    }
+
+    #[test]
+    fn rhai_attack_honors_user_combat_forbidden_room_then_starts_pvp() {
+        let suffix = std::process::id();
+        let attacker_name = format!("비무명령공격자-{suffix}");
+        let defender_name = format!("비무명령방어자-{suffix}");
+        let mut attacker = Body::new();
+        attacker.set("이름", attacker_name.as_str());
+        let mut defender = Body::new();
+        defender.set("이름", defender_name.as_str());
+        {
+            let mut world = get_world_state().write().unwrap();
+            world.set_player_position(
+                &attacker_name,
+                PlayerPosition::new("낙양성".to_string(), "56".to_string()),
+            );
+            world.set_player_position(
+                &defender_name,
+                PlayerPosition::new("낙양성".to_string(), "56".to_string()),
+            );
+        }
+        super::super::cast::set_cast_room_players(vec![
+            super::super::cast::CastRoomPlayerRef::new(&mut defender),
+        ]);
+        let storage = crate::script::ScriptStorage::default();
+        let denied = storage
+            .execute("쳐", &mut attacker, &defender_name, None, None, None)
+            .unwrap();
+        assert_eq!(
+            denied.0,
+            vec!["☞ 지금은 \x1b[1m\x1b[31m살겁\x1b[0m\x1b[37m\x1b[40m을 일으키기에 부적합한 상황 이라네"]
+        );
+        assert!(pvp_target(&attacker).is_none());
+        assert!(pvp_target(&defender).is_none());
+
+        {
+            let mut world = get_world_state().write().unwrap();
+            world.set_player_position(
+                &attacker_name,
+                PlayerPosition::new("낙양성".to_string(), "1000".to_string()),
+            );
+            world.set_player_position(
+                &defender_name,
+                PlayerPosition::new("낙양성".to_string(), "1000".to_string()),
+            );
+        }
+        super::super::cast::set_cast_room_players(vec![
+            super::super::cast::CastRoomPlayerRef::new(&mut defender),
+        ]);
+        let started = storage
+            .execute("쳐", &mut attacker, &defender_name, None, None, None)
+            .unwrap();
+        assert_eq!(started.0, vec!["당신이 주먹을 쥐며 공격 합니다."]);
+        assert_eq!(
+            pvp_target(&attacker).as_deref(),
+            Some(defender_name.as_str())
+        );
+        assert_eq!(
+            pvp_target(&defender).as_deref(),
+            Some(attacker_name.as_str())
+        );
+        super::super::cast::set_cast_room_players(vec![
+            super::super::cast::CastRoomPlayerRef::new(&mut defender),
+        ]);
+        let repeated = storage
+            .execute("쳐", &mut attacker, &defender_name, None, None, None)
+            .unwrap();
+        assert_eq!(repeated.0, vec!["☞ 이미 공격중이에요. ^_^"]);
+        super::super::cast::clear_cast_room_players();
+        let mut world = get_world_state().write().unwrap();
+        world.remove_player_position(&attacker_name);
+        world.remove_player_position(&defender_name);
+    }
     use crate::script::ScriptStorage;
     use crate::world::MobInstance;
 
@@ -1551,6 +1736,23 @@ mod tests {
 
         let zone = "공격명령회귀검사존";
         let room = "1";
+        let mut observer = Body::new();
+        observer.set("이름", "공격관전자");
+        observer.set("체력", 41_i64);
+        observer.set("최고체력", 42_i64);
+        observer.set("내공", 8_i64);
+        observer.set("최고내공", 9_i64);
+        let mut rejecting = Body::new();
+        rejecting.set("이름", "공격출력거부관전자");
+        rejecting.set("설정상태", "타인전투출력거부 1");
+        rejecting.set("체력", 11_i64);
+        rejecting.set("최고체력", 12_i64);
+        rejecting.set("내공", 3_i64);
+        rejecting.set("최고내공", 4_i64);
+        super::super::cast::set_cast_room_players(vec![
+            super::super::cast::CastRoomPlayerRef::new(&mut observer),
+            super::super::cast::CastRoomPlayerRef::new(&mut rejecting),
+        ]);
         let (mob_key, mob_name, mob_start) = {
             let mut world = get_world_state().write().unwrap();
             let data = world
@@ -1570,13 +1772,38 @@ mod tests {
                 "공격명령회귀검사",
                 PlayerPosition::new(zone.to_string(), room.to_string()),
             );
+            world.set_player_position(
+                "공격관전자",
+                PlayerPosition::new(zone.to_string(), room.to_string()),
+            );
+            world.set_player_position(
+                "공격출력거부관전자",
+                PlayerPosition::new(zone.to_string(), room.to_string()),
+            );
             (mob_key, mob_name, mob_start)
         };
 
         let (output, special) = storage
             .execute("쳐", &mut body, &mob_name, None, None, None)
             .unwrap();
-        assert!(special.is_none());
+        let sends = match special {
+            Some(crate::command::CommandResult::OutputAndSendToUsers(_, sends)) => sends,
+            other => panic!("expected attack room deliveries, got {other:?}"),
+        };
+        for (name, prompt) in [
+            ("공격관전자", "\0MUC_RAW_USER\0\r\n\x1b[0;37;40m[ 41/42, 8/9 ] "),
+            ("공격출력거부관전자", "\0MUC_RAW_USER\0\r\n\x1b[0;37;40m[ 11/12, 3/4 ] "),
+        ] {
+            let messages = sends
+                .iter()
+                .filter(|(recipient, _)| recipient == name)
+                .map(|(_, message)| message.as_str())
+                .collect::<Vec<_>>();
+            assert_eq!(messages.len(), 2, "{name}: {messages:?}");
+            assert!(messages[0].contains("주먹을 쥐며 공격 합니다."));
+            assert!(messages[0].contains(&mob_name));
+            assert_eq!(messages[1], prompt);
+        }
         assert_eq!(
             output,
             vec![
@@ -1595,10 +1822,66 @@ mod tests {
             Some(mob_key.as_str())
         );
 
-        get_world_state()
-            .write()
-            .unwrap()
-            .remove_player_position("공격명령회귀검사");
+        let mut world = get_world_state().write().unwrap();
+        world.remove_player_position("공격명령회귀검사");
+        world.remove_player_position("공격관전자");
+        world.remove_player_position("공격출력거부관전자");
+        drop(world);
+        super::super::cast::clear_cast_room_players();
+    }
+
+    #[test]
+    fn rhai_attack_distinguishes_same_template_mob_instances() {
+        let storage = ScriptStorage::default();
+        let player = "동명몹공격회귀검사";
+        let zone = "동명몹공격회귀검사존";
+        let room = "1";
+        let (mob_key, current_id) = {
+            let mut world = get_world_state().write().unwrap();
+            let data = world
+                .mob_cache
+                .load_mob("참회동", "산딸기")
+                .expect("repository mob fixture");
+            let mob_key = "참회동:산딸기".to_string();
+            let first = MobInstance::new(mob_key.clone(), zone.to_string(), room, &data);
+            let first_id = first.instance_id;
+            let second = MobInstance::new(mob_key.clone(), zone.to_string(), room, &data);
+            let second_id = second.instance_id;
+            world.mob_cache.add_mob_instance(first);
+            world.record_test_room_object(zone, room, crate::world::RoomObjectRef::Mob(first_id));
+            world.mob_cache.add_mob_instance(second);
+            world.record_test_room_object(zone, room, crate::world::RoomObjectRef::Mob(second_id));
+            world.set_player_position(
+                player,
+                PlayerPosition::new(zone.to_string(), room.to_string()),
+            );
+            (mob_key, second_id)
+        };
+
+        let mut body = Body::new();
+        body.set("이름", player);
+        body.act = ActState::Fight;
+        body.temp_mut()
+            .insert("_combat_target_ids".to_string(), Value::String(mob_key));
+        body.temp_mut().insert(
+            "_combat_target_instance_ids".to_string(),
+            Value::String(current_id.to_string()),
+        );
+
+        let first = storage
+            .execute("쳐", &mut body, "1", None, None, None)
+            .unwrap();
+        assert_eq!(first.0, vec!["☞ 이미 공격중이에요. ^_^"]);
+        let second = storage
+            .execute("쳐", &mut body, "2", None, None, None)
+            .unwrap();
+        assert_eq!(second.0, vec!["☞ 현재의 비무에 신경을 집중하세요. @_@"]);
+
+        let mut world = get_world_state().write().unwrap();
+        world.remove_player_position(player);
+        if let Some(mobs) = world.mob_cache.get_all_mobs_in_room_mut(zone, room) {
+            mobs.clear();
+        }
     }
 
     #[test]
@@ -1622,6 +1905,121 @@ mod tests {
             .unwrap();
         assert_eq!(output, vec!["☞ 도망 갈려다 잡혔어요. '흑흑~~ T_T'"]);
         assert!(special.is_none());
+    }
+
+    #[test]
+    fn flee_observer_prompt_uses_live_vitals_and_python_visibility_rules() {
+        let mut visible = rhai::Map::new();
+        visible.insert("이름".into(), Dynamic::from("도망관전자"));
+        visible.insert("show_prompt".into(), Dynamic::from(true));
+        visible.insert("현재체력".into(), Dynamic::from(31_i64));
+        visible.insert("현재최고체력".into(), Dynamic::from(45_i64));
+        visible.insert("현재내공".into(), Dynamic::from(7_i64));
+        visible.insert("현재최고내공".into(), Dynamic::from(9_i64));
+        let mut hidden = visible.clone();
+        hidden.insert("이름".into(), Dynamic::from("프롬프트거부관전자"));
+        hidden.insert("show_prompt".into(), Dynamic::from(false));
+        let online = vec![Dynamic::from(visible), Dynamic::from(hidden)];
+        let mut engine = rhai::Engine::new();
+        engine.register_fn("get_all_online_players", move || online.clone());
+        let source = std::fs::read_to_string("cmds/도망.rhai").unwrap();
+        let shown = engine
+            .eval::<String>(&format!("{source}\nflee_prompt(\"도망관전자\")"))
+            .unwrap();
+        assert_eq!(shown, "\r\n\x1b[0;37;40m[ 31/45, 7/9 ] ");
+        let suppressed = engine
+            .eval::<String>(&format!("{source}\nflee_prompt(\"프롬프트거부관전자\")"))
+            .unwrap();
+        assert_eq!(suppressed, "");
+    }
+
+    #[test]
+    fn combat_tick_room_event_uses_python_send_fight_script_prompt_wire() {
+        let mut actor = Body::new();
+        actor.set("이름", "틱공격자");
+        let mut observer = Body::new();
+        observer.set("이름", "틱관전자");
+        observer.set("설정상태", "타인전투출력거부 0");
+        observer.set("체력", 31_i64);
+        observer.set("최고체력", 45_i64);
+        observer.set("내공", 7_i64);
+        observer.set("최고내공", 9_i64);
+        super::super::cast::set_cast_room_players(vec![
+            super::super::cast::CastRoomPlayerRef::new(&mut observer),
+        ]);
+        let mut details = rhai::Map::new();
+        details.insert("이름".into(), Dynamic::from("틱관전자"));
+        details.insert("show_prompt".into(), Dynamic::from(true));
+        details.insert("현재체력".into(), Dynamic::from(31_i64));
+        details.insert("현재최고체력".into(), Dynamic::from(45_i64));
+        details.insert("현재내공".into(), Dynamic::from(7_i64));
+        details.insert("현재최고내공".into(), Dynamic::from(9_i64));
+        crate::script::set_precomputed_all_online(vec![Dynamic::from(details)]);
+        queue_combat_presentation_event(
+            &mut actor,
+            serde_json::json!({"kind": "anger_100"}),
+        );
+
+        let result = ScriptStorage::default()
+            .execute("__combat_tick", &mut actor, "", None, None, None)
+            .unwrap();
+        let sends = match result.1.unwrap() {
+            crate::command::CommandResult::OutputAndSendToUsers(_, sends) => sends,
+            other => panic!("unexpected combat tick delivery: {other:?}"),
+        };
+        assert_eq!(sends.len(), 1);
+        assert_eq!(sends[0].0, "틱관전자");
+        assert_eq!(
+            sends[0].1,
+            format!(
+                "{}\r\n\x1b[1m틱공격자\x1b[0;37m 갑자기 \x1b[1;40;31m괴성\x1b[0;40;37m을 지르며 \x1b[1;40;31m난동\x1b[0;40;37m을 부립니다. '끄오오오오오~~'\r\n\r\n\x1b[0;37;40m[ 31/45, 7/9 ] ",
+                crate::script::RAW_USER_MESSAGE_PREFIX,
+            )
+        );
+        super::super::cast::clear_cast_room_players();
+        crate::script::clear_precomputed_all_online();
+    }
+
+    #[test]
+    fn combat_tick_respawn_event_uses_python_write_room_then_prompt_wire() {
+        let mut actor = Body::new();
+        actor.set("이름", "리젠목격자");
+        let mut details = rhai::Map::new();
+        details.insert("이름".into(), Dynamic::from("리젠목격자"));
+        details.insert("show_prompt".into(), Dynamic::from(true));
+        details.insert("현재체력".into(), Dynamic::from(21_i64));
+        details.insert("현재최고체력".into(), Dynamic::from(30_i64));
+        details.insert("현재내공".into(), Dynamic::from(4_i64));
+        details.insert("현재최고내공".into(), Dynamic::from(6_i64));
+        crate::script::set_precomputed_all_online(vec![Dynamic::from(details)]);
+        queue_combat_presentation_event(
+            &mut actor,
+            serde_json::json!({
+                "kind": "room_mob_respawn",
+                "text": "귀소몹이 원래 자리에서 다시 나타납니다.",
+            }),
+        );
+
+        let result = ScriptStorage::default()
+            .execute("__combat_tick", &mut actor, "", None, None, None)
+            .unwrap();
+        assert!(result.0.is_empty());
+        let sends = match result.1.unwrap() {
+            crate::command::CommandResult::SendToUsers(sends) => sends,
+            crate::command::CommandResult::OutputAndSendToUsers(_, sends) => sends,
+            other => panic!("unexpected respawn delivery: {other:?}"),
+        };
+        assert_eq!(
+            sends,
+            [(
+                "리젠목격자".to_string(),
+                format!(
+                    "{}\r\n귀소몹이 원래 자리에서 다시 나타납니다.\r\n\r\n\x1b[0;37;40m[ 21/30, 4/6 ] ",
+                    crate::script::RAW_USER_MESSAGE_PREFIX,
+                ),
+            )]
+        );
+        crate::script::clear_precomputed_all_online();
     }
 
     #[tokio::test]

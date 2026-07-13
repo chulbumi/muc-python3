@@ -6,11 +6,11 @@ fn cmd(ob, line) {
         send_line(ob, "☞ 무슨 말인지 모르겠어요. *^_^*");
         return;
     }
-    if line == "" || is_empty(line) {
+    if line == "" {
         send_line(ob, "☞ 사용법: [기연이름] 기연정리");
         return;
     }
-    let idx = oneitem_get_index_by_name(trim(line));
+    let idx = oneitem_get_index_by_name(line);
     if idx == "" {
         send_line(ob, "☞ 그런 아이템은 없습니다.!");
         return;
@@ -34,11 +34,17 @@ fn cmd(ob, line) {
     if where == "" {
         let result = cleanup_offline_oneitem(ob, who, idx);
         if result == "ok" {
-            send_line(ob, who + "의 " + trim(line) + han_eul(trim(line)) + " 정리하였습니다.");
+            send_line(ob, who + "의 " + line + han_eul(line) + " 정리하였습니다.");
             oneitem_destroy(idx);
             return;
-        } else if result != "not_found" {
-            send_line(ob, result);
+        } else if result == "user_not_found" {
+            send_line(ob, "존재하지않는 사용자입니다.");
+            return;
+        } else if result == "too_recent" {
+            send_line(ob, "아직 3일이 경과하지 않았습니다.");
+            return;
+        } else if result == "save_failed" {
+            send_line(ob, "저장할 수 없습니다.");
             return;
         }
     }

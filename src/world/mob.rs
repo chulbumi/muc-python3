@@ -61,7 +61,7 @@ pub struct RawMobData {
     /// Reaction names (aliases)
     pub reaction_names: Vec<String>,
     /// Spawn locations (위치)
-    pub locations: Vec<i64>,
+    pub locations: Vec<String>,
     /// Regen time in seconds (리젠)
     pub regen: i64,
     /// Talk tick (대화틱)
@@ -174,6 +174,10 @@ pub struct MobInstance {
     pub zone: String,
     /// Current room id ("1" or 사용자맵 "이름")
     pub room: String,
+    /// Python `Mob.origin`, fixed when the clone is first placed. Wandering
+    /// changes only `zone`/`room`; regeneration returns to this location.
+    pub origin_zone: String,
+    pub origin_room: String,
     /// Instance name (might have customization)
     pub name: String,
     /// Current HP
@@ -207,6 +211,10 @@ pub struct MobInstance {
     pub act: i32,
     /// Active skills (for 방어상태머리말 display)
     pub skills: Vec<String>,
+    /// Skills granted to this runtime mob by administrator commands.
+    pub learned_skills: Vec<String>,
+    /// Python Body.skillMap equivalent for runtime mob skill rank/experience.
+    pub skill_map: HashMap<String, crate::player::SkillTraining>,
     /// Runtime defense/buff effects. `skills` is retained as the display-name list.
     pub skill_effects: Vec<MobSkillEffect>,
     /// Mob type (for display filtering, e.g., type 7 is hidden)
@@ -258,6 +266,28 @@ pub struct MobSkillEffect {
 }
 
 impl MobInstance {
+    pub fn remove_skill_effect_by_name(&mut self, name: &str) -> bool {
+        let Some(index) = self
+            .skill_effects
+            .iter()
+            .position(|effect| effect.name == name)
+        else {
+            return false;
+        };
+        let effect = self.skill_effects.remove(index);
+        self.str_modifier -= effect.str_bonus;
+        self.dex_modifier -= effect.dex_bonus;
+        self.arm_modifier -= effect.arm_bonus;
+        self.mp_modifier -= effect.mp_bonus;
+        self.max_mp_modifier -= effect.max_mp_bonus;
+        self.hp_modifier -= effect.hp_bonus;
+        self.max_hp_modifier -= effect.max_hp_bonus;
+        if !self.skill_effects.iter().any(|effect| effect.name == name) {
+            self.skills.retain(|active| active != name);
+        }
+        true
+    }
+
     /// Create a new mob instance. room은 "1" 또는 사용자맵 "이름" 등.
     pub fn new(mob_key: String, zone: String, room: impl ToString, data: &RawMobData) -> Self {
         Self::with_difficulty(mob_key, zone, room, data, 0)
@@ -291,11 +321,14 @@ impl MobInstance {
         let arm = config.apply_arm(data.arm);
         let agility = config.apply_agi(data.agility);
 
+        let room = room.to_string();
         Self {
             instance_id: NEXT_MOB_INSTANCE_ID.fetch_add(1, Ordering::Relaxed),
             mob_key,
+            origin_zone: zone.clone(),
+            origin_room: room.clone(),
             zone,
-            room: room.to_string(),
+            room,
             name: data.name.clone(),
             hp: max_hp, // Start at full health
             max_hp,
@@ -314,6 +347,8 @@ impl MobInstance {
             // Python `Mob.reset()` starts `skills` as the active-defense list;
             // learned attack/defense candidates remain in template `data.skills`.
             skills: Vec::new(),
+            learned_skills: Vec::new(),
+            skill_map: HashMap::new(),
             skill_effects: Vec::new(),
             mob_type: data.mob_type,
             difficulty,
@@ -593,6 +628,10 @@ pub struct MobCache {
 }
 
 impl MobCache {
+    pub(crate) fn all_instances(&self) -> impl Iterator<Item = &MobInstance> {
+        self.instances.values().flatten()
+    }
+
     /// Move one concrete cloned mob between room instance vectors.  The
     /// caller supplies the selected instance key; this preserves its runtime
     /// HP, targets and movement timestamp instead of respawning a template.
@@ -647,6 +686,60 @@ impl MobCache {
         self.instances.entry(destination_key).or_default().push(mob);
         Some(instance_id)
     }
+
+    /// Apply Python `Mob.doRegen()`'s origin-room move to instances that have
+    /// just completed their corpse+regen delay. Returns every room transition
+    /// so WorldState can update its unified Room.objs index atomically.
+    pub(crate) fn return_respawned_to_origins(
+        &mut self,
+        instance_ids: &[u64],
+    ) -> Vec<(u64, String, String, String, String)> {
+        use super::difficulty::base_zone_name;
+
+        let mut transitions = Vec::new();
+        for instance_id in instance_ids {
+            let source = self.instances.iter().find_map(|(key, instances)| {
+                instances
+                    .iter()
+                    .position(|mob| {
+                        mob.instance_id == *instance_id
+                            && mob.alive
+                            && mob.act == 0
+                            && (mob.zone != mob.origin_zone || mob.room != mob.origin_room)
+                    })
+                    .map(|index| (key.clone(), index))
+            });
+            let Some((source_key, index)) = source else {
+                continue;
+            };
+            let Some(instances) = self.instances.get_mut(&source_key) else {
+                continue;
+            };
+            let mut mob = instances.remove(index);
+            if instances.is_empty() {
+                self.instances.remove(&source_key);
+            }
+            let old_zone = mob.zone.clone();
+            let old_room = mob.room.clone();
+            mob.zone = mob.origin_zone.clone();
+            mob.room = mob.origin_room.clone();
+            let destination_key = format!(
+                "{}:{}:{}",
+                base_zone_name(&mob.origin_zone),
+                mob.origin_room,
+                mob.difficulty
+            );
+            transitions.push((
+                mob.instance_id,
+                old_zone,
+                old_room,
+                mob.origin_zone.clone(),
+                mob.origin_room.clone(),
+            ));
+            self.instances.entry(destination_key).or_default().push(mob);
+        }
+        transitions
+    }
     /// Create a new mob cache
     pub fn new() -> Self {
         Self {
@@ -692,12 +785,23 @@ impl MobCache {
     }
 
     /// Python `Mob.Mobs` iteration order: successful template registration
-    /// order, independent of whether an instance is currently spawned/alive.
+    /// groups by outer zone insertion order, then uses each zone dictionary's
+    /// mob insertion order. Instances and their alive state are irrelevant.
     pub fn ordered_mob_templates(&self) -> impl Iterator<Item = (&str, &RawMobData)> {
-        self.mob_order.iter().filter_map(|key| {
-            self.mobs
-                .get(key)
-                .map(|data| (key.as_str(), data))
+        let mut zones = Vec::new();
+        for key in &self.mob_order {
+            let zone = key.split_once(':').map(|(zone, _)| zone).unwrap_or("");
+            if !zones.contains(&zone) {
+                zones.push(zone);
+            }
+        }
+        zones.into_iter().flat_map(move |zone| {
+            self.mob_order.iter().filter_map(move |key| {
+                let key_zone = key.split_once(':').map(|(zone, _)| zone).unwrap_or("");
+                (key_zone == zone)
+                    .then(|| self.mobs.get(key).map(|data| (key.as_str(), data)))
+                    .flatten()
+            })
         })
     }
 
@@ -708,18 +812,35 @@ impl MobCache {
 
     pub fn item_holders(&self, item_key: &str) -> Vec<(String, String)> {
         let mut holders = Vec::new();
+        // Python stores Mob.Mobs as zone -> mob dicts and iterates the outer
+        // zone insertion order before each zone's mob insertion order. A
+        // later registration into an earlier zone therefore precedes every
+        // mob belonging to a later zone.
+        let mut zones = Vec::new();
         for key in &self.mob_order {
-            let Some(mob) = self.mobs.get(key) else {
-                continue;
-            };
-            for (item, _, _, _) in &mob.drop_items {
-                if item == item_key {
-                    holders.push((mob.name.clone(), key.clone()));
-                }
+            let zone = key.split_once(':').map(|(zone, _)| zone).unwrap_or("");
+            if !zones.iter().any(|saved| *saved == zone) {
+                zones.push(zone);
             }
-            for (item, _, _, _) in &mob.use_items {
-                if item == item_key {
-                    holders.push((mob.name.clone(), key.clone()));
+        }
+        for zone in zones {
+            for key in self
+                .mob_order
+                .iter()
+                .filter(|key| key.split_once(':').map(|(saved, _)| saved).unwrap_or("") == zone)
+            {
+                let Some(mob) = self.mobs.get(key) else {
+                    continue;
+                };
+                for (item, _, _, _) in &mob.drop_items {
+                    if item == item_key {
+                        holders.push((mob.name.clone(), key.clone()));
+                    }
+                }
+                for (item, _, _, _) in &mob.use_items {
+                    if item == item_key {
+                        holders.push((mob.name.clone(), key.clone()));
+                    }
                 }
             }
         }
@@ -930,17 +1051,25 @@ impl MobCache {
 
         // Spawn locations (위치)
         if let Some(locs) = mob_info.get("위치") {
-            if let Some(arr) = locs.as_array() {
-                for loc in arr {
-                    if let Some(s) = loc.as_str() {
-                        // Try to parse as room number
-                        if let Ok(room) = s.parse::<i64>() {
-                            data.locations.push(room);
+            match locs {
+                JsonValue::Array(values) => {
+                    for location in values {
+                        match location {
+                            JsonValue::String(value) => data.locations.push(value.clone()),
+                            // Preserve legacy numeric JSON defensively. Python
+                            // data normally stores room IDs as strings.
+                            JsonValue::Number(value) => data.locations.push(value.to_string()),
+                            _ => {}
                         }
-                    } else if let Some(n) = loc.as_i64() {
-                        data.locations.push(n);
                     }
                 }
+                // Python `for loc in self['위치']` iterates a scalar string
+                // character by character rather than wrapping it in a list.
+                JsonValue::String(value) => {
+                    data.locations
+                        .extend(value.chars().map(|ch| ch.to_string()));
+                }
+                _ => {}
             }
         }
 

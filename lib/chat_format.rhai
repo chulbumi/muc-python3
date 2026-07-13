@@ -24,8 +24,8 @@ fn send_python_guild_group_except(ob, line, excluded) {
     let guild = get_string(ob, "소속");
     let own_name = get_string(ob, "이름");
     let position = get_string(ob, "직위");
-    let custom_title = guild_get(guild, position + "명칭");
-    let title = if custom_title == "" { position } else { custom_title };
+    let title_key = position + "명칭";
+    let title = if guild_has_attr(guild, title_key) { guild_get(guild, title_key) } else { position };
     let group_line = "\x1b[1m《\x1b[36m" + title + "\x1b[37mː\x1b[36m"
         + own_name + "\x1b[37m》\x1b[0;37m " + line;
     for player in get_all_online_players() {

@@ -7,6 +7,23 @@ pub mod client;
 pub mod server;
 pub(crate) mod social;
 
+#[cfg(test)]
+mod compare_command_test;
+#[cfg(test)]
+mod combat_command_test;
+#[cfg(test)]
+mod economy_command_test;
+#[cfg(test)]
+mod file_edit_test;
+#[cfg(test)]
+mod rank_command_test;
+#[cfg(test)]
+mod say_command_test;
+#[cfg(test)]
+mod tweet_command_test;
+#[cfg(test)]
+mod where_command_test;
+
 pub use broadcaster::Broadcaster;
 pub use client::{Client, ClientState};
 pub use server::{run_echo_server, run_server};

@@ -5,12 +5,13 @@ fn cmd(ob, line) {
         send_line(ob, "☞ 무슨 말인지 모르겠어요. *^_^*");
         return;
     }
-    if line == "" || is_empty(line) {
+    let rank_type = trim(line);
+    if rank_type == "" {
         rank_clear("");
         send_line(ob, "* 전체가 초기화 되었습니다.");
         return;
     }
-    if rank_clear(trim(line)) {
+    if rank_clear(rank_type) {
         send_line(ob, "* 초기화 되었습니다.");
     } else {
         send_line(ob, "☞ 그런 순위는 없습니다.");

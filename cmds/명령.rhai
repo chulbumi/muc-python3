@@ -17,14 +17,9 @@ fn cmd(ob, line) {
         return;
     }
 
-    let target_name = words[0];
+    let target_name = resolve_room_player_name(ob, words[0]);
     let command = words[1];
-
-    let found_player = false;
-    for player in get_room_players(ob) {
-        if player == target_name { found_player = true; break; }
-    }
-    if !found_player {
+    if target_name == "" {
         // Python folds missing, item, box and mob targets into one message.
         send_line(ob, "☞ 그런 대상이 없어요. *^_^*");
         return;
@@ -32,10 +27,9 @@ fn cmd(ob, line) {
 
     // 대상에게 명령 실행
     // Python: obj.do_command(words[1])
-    let result = admin_force_command(ob, target_name, command);
-    if result != "" {
-        send_line(ob, result);
-    }
+    // Python has no administrator-side success/failure text after resolving
+    // the same-room Player; operational failures are logged by the driver.
+    admin_force_command(ob, target_name, command);
 }
 
 fn main(ob, line) {

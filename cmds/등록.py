@@ -5,7 +5,7 @@ from objs.cmd import Command
 class CmdObj(Command):
 
     def cmd(self, ob, line):
-        import pickle
+        import json
         import uuid
 
         if line == '':
@@ -36,7 +36,7 @@ class CmdObj(Command):
 
         itm = {}
         itm['이름'] = item['이름']
-        itm['고유번호'] = uuid.uuid4()
+        itm['고유번호'] = str(uuid.uuid4())
         itm['등록자'] = ob['이름']
         itm['대여가능'] = True
         itm['인덱스'] = item.index 
@@ -45,12 +45,12 @@ class CmdObj(Command):
         ob.remove(item)
 
         try:
-            with open("data/config/book.dat", "rb") as fr:
-                data = pickle.load(fr)
+            with open("data/config/book.json", "r", encoding="utf-8") as fr:
+                data = json.load(fr)
         except:
             data = []
             pass 
         data.append(itm)
-        with open("data/config/book.dat", "wb") as fw:
-            pickle.dump(data, fw)
+        with open("data/config/book.json", "w", encoding="utf-8") as fw:
+            json.dump(data, fw, ensure_ascii=False, indent=2)
         ob.sendLine('☞ 등록 되었습니다.')

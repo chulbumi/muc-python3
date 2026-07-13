@@ -10,10 +10,26 @@ fn flee_actor_name(ob) {
     "\x1b[1m" + name + "\x1b[0;37m" + han_iga(name)
 }
 
-fn send_flee_players(players, own_name, message) {
+fn flee_prompt(player_name) {
+    for player in get_all_online_players() {
+        if player["이름"] == player_name {
+            if !player["show_prompt"] {
+                return "";
+            }
+            return "\r\n\x1b[0;37;40m[ " + player["현재체력"].to_string() + "/"
+                + player["현재최고체력"].to_string() + ", "
+                + player["현재내공"].to_string() + "/"
+                + player["현재최고내공"].to_string() + " ] ";
+        }
+    }
+    ""
+}
+
+fn send_flee_players(players, own_name, message, with_prompt) {
     for player_name in players {
         if player_name != "" && player_name != own_name {
-            send_to_user(player_name, message);
+            let prompt = if with_prompt { flee_prompt(player_name) } else { "" };
+            send_raw_to_user(player_name, "\r\n" + message + "\r\n" + prompt);
         }
     }
 }
@@ -87,13 +103,14 @@ fn cmd(ob, line) {
             let to_room = post_position_once(return_replace(exit_script, "[공]", name_a));
             send_line(ob, "\r\n" + to_self);
             // exitRoom은 이미 CRLF가 붙은 문자열을 sendRoom에 넘긴다.
-            send_flee_players(old_room_players, name, "\r\n" + to_room);
+            send_flee_players(old_room_players, name, "\r\n" + to_room, true);
         } else {
             send_line(ob, "당신이 신형을 비틀거리며 간신히 도망갑니다. '살리도~~'");
             send_flee_players(
                 old_room_players,
                 name,
-                actor + " 신형을 비틀거리며 간신히 도망갑니다. '살리도~~'"
+                actor + " 신형을 비틀거리며 간신히 도망갑니다. '살리도~~'",
+                true
             );
         }
     }
@@ -119,12 +136,13 @@ fn cmd(ob, line) {
         let entry_script = transition["entry_script"];
         if entry_script != "" {
             let to_room = post_position_once(return_replace(entry_script, "[공]", name_a));
-            send_flee_players(new_room_players, name, to_room);
+            send_flee_players(new_room_players, name, to_room, true);
         } else {
             send_flee_players(
                 new_room_players,
                 name,
-                actor + " 신형을 비틀거리며 간신히 도망옵니다. '헉헉~~' "
+                actor + " 신형을 비틀거리며 간신히 도망옵니다. '헉헉~~' ",
+                true
             );
         }
     }
@@ -145,7 +163,7 @@ fn cmd(ob, line) {
                 + to_self;
         }
         send_line(ob, hazard_output);
-        send_flee_players(get_room_players(ob), name, to_room);
+        send_flee_players(get_room_players(ob), name, to_room, true);
         if !apply_return_hazard(ob, damage) {
             finish_python_death(ob);
             return;

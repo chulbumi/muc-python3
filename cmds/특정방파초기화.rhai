@@ -7,7 +7,7 @@ fn cmd(ob, line) {
         send_line(ob, "☞ 무슨 말인지 모르겠어요. *^_^*");
         return;
     }
-    if is_empty(line) {
+    if line == "" {
         send_line(ob, "초기화할 방파를 입력하세요.");
         return;
     }
@@ -17,8 +17,6 @@ fn cmd(ob, line) {
     }
     if guild_reset(line) {
         send_line(ob, "* 방파가 초기화되었습니다.");
-    } else {
-        send_line(ob, "* 방파 초기화에 실패했습니다.");
     }
 }
 

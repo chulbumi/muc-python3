@@ -24,12 +24,21 @@ fn cmd(ob, line) {
         }
     }
     if fighter.is_unit() { send_line(ob, "☞ 무리 합동공격할 대상이 없어요. ^^"); return; }
-    let owners = [];
-    if self["act"] != 1 { owners.push(self["id"]); }
+    let owners = [self["id"]];
     for member in ctx["party_members"] {
         if member["act"] != 1 { owners.push(member["id"]); }
     }
-    party_request_set_group_combat_targets(ob, owners, fighter["combat_target_ids"], "");
+    // Python compares the player object itself with ACT_FIGHT, so this branch
+    // always runs. setAllTarget also moves every participant to the front of
+    // each enemy's target list in assignment order.
+    party_request_set_group_combat_targets(
+        ob,
+        owners,
+        fighter["combat_target_ids"],
+        fighter["combat_target_instance_ids"],
+        "",
+        true
+    );
 
     let message = "당신이 속한 무리가 무리합동 공격을 시작 합니다.";
     send_line(ob, message);

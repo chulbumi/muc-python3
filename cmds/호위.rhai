@@ -19,7 +19,9 @@ fn render_guards(name, anger, guards) {
         + ", 분노 : " + anger.to_string();
     message += "\x1b[1;44m" + fill_space(56, title) + "\x1b[0;40m\r\n";
     message += "────────────────────────────\r\n";
-    message += last["description"] + "\r\n";
+    // Item JSON keeps Python's list-valued 설명2 as newline-delimited
+    // internal text; presentation owns the protocol CRLF conversion.
+    message += join(split(last["description"], "\n"), "\r\n") + "\r\n";
     message += "────────────────────────────\r\n";
     let i = 0;
     while i < len(guards) {
@@ -39,17 +41,33 @@ fn cmd(ob, line) {
         send_line(ob, render_guards("당신", get_int(ob, "분노"), guards));
         return;
     }
-    for player in get_room_players_admin(ob) {
-        if player["name"] != line { continue; }
-        let guards = player["guards"];
+    let target_name = resolve_room_player_name(ob, line);
+    if target_name == "" {
+        send_line(ob, "☞ 당신의 안광으로는 그런것을 볼수 없다네");
+        return;
+    }
+    if target_name == get_string(ob, "이름") {
+        let guards = get_inventory_guards(ob);
         if len(guards) == 0 {
-            send_line(ob, "\x1b[1m" + line + "\x1b[0;37m" + han_eun(line) + " 호위를 거느리지 않고 있습니다.");
+            // Python compares object identity (`target == ob`), so an
+            // explicitly named self target still uses the 당신 branch.
+            send_line(ob, "당신은 호위를 거느리지 않고 있습니다.");
             return;
         }
-        send_line(ob, render_guards(line, player["anger"], guards));
+        send_line(ob, render_guards(target_name, get_int(ob, "분노"), guards));
+        return;
+    }
+    for player in get_room_players_admin(ob) {
+        if player["name"] != target_name { continue; }
+        let guards = player["guards"];
+        if len(guards) == 0 {
+            send_line(ob, "\x1b[1m" + target_name + "\x1b[0;37m" + han_eun(target_name) + " 호위를 거느리지 않고 있습니다.");
+            return;
+        }
+        send_line(ob, render_guards(target_name, player["anger"], guards));
         return;
     }
     send_line(ob, "☞ 당신의 안광으로는 그런것을 볼수 없다네");
 }
 
-fn main(ob, line) { cmd(ob, line); }
+fn main(ob, line) { guard_view_command(ob, line); }

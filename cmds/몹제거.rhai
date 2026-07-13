@@ -8,12 +8,13 @@ fn cmd(ob, line) {
         send_line(ob, "☞ 무슨 말인지 모르겠어요. *^_^*");
         return;
     }
-    if is_empty(line) {
+    let mob_name = trim(line);
+    if mob_name == "" {
         send_line(ob, "사용법: [몹 이름] 몹제거");
         return;
     }
 
-    if remove_room_mob(ob, line) {
+    if remove_room_mob(ob, mob_name) {
         send_line(ob, "몹이 제거되었습니다.");
     } else {
         send_line(ob, "그런 몹이 없어요!");

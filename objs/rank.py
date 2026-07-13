@@ -1,13 +1,13 @@
 # -*- coding: utf-8 -*-
-import _pickle as cPickle
+import json
 
 class Rank():
     attr = {}
-    path = 'data/config/rank.dat'
+    path = 'data/config/rank.json'
     def load(self):
         try:
-            f = open(self.path, "rb")
-            self.attr = cPickle.load(f, encoding="euc-kr")
+            f = open(self.path, "r", encoding="utf-8")
+            self.attr = json.load(f)
         except IOError:
             print('%s IOError' % self.path)
             return
@@ -20,8 +20,8 @@ class Rank():
         f.close()
     def save(self):
         try:
-            f = open(self.path, 'wb')
-            cPickle.dump(self.attr, f)
+            f = open(self.path, 'w', encoding="utf-8")
+            json.dump(self.attr, f, ensure_ascii=False, indent=2)
 
         except IOError:
             print('%s IOError' % self.path)
@@ -95,5 +95,4 @@ class Rank():
         return msg
 RANK = Rank()
 RANK.load()
-
 

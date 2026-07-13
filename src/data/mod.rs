@@ -128,7 +128,7 @@ impl GlobalData {
         let json: JsonValue = serde_json::from_str(&content)?;
 
         self.data.insert(name.to_string(), json);
-        info!("Loaded config: {}", name);
+        tracing::debug!("Loaded config: {}", name);
         Ok(())
     }
 

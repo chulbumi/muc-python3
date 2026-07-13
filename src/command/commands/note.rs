@@ -24,7 +24,7 @@ pub(crate) enum NoteEditAdvance {
 
 /// Python `line.split(None, 1)`과 같은 수신자/제목 분리.
 pub(crate) fn split_recipient_subject(line: &str) -> Option<(String, String)> {
-    let line = line.trim();
+    let line = line.trim_start();
     let boundary = line.find(char::is_whitespace)?;
     let recipient = &line[..boundary];
     let subject = line[boundary..].trim_start();
@@ -173,9 +173,10 @@ mod tests {
     fn split_header_matches_python_split_none_once() {
         assert_eq!(
             split_recipient_subject("  수신자\t여러 단어 제목  "),
-            Some(("수신자".to_string(), "여러 단어 제목".to_string()))
+            Some(("수신자".to_string(), "여러 단어 제목  ".to_string()))
         );
         assert_eq!(split_recipient_subject("수신자"), None);
+        assert_eq!(split_recipient_subject("수신자   \t  "), None);
     }
 
     #[test]

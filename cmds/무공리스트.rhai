@@ -11,25 +11,18 @@ fn cmd(ob, line) {
 
     // MUGONG 데이터의 모든 키 가져오기
     // GlobalData stores data/config/skill.json under the file stem `skill`.
-    let keys = get_global_keys("skill");
-    if len(keys) == 0 {
-        send_line(ob, "☞ 무공 데이터가 없습니다.");
-        return;
-    }
-
+    let keys = skill_definition_names();
     let msg = "";
     let c = 0;
     for k in keys {
         msg = msg + pad_start(k, 14, " ") + ",";
         c += 1;
         if c % 5 == 0 {
-            send_line(ob, msg);
-            msg = "";
+            msg += "\r\n";
         }
     }
-    if msg != "" {
-        send_line(ob, msg);
-    }
+    // Python은 빈 목록도 포함해 조립한 문자열을 sendLine 한 번으로 보낸다.
+    send_line(ob, msg);
 }
 
 fn main(ob, line) {

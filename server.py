@@ -52,5 +52,5 @@ application = service.Application("pyMUC_Server")
 server = internet.TCPServer(9900, factory)
 server.setServiceParent(application)
 
-reactor.listenTCP(9900, factory)
+reactor.listenTCP(9903, factory)  # Changed to 9903
 reactor.run()

@@ -1,11 +1,11 @@
 // Python `cmds/기부.py`: 같은 방 표두에게 은전을 기탁한다.
 
 fn cmd(ob, line) {
-    if line == "" || is_empty(line) {
+    if line == "" {
         send_line(ob, "☞ 사용법: [금액] 기부");
         return;
     }
-    let result = donate_to_guard(ob, python_get_int(line));
+    let result = donate_to_guard(ob, parse_int_prefix(line));
     if result["status"] == "no_guard" {
         send_line(ob, "☞ 이곳에 표국무사가 없네요.");
         return;

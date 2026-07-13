@@ -26,7 +26,7 @@ use crate::hotreload::{HotReloadManager, ReloadConfig};
 use crate::network::broadcaster::Broadcaster;
 use crate::network::client::{get_other_players_desc_in_room, get_other_players_map_for_look};
 use crate::scheduler::CallOutScheduler;
-use crate::script::{create_call_out_script_runner, ScriptConfig, ScriptStorage};
+use crate::script::{ScriptConfig, ScriptStorage};
 use crate::world::{get_world_state, RoomCache};
 
 /// Server configuration
@@ -163,6 +163,10 @@ impl MudServer {
 
         // Preload mobs for starting zones
         for zone in &starting_zones {
+            if !std::path::Path::new("data/mob").join(zone).is_dir() {
+                tracing::debug!(zone, "No mob directory for preloaded room zone");
+                continue;
+            }
             if let Err(e) = world_write.mob_cache.preload_zone(zone) {
                 warn!("Failed to preload mobs for zone '{}': {}", zone, e);
             }
@@ -175,10 +179,23 @@ impl MudServer {
     ///
     /// This starts the TCP listener and game loop
     pub async fn run(self) -> Result<(), Box<dyn std::error::Error>> {
-        self.initialize().await?;
-
         let bind_addr = self.config.bind_address();
-        let listener = TcpListener::bind(&bind_addr).await?;
+        let listener = TcpListener::bind(&bind_addr).await.map_err(|error| {
+            std::io::Error::new(
+                error.kind(),
+                format!(
+                    "MUD 서버가 {bind_addr} 포트를 열지 못했습니다: {error}. \
+                     이미 실행 중인 서버는 ./run_murim.sh {port}로 같은 포트만 재시작하거나, \
+                     다른 포트를 지정하세요.",
+                    port = self.config.port
+                ),
+            )
+        })?;
+
+        // Claim the port before loading rooms, mobs, and scripts. A duplicate
+        // start must fail immediately instead of doing the full startup work
+        // and only then reporting AddrInUse.
+        self.initialize().await?;
 
         info!("MUD Server listening on {}", bind_addr);
         info!("=============================================================");
@@ -208,13 +225,17 @@ impl MudServer {
         script_storage.set_global_data(global_data);
         let script_storage = Arc::new(tokio::sync::RwLock::new(script_storage));
 
-        let script_runner =
-            create_call_out_script_runner(script_storage.clone(), self.broadcaster.clone());
         let call_out_scheduler = Arc::new(CallOutScheduler::new(
             self.broadcaster.clone(),
             Duration::from_millis(100),
-            Some(script_runner),
+            None,
         ));
+        let script_runner = crate::script::create_call_out_script_runner_with_scheduler(
+            script_storage.clone(),
+            self.broadcaster.clone(),
+            Some(call_out_scheduler.clone()),
+        );
+        call_out_scheduler.set_script_runner(script_runner);
 
         // cmds/*.rhai Hot Reload: 1초마다 변경된 스크립트만 다시 로드
         HotReloadManager::new(script_storage.clone(), ReloadConfig::default()).start_watcher();

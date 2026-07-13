@@ -97,6 +97,67 @@ pub fn calculate_player_damage(player: &Body, mob_data: &RawMobData) -> i64 {
     calculate_player_damage_with_arm(player, mob_data, mob_data.arm)
 }
 
+/// Ordinary PvP damage uses the same player attack point as PvM, with the
+/// defending player's live 맷집 and equipped armor in place of mob defense.
+pub fn calculate_pvp_damage(attacker: &Body, defender: &Body) -> i64 {
+    let c1 = attacker.get_str() * 2 + attacker.get_max_mp() / 5;
+    let c2 = attacker.attpower as i64 - attacker.get_mastery_diff();
+    let base = (c1 + c2 - defender.get_arm() - i64::from(defender.get_armor())).max(1);
+    rand::thread_rng().gen_range((base * 80 / 100).max(1)..=(base * 120 / 100).max(1))
+}
+
+pub fn calculate_pvp_skill_damage(
+    attacker: &Body,
+    defender: &Body,
+    skill: &Skill,
+    skill_level: i32,
+) -> SkillDamageResult {
+    let mastery_chance = match skill_level {
+        11 => 10.0,
+        12 => 20.0,
+        _ => 0.0,
+    };
+    let chance = skill.probability as f64 + skill_level as f64 * 4.0
+        - ((defender.get_int("레벨") - attacker.get_int("레벨") + 90).div_euclid(3)) as f64
+        + attacker.get_hit() as f64 * 0.2
+        - defender.get_miss() as f64 * 0.2
+        + mastery_chance;
+    if chance < rand::thread_rng().gen_range(0..=100) as f64 {
+        return SkillDamageResult {
+            base_damage: 0,
+            final_damage: 0,
+            hit: false,
+        };
+    }
+    let c1 = attacker.get_str() * 2 + attacker.get_max_mp().div_euclid(5);
+    let c2 = attacker.attpower as i64 - attacker.get_mastery_diff();
+    let base = (c1 + c2 - defender.get_arm() - i64::from(defender.get_armor())).max(1);
+    let normal = rand::thread_rng().gen_range((base * 80 / 100).max(1)..=(base * 120 / 100).max(1));
+    let hit_rate = if skill.hit_rate <= 0.0 {
+        0.1
+    } else {
+        skill.hit_rate
+    };
+    let mut damage = (normal as f64 + normal as f64 * hit_rate) as i64;
+    let (critical_bonus, mastery_damage) = match skill_level {
+        11 => (10.0, 1.3),
+        12 => (20.0, 1.5),
+        _ => (0.0, 1.0),
+    };
+    let critical_chance = attacker.get_critical_chance() as f64 * 0.2 + critical_bonus;
+    let critical = if critical_chance > rand::thread_rng().gen_range(0..=100) as f64 {
+        (attacker.get_critical() as f64 * 0.015).max(1.0)
+    } else {
+        1.0
+    };
+    damage = (damage as f64 * critical * mastery_damage) as i64;
+    SkillDamageResult {
+        base_damage: base,
+        final_damage: damage.max(1),
+        hit: true,
+    }
+}
+
 fn calculate_player_damage_with_arm(player: &Body, mob_data: &RawMobData, mob_arm: i64) -> i64 {
     let player_str = player.get_str();
     let max_mp = player.get_max_mp();
@@ -214,13 +275,28 @@ pub(crate) fn calculate_mob_skill_damage(
         skill.hit_rate
     };
     let amplified = (base as f64 + base as f64 * rate) as i64;
-    let chance = mob_data.luck as f64 * crate::script::get_murim_config_float("운확률");
+    let training_level = mob
+        .skill_map
+        .get(&skill.name)
+        .map(|training| training.level)
+        .unwrap_or(1);
+    let (mastery_chance, mastery_damage) = mob_skill_mastery_bonus(training_level);
+    let chance =
+        mob_data.luck as f64 * crate::script::get_murim_config_float("운확률") + mastery_chance;
     let multiplier = if chance > critical_roll as f64 {
         (mob_data.critical as f64 * crate::script::get_murim_config_float("필살배수")).max(1.0)
     } else {
         1.0
     };
-    (amplified as f64 * multiplier) as i64
+    (amplified as f64 * multiplier * mastery_damage) as i64
+}
+
+fn mob_skill_mastery_bonus(level: i64) -> (f64, f64) {
+    match level {
+        11 => (10.0, 1.3),
+        12 => (20.0, 1.5),
+        _ => (0.0, 1.0),
+    }
 }
 
 /// Check if player hits the mob
@@ -877,6 +953,15 @@ mod tests {
         // Runtime strength 100 gives at least 160 before 10% amplification,
         // and luck 1000 guarantees the 200 * 0.015 == 3x critical.
         assert!(damage >= 528, "runtime/critical damage was {damage}");
+    }
+
+    #[test]
+    fn mob_skill_mastery_bonus_matches_python_eleven_and_twelve_rank_rules() {
+        assert_eq!(mob_skill_mastery_bonus(1), (0.0, 1.0));
+        assert_eq!(mob_skill_mastery_bonus(10), (0.0, 1.0));
+        assert_eq!(mob_skill_mastery_bonus(11), (10.0, 1.3));
+        assert_eq!(mob_skill_mastery_bonus(12), (20.0, 1.5));
+        assert_eq!(mob_skill_mastery_bonus(23), (0.0, 1.0));
     }
 
     #[test]

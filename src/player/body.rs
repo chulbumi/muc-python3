@@ -169,7 +169,7 @@ impl ActiveSkill {
 /// - Combat (targets, attack chance, attack point)
 /// - Skills (skill management, skill training)
 /// - Experience and leveling
-#[derive(Debug)]
+#[derive(Debug, Clone)]
 pub struct Body {
     /// Base Object (contains attributes, inventory, etc.)
     pub object: Object,
@@ -849,6 +849,29 @@ impl Body {
             .collect::<Vec<_>>()
             .join("|");
         self.object.set("방어무공시전", value);
+    }
+
+    /// 관리자 무공제거용: 같은 이름의 첫 활성 방어 효과를 해제한다.
+    /// Python은 목록에서만 제거해 보너스를 남기는 오류가 있었으므로 Rust는
+    /// 효과 수치도 함께 되돌리고 저장 속성을 동기화한다.
+    pub fn remove_active_skill_by_name(&mut self, name: &str) -> bool {
+        let Some(index) = self
+            .active_skills
+            .iter()
+            .position(|skill| skill.name == name)
+        else {
+            return false;
+        };
+        let effect = self.active_skills.remove(index);
+        self._str -= effect.str_bonus;
+        self._dex -= effect.dex_bonus;
+        self._arm -= effect.arm_bonus;
+        self._mp -= effect.mp_bonus;
+        self._maxmp -= effect.max_mp_bonus;
+        self._hp -= effect.hp_bonus;
+        self._maxhp -= effect.max_hp_bonus;
+        self.sync_active_skills_to_attrs();
+        true
     }
 
     /// Gets a skill by name (caches last skill)

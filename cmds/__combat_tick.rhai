@@ -1,5 +1,27 @@
 // Private heartbeat combat renderer. Rust supplies state-only event maps.
 
+fn combat_tick_prompt(player_name) {
+    for player in get_all_online_players() {
+        if player["이름"] == player_name {
+            if !player["show_prompt"] { return ""; }
+            return "\r\n\x1b[0;37;40m[ " + player["현재체력"].to_string() + "/"
+                + player["현재최고체력"].to_string() + ", "
+                + player["현재내공"].to_string() + "/"
+                + player["현재최고내공"].to_string() + " ] ";
+        }
+    }
+    ""
+}
+
+// Every recipient call in this private renderer corresponds to Python
+// sendRoom()/sendRoomFightScript(): sendLine("\r\n" + text), then lpPrompt().
+// Shadow the generic efun only inside this script so every event keeps the
+// same Rhai-authored byte layout.
+fn send_to_user(player_name, message) {
+    send_raw_to_user(player_name, "\r\n" + message + "\r\n"
+        + combat_tick_prompt(player_name));
+}
+
 fn combat_tick_replace(line, attacker, target, weapon) {
     let text = return_replace(line, "[공]", attacker);
     text = return_replace(text, "[방]", target);
@@ -204,6 +226,12 @@ fn cmd(ob, line) {
             }
             continue;
         }
+        if event["kind"] == "room_mob_respawn" {
+            // Python Mob.doRegen(): writeRoom("\r\n" + 설명3), followed by
+            // Room.printPrompt(). This private helper owns that exact wire.
+            send_to_user(own_name, event["text"]);
+            continue;
+        }
         if event["kind"] == "room_corpse_update" {
             send_line(ob, corpse_update_text(event));
             continue;
@@ -255,6 +283,52 @@ fn cmd(ob, line) {
         }
         if event["kind"] == "combat_error" {
             if event["code"] == "already_dead" { send_line(ob, "☞ 이미 죽은 몬스터입니다."); }
+            continue;
+        }
+        if event["kind"] == "pvp_attack_out" || event["kind"] == "pvp_attack_in"
+                || event["kind"] == "pvp_miss_out" || event["kind"] == "pvp_miss_in" {
+            if training { continue; }
+            let missed = event["kind"] == "pvp_miss_out" || event["kind"] == "pvp_miss_in";
+            let suffix = if missed { "전투실패스크립" } else { "전투스크립" };
+            let line = one_fight_script(event["weapon_type"] + suffix, "[공](이/가) [방](을/를) 공격했습니다");
+            if event["kind"] == "pvp_attack_out" || event["kind"] == "pvp_miss_out" {
+                let target_a = "\x1b[1m" + event["target"] + "\x1b[0;37m";
+                let own_text = combat_tick_replace(line, "당신", target_a, event["weapon"]);
+                if missed { send_line(ob, own_text); }
+                else { send_line(ob, own_text + "  \x1b[1;36m" + event["damage"].to_string() + "\x1b[0;37m"); }
+                let room_text = combat_tick_replace(line, own_a, target_a, event["weapon"]);
+                for player in get_cast_room_players(ob) {
+                    if player["name"] != own_name && player["name"] != event["target"] && !player["reject_fight"] {
+                        send_to_user(player["name"], room_text);
+                    }
+                }
+            } else {
+                let attacker_a = "\x1b[1m" + event["attacker"] + "\x1b[0;37m";
+                let own_text = combat_tick_replace(line, attacker_a, "당신", event["weapon"]);
+                if missed { send_line(ob, own_text); }
+                else { send_line(ob, own_text + "  \x1b[1;31m" + event["damage"].to_string() + "\x1b[0;37m"); }
+            }
+            continue;
+        }
+        if starts_with(event["kind"], "pvp_skill_") {
+            if training { continue; }
+            let incoming = ends_with(event["kind"], "_in");
+            let failed = contains(event["kind"], "_fail_");
+            let form = contains(event["kind"], "_form_");
+            let attacker = if incoming {
+                "\x1b[1m" + event["attacker"] + "\x1b[0;37m"
+            } else {
+                "당신"
+            };
+            let target = if incoming {
+                "당신"
+            } else {
+                "\x1b[1m" + event["target"] + "\x1b[0;37m"
+            };
+            let text = combat_tick_replace(event["script"], attacker, target, event["weapon"]);
+            if form || failed { send_line(ob, text); }
+            else if incoming { send_line(ob, text + "  \x1b[1;31m" + event["damage"].to_string() + "\x1b[0;37m"); }
+            else { send_line(ob, text + "  \x1b[1;36m" + event["damage"].to_string() + "\x1b[0;37m"); }
             continue;
         }
         if event["kind"] == "player_attack" || event["kind"] == "player_miss" {

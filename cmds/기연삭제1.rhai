@@ -6,11 +6,11 @@ fn cmd(ob, line) {
         send_line(ob, "☞ 무슨 말인지 모르겠어요. *^_^*");
         return;
     }
-    if line == "" || is_empty(line) {
+    if line == "" {
         send_line(ob, "☞ 사용법: [기연이름] 기연삭제");
         return;
     }
-    let idx = oneitem_get_index_by_name(trim(line));
+    let idx = oneitem_get_index_by_name(line);
     if idx == "" {
         send_line(ob, "☞ 그런 아이템은 없습니다.!");
         return;

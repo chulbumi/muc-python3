@@ -655,13 +655,10 @@ impl RoomCache {
     pub fn preload_zone(&mut self, zone: &str) -> Result<usize, RoomError> {
         let zone_dir = self.data_dir.join(zone);
 
-        eprintln!(
-            "[RoomCache] Preloading zone '{}' from dir: {:?}",
-            zone, zone_dir
-        );
+        tracing::debug!(zone, path = ?zone_dir, "Preloading room zone");
 
         if !zone_dir.exists() {
-            eprintln!("[RoomCache] Zone directory does not exist: {:?}", zone_dir);
+            tracing::warn!(zone, path = ?zone_dir, "Room zone directory does not exist");
             return Err(RoomError::NotFound(zone.to_string()));
         }
 
@@ -687,18 +684,13 @@ impl RoomCache {
                         count += 1;
                     }
                     Err(e) => {
-                        eprintln!("[RoomCache] Failed to load room {}:{}: {:?}", zone, name, e);
+                        tracing::warn!(zone, room = name, error = ?e, "Failed to preload room");
                     }
                 }
             }
         }
 
-        eprintln!(
-            "[RoomCache] Preloaded {} rooms from zone '{}', total cached: {}",
-            count,
-            zone,
-            self.rooms.len()
-        );
+        tracing::debug!(zone, count, total = self.rooms.len(), "Room zone preloaded");
         Ok(count)
     }
 

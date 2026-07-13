@@ -8,12 +8,12 @@ fn cmd(ob, line) {
         return;
     }
 
-    if is_empty(line) {
+    if line == "" {
         send_line(ob, "☞ 사용법: [방파이름] 방파초기화");
         return;
     }
 
-    let id = trim(line);
+    let id = line;
 
     // 방파 존재 확인
     if !guild_has(id) {
@@ -24,8 +24,6 @@ fn cmd(ob, line) {
     // 방파 데이터 삭제
     if guild_reset(id) {
         send_line(ob, "* 방파가 초기화되었습니다.");
-    } else {
-        send_line(ob, "☞ 방파 초기화에 실패했습니다.");
     }
 }
 

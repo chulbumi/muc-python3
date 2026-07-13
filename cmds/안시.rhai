@@ -5,7 +5,7 @@ fn cmd(ob, line) {
     let max_hp = get_int(ob, "최고체력");
     // Normal Player bodies always have positive max HP, matching Python's
     // direct integer division contract.
-    let green = 10 * hp / max_hp;
+    let green = python_floor_div(10 * hp, max_hp);
     send_line(ob,
         "\x1b[32m" + repeat("━", green)
         + "\x1b[37m" + repeat("━", 10 - green));

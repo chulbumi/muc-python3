@@ -12,7 +12,12 @@ fn cmd(ob, line) {
         send_line(ob, "☞ 사용법: [대상] [무공] [성] 성올려");
         return;
     }
-    let level = to_int(words[2]);
+    // Python first checks line.split(), then parses the complete third field
+    // from split(None, 2) with int(). Extra text raises before any mutation.
+    if words.len() > 3 { return; }
+    let parsed = strict_int(words[2]);
+    if !parsed["valid"] { return; }
+    let level = parsed["value"];
     let result = set_skill_training(ob, words[0], words[1], level);
     if result == "ok" { send_line(ob, "☞ 값이 설정되었습니다."); }
     else { send_line(ob, "☞ 그런 대상이 없어요!"); }
