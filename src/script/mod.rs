@@ -7,6 +7,7 @@
 #![allow(static_mut_refs)]
 
 mod admin_combat;
+pub(crate) use admin_combat::clear_summon_combat;
 mod anger;
 mod box_commands;
 mod cast;
@@ -14,7 +15,9 @@ mod chat_history;
 pub(crate) use cast::skill_up_python;
 pub(crate) mod combat_commands;
 mod drop_item;
+mod fixture;
 mod inventory_compat;
+pub(crate) use inventory_compat::mark_item_field_as_json_array;
 mod movement;
 mod party;
 mod requests;
@@ -22,12 +25,12 @@ mod return_home;
 mod search_body;
 pub(crate) use requests::*;
 
+#[cfg(test)]
+pub(crate) use box_commands::register_installed_box;
 pub(crate) use box_commands::{
     build_box_observer_snapshot, clear_precomputed_box_context, set_precomputed_box_context,
     take_box_deliveries, BoxDelivery,
 };
-#[cfg(test)]
-pub(crate) use box_commands::register_installed_box;
 pub(crate) use cast::{clear_cast_room_players, set_cast_room_players, CastRoomPlayerRef};
 pub(crate) use movement::{immediate_exit_destinations, python_map_explore};
 pub(crate) fn python_item_field_contains(item: &Object, field: &str, wanted: &str) -> bool {
@@ -35,9 +38,8 @@ pub(crate) fn python_item_field_contains(item: &Object, field: &str, wanted: &st
 }
 pub(crate) use party::{
     build_party_nonplayer_snapshot, build_party_person_snapshot,
-    installed_box_party_snapshot_by_pointer, installed_box_party_snapshots,
-    missing_party_person, set_precomputed_party_context, take_party_requests, PartyDelivery,
-    PARTY_DISCONNECT_REQUEST,
+    installed_box_party_snapshot_by_pointer, installed_box_party_snapshots, missing_party_person,
+    set_precomputed_party_context, take_party_requests, PartyDelivery, PARTY_DISCONNECT_REQUEST,
 };
 #[cfg(test)]
 pub(crate) use party::{
@@ -47,14 +49,12 @@ pub(crate) use party::{
 
 use encoding::{EncoderTrap, Encoding};
 use rand::Rng;
-use rhai::{Dynamic, Engine, Scope};
+use rhai::{Dynamic, Engine, Scope, AST};
 use std::cell::RefCell;
 use std::collections::HashMap;
 use std::path::{Path, PathBuf};
-use std::sync::OnceLock;
+use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::{Arc, Mutex};
-
-static RHAI_EXECUTION_LOCK: OnceLock<Mutex<()>> = OnceLock::new();
 #[cfg(test)]
 static ONEITEM_COMMAND_TEST_LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
 
@@ -118,8 +118,10 @@ pub(crate) fn mp_status_script(mp: i64) -> String {
     SCRIPTS[index].into()
 }
 
+#[cfg(test)]
+pub(crate) use chat_history::CHAT_HISTORY;
 pub(crate) use chat_history::{
-    chat_history_snapshot, record_chat_history, record_chat_history_limit, CHAT_HISTORY,
+    chat_history_snapshot, record_chat_history, record_chat_history_limit,
 };
 use tokio::sync::RwLock;
 use tracing::{debug, info};
@@ -142,7 +144,130 @@ use crate::world::{
     format_exits_long, format_room_header, get_world_state, MobInstance, PlayerPosition,
     RawMobData, RoomObjectRef, WorldState,
 };
-use std::time::Duration;
+use std::time::{Duration, Instant};
+
+/// Python `Player.enterRoom(..., "소환", "소환")` destination guards.
+///
+/// This is intentionally shared by the Rhai efun and the network-side
+/// `$위치이동` completion path.  The latter already owns the event's wire
+/// presentation, but must not bypass the state checks merely because the
+/// directive was collected before the movement is applied.
+fn check_summon_destination_impl(
+    body: &Body,
+    zone: &str,
+    room: &str,
+    same_place_is_noop: bool,
+) -> String {
+    let mut world = match get_world_state().write() {
+        Ok(world) => world,
+        Err(_) => return "fail".into(),
+    };
+    let room_arc = match world.room_cache.get_room(zone, room) {
+        Ok(room) => room,
+        Err(_) => return "fail".into(),
+    };
+    if same_place_is_noop
+        && world
+            .get_player_position(&body.get_name())
+            .is_some_and(|position| position.zone == zone && position.room == room)
+    {
+        return "same_place".into();
+    }
+    let room_guard = match room_arc.read() {
+        Ok(room) => room,
+        Err(_) => return "fail".into(),
+    };
+    let attrs = world
+        .room_attrs
+        .get(&format!("{zone}:{room}"))
+        .cloned()
+        .unwrap_or_default();
+    let raw_info = std::fs::read_to_string(format!("data/map/{zone}/{room}.json"))
+        .ok()
+        .and_then(|source| serde_json::from_str::<serde_json::Value>(&source).ok())
+        .and_then(|root| {
+            root.get("맵정보")
+                .and_then(|value| value.as_object())
+                .cloned()
+        })
+        .unwrap_or_default();
+    let raw_int = |key: &str, fallback: i64| {
+        raw_info.get(key).map_or(fallback, |value| match value {
+            serde_json::Value::Number(number) => number.as_i64().unwrap_or(fallback),
+            serde_json::Value::String(text) => text.trim().parse().unwrap_or(fallback),
+            _ => fallback,
+        })
+    };
+    let int_attr = |key: &str, fallback: i64| {
+        attrs
+            .get(key)
+            .and_then(|value| value.trim().parse::<i64>().ok())
+            .unwrap_or(fallback)
+    };
+    let level = body.get_int("레벨");
+    let level_upper = int_attr("레벨상한", raw_int("레벨상한", room_guard.level_upper));
+    let level_lower = int_attr("레벨제한", raw_int("레벨제한", room_guard.level_limit));
+    let strength_upper = int_attr("힘상한제한", raw_int("힘상한제한", 0));
+    let dexterity_upper = int_attr("민첩상한제한", raw_int("민첩상한제한", 0));
+    if (level_upper > 0 && level_upper < level)
+        || level_lower > level
+        || (strength_upper > 0 && strength_upper < body.get_int("힘"))
+        || (dexterity_upper > 0 && dexterity_upper < body.get_dex())
+    {
+        return "pressure".into();
+    }
+    let property_limit = room_guard
+        .properties
+        .iter()
+        .find_map(|property| {
+            let mut words = property.split_whitespace();
+            (words.next() == Some("인원제한"))
+                .then(|| words.next()?.parse::<i64>().ok())
+                .flatten()
+        })
+        .unwrap_or(0);
+    drop(room_guard);
+    if property_limit > 0 && world.get_players_in_room(zone, room).len() as i64 >= property_limit {
+        return "room_full".into();
+    }
+    let properties = room_arc
+        .read()
+        .map(|room| room.properties.clone())
+        .unwrap_or_default();
+    let personality = body.get_string("성격");
+    if properties.iter().any(|property| property == "사파출입금지") && personality == "사파"
+    {
+        return "evil_forbidden".into();
+    }
+    if properties.iter().any(|property| property == "정파출입금지") && personality == "정파"
+    {
+        return "good_forbidden".into();
+    }
+    let guild_owner = attrs.get("방파주인").cloned().unwrap_or_else(|| {
+        raw_info
+            .get("방파주인")
+            .and_then(|value| value.as_str())
+            .unwrap_or_default()
+            .to_string()
+    });
+    if !guild_owner.is_empty() && guild_owner != body.get_string("소속") {
+        return "guild_forbidden".into();
+    }
+    String::new()
+}
+
+/// Destination guards used by administrative `이동`, whose Python command
+/// reports a same-room request before calling `Player.enterRoom`.
+pub(crate) fn check_summon_destination(body: &Body, zone: &str, room: &str) -> String {
+    check_summon_destination_impl(body, zone, room, true)
+}
+
+/// Destination guards for legacy event `$위치이동`.  Unlike `이동`, Python
+/// `doEvent()` always calls `enterRoom`, including when the destination is
+/// the current room, so it must not short-circuit as `same_place`.
+pub(crate) fn check_event_summon_destination(body: &Body, zone: &str, room: &str) -> String {
+    check_summon_destination_impl(body, zone, room, false)
+}
 
 fn strip_ansi_like_python(value: &str) -> String {
     let mut found_escape = false;
@@ -365,9 +490,13 @@ pub(crate) fn apply_item_magic_with_roll(
             .collect::<Vec<_>>()
             .join("\n"),
     );
+    // Python Item.setOption() writes a list of option lines.  Retain that
+    // JSON shape even though runtime Object attributes use newline strings.
+    inventory_compat::mark_item_field_as_json_array(item, "옵션");
     if option_count > 2 || valuable {
         item.setAttr("아이템속성", "버리지못함");
         item.setAttr("아이템속성", "줄수없음");
+        inventory_compat::mark_item_field_as_json_array(item, "아이템속성");
     }
     let name = item.getString("이름");
     let plain = strip_ansi_like_python(&name);
@@ -404,9 +533,7 @@ fn parse_int_prefix(value: &str) -> i64 {
     // single underscore between decimal digits (and an optional sign), while
     // Rust's FromStr does not. Only after that full parse fails does getInt
     // fall back to the leading decimal prefix.
-    let unsigned = value
-        .strip_prefix(['+', '-'])
-        .unwrap_or(value);
+    let unsigned = value.strip_prefix(['+', '-']).unwrap_or(value);
     let python_underscored_integer = !unsigned.is_empty()
         && unsigned
             .split('_')
@@ -584,6 +711,7 @@ fn find_room_fund_target(body: &Body, wanted: &str) -> Option<RoomFundTarget> {
             RoomObjectRef::InstalledBox(ordinal) => {
                 installed.get(ordinal).cloned().map(RoomFundTarget::Object)
             }
+            RoomObjectRef::Fixture(_) => None,
         };
     }
     let world = get_world_state().read().ok()?;
@@ -656,7 +784,8 @@ fn find_room_fund_target(body: &Body, wanted: &str) -> Option<RoomFundTarget> {
                 }
             }
             crate::world::RoomObjectRef::Player(_)
-            | crate::world::RoomObjectRef::SummonedUser(_) => {}
+            | crate::world::RoomObjectRef::SummonedUser(_)
+            | crate::world::RoomObjectRef::Fixture(_) => {}
         }
     }
     // Directly constructed legacy/test rooms may predate the unified order.
@@ -747,6 +876,7 @@ thread_local! {
 pub(crate) const RAW_USER_MESSAGE_PREFIX: &str = "\0MUC_RAW_USER\0";
 
 /// Build data only; Rhai owns the visible `Player.getDesc()` layout.
+#[cfg(test)]
 pub(crate) fn build_room_view_player_snapshot(body: &Body) -> Dynamic {
     build_room_view_player_snapshot_with_interactive(body, 1)
 }
@@ -1187,6 +1317,7 @@ fn select_python_room_object(body: &Body, raw: &str) -> Option<RoomObjectRef> {
                         &reaction_names(&object.getString("반응이름")),
                     )
                 }
+                RoomObjectRef::Fixture(id) => world.get_fixture(*id)?.match_counts(query),
             };
             let (exact, prefixes) = counts;
             if exact {
@@ -1814,11 +1945,13 @@ fn format_config_string(m: &std::collections::HashMap<String, String>) -> String
     v.join("\n")
 }
 
-/// 이벤트설정리스트 파싱: "키=값" 또는 "키" 한 줄씩(\n 구분). ob["이벤트"][키]에 대응.
+/// 이벤트설정리스트 파싱: "키=값" 또는 "키" 항목. Python JSON 배열은
+/// 로드 시 내부적으로 `|`로 이어지며, 이전 Rust 저장은 줄바꿈을 사용했다.
+/// 두 표현 모두 `Player.setEvent/checkEvent/delEvent`의 같은 목록이다.
 /// world::event::do_event에서도 사용. pub(crate).
 pub(crate) fn parse_event_string(s: &str) -> std::collections::HashMap<String, String> {
     let mut out = std::collections::HashMap::new();
-    for line in s.split('\n') {
+    for line in s.split(['\n', '|']) {
         let line = line.trim();
         if line.is_empty() {
             continue;
@@ -1832,19 +1965,39 @@ pub(crate) fn parse_event_string(s: &str) -> std::collections::HashMap<String, S
     out
 }
 
-pub(crate) fn format_event_string(m: &std::collections::HashMap<String, String>) -> String {
-    let mut v: Vec<_> = m
-        .iter()
-        .map(|(k, val)| {
-            if val == "1" {
-                k.clone()
-            } else {
-                format!("{}={}", k, val)
-            }
-        })
-        .collect();
-    v.sort();
-    v.join("\n")
+fn event_entries(raw: &str) -> Vec<String> {
+    raw.split(['\n', '|'])
+        .filter(|entry| !entry.is_empty())
+        .map(ToString::to_string)
+        .collect()
+}
+
+/// Python `Object.setAttr('이벤트설정리스트', entry)` preserves insertion
+/// order and only suppresses an identical full entry.  Keep that list shape
+/// rather than round-tripping through a HashMap (which sorted event flags).
+pub(crate) fn event_list_set(raw: &str, key: &str, value: &str) -> String {
+    let mut entries = event_entries(raw);
+    if value.is_empty() {
+        if let Some(position) = entries.iter().position(|entry| entry == key) {
+            entries.remove(position);
+        }
+    } else {
+        let entry = if value == "1" {
+            key.to_string()
+        } else {
+            format!("{key}={value}")
+        };
+        if !entries.iter().any(|current| current == &entry) {
+            entries.push(entry);
+        }
+    }
+    entries.join("\n")
+}
+
+/// Python `Object.delAttr()` removes one exact list element, not every
+/// matching prefix or every duplicate.
+pub(crate) fn event_list_remove(raw: &str, key: &str) -> String {
+    event_list_set(raw, key, "")
 }
 
 /// Body의 현재 위치를 WorldState에서 우선 읽고, 저장 속성의 `zone:room` 및
@@ -2143,6 +2296,14 @@ fn python_set_admin_target(body: &mut Body, target: &str, key: &str, raw: &str) 
                     Err(()) => return "invalid".into(),
                 };
                 object.set(key, value);
+                return "ok".into();
+            }
+            RoomObjectRef::Fixture(id) => {
+                let mut world = get_world_state().write().unwrap();
+                let Some(fixture) = world.get_fixture_mut(id) else {
+                    return "missing".into();
+                };
+                fixture.set_attribute(key, serde_json::Value::String(raw.to_string()));
                 return "ok".into();
             }
         }
@@ -2538,6 +2699,8 @@ pub fn user_refuses_shout(name: &str) -> bool {
 struct StoredScript {
     /// Source code of the script
     source: String,
+    /// Changes only after this script or a shared library is recompiled.
+    revision: u64,
     /// Last modification time
     modified: std::time::SystemTime,
     /// Script name
@@ -2704,6 +2867,7 @@ fn han_uro(name: &str) -> String {
 // ---------------------------------------------------------------------------
 
 const BCRYPT_SHA256_PREFIX: &str = "$murim$bcrypt-sha256$";
+const BCRYPT_COST: u32 = 10;
 
 fn password_sha256(plain: &str) -> String {
     use sha2::{Digest, Sha256};
@@ -2714,7 +2878,7 @@ fn password_sha256(plain: &str) -> String {
 
 /// 평문을 bcrypt로 해시한다. bcrypt 문자열에는 알고리즘, cost, salt가 포함된다.
 pub fn password_hash(plain: &str) -> String {
-    bcrypt::hash(plain, bcrypt::DEFAULT_COST).expect("bcrypt password hashing failed")
+    bcrypt::hash(plain, BCRYPT_COST).expect("bcrypt password hashing failed")
 }
 
 /// 저장된 값(해시 또는 레거시 평문)과 평문 입력이 일치하는지 검사.
@@ -2738,13 +2902,24 @@ pub fn password_verify(stored: &str, plain: &str) -> bool {
 }
 
 pub fn password_needs_upgrade(stored: &str) -> bool {
-    stored.starts_with(BCRYPT_SHA256_PREFIX)
-        || !(stored.starts_with("$2a$") || stored.starts_with("$2b$") || stored.starts_with("$2y$"))
+    if stored.starts_with(BCRYPT_SHA256_PREFIX) {
+        return true;
+    }
+    if stored.starts_with("$2a$") || stored.starts_with("$2b$") || stored.starts_with("$2y$") {
+        return stored
+            .split('$')
+            .nth(2)
+            .and_then(|cost| cost.parse::<u32>().ok())
+            != Some(BCRYPT_COST);
+    }
+    true
 }
 
-/// 기존 평문/SHA-512/SHA-256 전처리 bcrypt 계정이 정상 로그인하면
-/// 파일의 암호만 일반 bcrypt 형식으로 교체한다.
-pub fn upgrade_user_password_hash(name: &str, plain: &str) -> std::io::Result<()> {
+fn upgrade_verified_user_password_hash(
+    name: &str,
+    plain: &str,
+    verified_stored: &str,
+) -> std::io::Result<()> {
     let path = Path::new("data/user").join(format!("{}.json", name));
     let content = std::fs::read_to_string(&path)?;
     let mut json: serde_json::Value = serde_json::from_str(&content)
@@ -2754,7 +2929,8 @@ pub fn upgrade_user_password_hash(name: &str, plain: &str) -> std::io::Result<()
         .and_then(|v| v.get("암호"))
         .and_then(|v| v.as_str())
         .unwrap_or_default();
-    if !password_verify(stored, plain) || !password_needs_upgrade(stored) {
+    // Do not overwrite a password that changed after the successful check.
+    if stored != verified_stored || !password_needs_upgrade(stored) {
         return Ok(());
     }
     json["사용자오브젝트"]["암호"] = serde_json::Value::String(password_hash(plain));
@@ -2763,6 +2939,41 @@ pub fn upgrade_user_password_hash(name: &str, plain: &str) -> std::io::Result<()
     let tmp = path.with_extension("json.tmp");
     std::fs::write(&tmp, serialized)?;
     std::fs::rename(tmp, path)
+}
+
+/// 기존 평문/SHA-512/SHA-256 전처리 bcrypt 계정이 정상 로그인하면
+/// 파일의 암호만 일반 bcrypt 형식으로 교체한다.
+pub fn upgrade_user_password_hash(name: &str, plain: &str) -> std::io::Result<()> {
+    let path = Path::new("data/user").join(format!("{}.json", name));
+    let content = std::fs::read_to_string(&path)?;
+    let json: serde_json::Value = serde_json::from_str(&content)
+        .map_err(|e| std::io::Error::new(std::io::ErrorKind::InvalidData, e))?;
+    let stored = json
+        .get("사용자오브젝트")
+        .and_then(|v| v.get("암호"))
+        .and_then(|v| v.as_str())
+        .unwrap_or_default();
+    if !password_verify(stored, plain) || !password_needs_upgrade(stored) {
+        return Ok(());
+    }
+    upgrade_verified_user_password_hash(name, plain, stored)
+}
+
+/// Perform the expensive login check off the async runtime, upgrading the
+/// stored work factor without repeating a successful bcrypt verification.
+pub fn verify_and_upgrade_user_password(name: &str, plain: &str) -> bool {
+    let Some(stored) = load_user_password_hash(name) else {
+        return false;
+    };
+    if !password_verify(&stored, plain) {
+        return false;
+    }
+    if password_needs_upgrade(&stored) {
+        if let Err(error) = upgrade_verified_user_password_hash(name, plain, &stored) {
+            log::error!("failed to upgrade password hash for {}: {}", name, error);
+        }
+    }
+    true
 }
 
 /// Rhai가 읽을 수 있는 텍스트 파일을 공개 데이터 디렉토리로 제한한다.
@@ -2892,6 +3103,15 @@ fn body_json_array_marker(key: &str) -> String {
     format!("{BODY_JSON_ARRAY_MARKER_PREFIX}{key}")
 }
 
+/// `Player.setAttr()`가 만든 Python 배열 속성임을 보존한다. 이벤트 플래그는
+/// Python에서 항상 이 경로로 추가/삭제되므로, Rust가 다음 저장에서 문자열로
+/// 내보내면 Python `checkAttr()`의 문자열 부분검색으로 의미가 달라진다.
+pub(crate) fn mark_body_attr_as_json_array(body: &mut Body, key: &str) {
+    body.object
+        .temp
+        .insert(body_json_array_marker(key), Value::Int(1));
+}
+
 fn update_user_attr_int(name: &str, key: &str, value: i64) -> bool {
     let path = format!("data/user/{name}.json");
     let Ok(raw) = std::fs::read_to_string(&path) else {
@@ -2989,7 +3209,11 @@ fn save_body_to_json_with_timestamp_mode(
                 _ => "",
             };
             let values = raw
-                .split('|')
+                .split(if k == "이벤트설정리스트" {
+                    ['|', '\n']
+                } else {
+                    ['|', '\0']
+                })
                 .filter(|entry| !entry.is_empty())
                 .map(|entry| serde_json::Value::String(entry.to_string()))
                 .collect();
@@ -3010,10 +3234,8 @@ fn save_body_to_json_with_timestamp_mode(
                 // three fields with lists, including the empty case.  A
                 // non-empty string for 무공이름수련리스트 makes Python's
                 // loadSkillList iterate characters and fail to parse it.
-                let always_array = matches!(
-                    k.as_str(),
-                    "무공숙련도" | "무공이름" | "무공이름수련리스트"
-                );
+                let always_array =
+                    matches!(k.as_str(), "무공숙련도" | "무공이름" | "무공이름수련리스트");
                 if always_array || !s.is_empty() || k == "입문신청자" {
                     // "skill1|skill2" 또는 "skill1 level exp|skill2 level exp" 형식을 배열로 변환
                     let parts: Vec<serde_json::Value> = s
@@ -3146,10 +3368,9 @@ pub fn load_body_from_json(body: &mut Body, path: &str) -> bool {
             } else {
                 body.object.attr.insert(k.clone(), serde_json_to_value(v));
                 if v.is_array() {
-                    body.object.temp.insert(
-                        body_json_array_marker(k),
-                        Value::Int(1),
-                    );
+                    body.object
+                        .temp
+                        .insert(body_json_array_marker(k), Value::Int(1));
                 }
             }
         }
@@ -4394,7 +4615,16 @@ pub fn build_room_lines(
         let exits_str = format_exits_long(&room_ref);
         // Python viewMapData traverses Room.objs including ACT_DEATH corpses;
         // get_mobs_in_room intentionally filters to living targets only.
-        let mobs = world.mob_cache.get_all_mobs_in_room(&pos.zone, &pos.room);
+        let mut mobs = world.mob_cache.get_all_mobs_in_room(&pos.zone, &pos.room);
+        let unified_order = world.get_room_object_order(&pos.zone, &pos.room);
+        if !unified_order.is_empty() {
+            mobs.sort_by_key(|mob| {
+                unified_order
+                    .iter()
+                    .position(|object| *object == RoomObjectRef::Mob(mob.instance_id))
+                    .unwrap_or(usize::MAX)
+            });
+        }
         let mob_str = if mobs.is_empty() {
             String::new()
         } else {
@@ -4992,12 +5222,23 @@ fn look_at_target(
     let player_matches = |player_name: &str| player_match_kind(player_name) != 0;
 
     if name.is_empty() && order >= 1 {
-        for mob in world.mob_cache.get_mobs_in_room(zone, room_s) {
-            if !mob.alive {
+        // Python Room.findObjName("1") walks the unified room.objs order and
+        // counts only living, non-type-7 mobs.  `쳐` uses this same order;
+        // `봐` must not fall back to MobCache's internal vector order.
+        let mobs = world.mob_cache.get_all_mobs_in_room(zone, room_s);
+        let mut ordered = world.get_room_object_order(zone, room_s);
+        if ordered.is_empty() {
+            ordered.extend(mobs.iter().map(|mob| RoomObjectRef::Mob(mob.instance_id)));
+        }
+        for object in ordered {
+            let RoomObjectRef::Mob(instance_id) = object else {
                 continue;
-            }
+            };
+            let Some(mob) = mobs.iter().find(|mob| mob.instance_id == instance_id) else {
+                continue;
+            };
             if let Some(data) = world.mob_cache.get_mob(&mob.mob_key) {
-                if data.mob_type == 7 {
+                if !mob.alive || mob.act == 2 || mob.act == 3 || data.mob_type == 7 {
                     continue;
                 }
                 c += 1;
@@ -5135,6 +5376,23 @@ fn look_at_target(
                     }
                 }
                 RoomObjectRef::Box(_) => {}
+                RoomObjectRef::Fixture(id) => {
+                    let match_kind = world
+                        .get_fixture(id)
+                        .map(|fixture| {
+                            let (exact, prefixes) = fixture.match_counts(&name);
+                            if exact { 2 } else if prefixes > 0 { 1 } else { 0 }
+                        })
+                        .unwrap_or(0);
+                    if python_room_match_selected(
+                        match_kind,
+                        &mut ordered_exact,
+                        &mut ordered_prefix,
+                        order,
+                    ) {
+                        return not_found;
+                    }
+                }
             }
         }
     }
@@ -5774,6 +6032,10 @@ pub fn create_engine_with_body_and_output(
     materialize_legacy_room_stacks(body);
     let oc = output_collector.clone();
     let mut engine = create_engine_with_output(output_collector);
+    #[cfg(test)]
+    engine.register_fn("__test_sleep_ms", |milliseconds: i64| {
+        std::thread::sleep(Duration::from_millis(milliseconds.max(0) as u64));
+    });
     let body_ptr = body as *mut Body;
     let spec = special_collector.clone();
 
@@ -5823,6 +6085,10 @@ pub fn create_engine_with_body_and_output(
     // Python `버려.py`의 인벤토리 순회/방 수량/ONEITEM 상태 전이만
     // 제공한다. 집계 결과의 문구·ANSI·조사는 `버려.rhai`가 만든다.
     drop_item::register_drop_item_efuns(&mut engine, body_ptr);
+
+    // Room-bound interactive objects expose only identity, placement, and
+    // attribute state. Rhai owns their interaction rules and visible output.
+    fixture::register_fixture_efuns(&mut engine, body_ptr);
 
     // Python `cmds/귀환.py`의 검사/위치 전이만 제공한다. 명령 문구와
     // 같은 방 알림은 hot-reload되는 `귀환.rhai`가 결정한다.
@@ -8217,16 +8483,11 @@ pub fn create_engine_with_body_and_output(
         "set_user_event",
         move |_ob: &mut rhai::Map, key: &str, value: &str| {
             let body = unsafe { &mut *body_ptr_ev2 };
-            let mut m = parse_event_string(&body.get_string("이벤트설정리스트"));
-            if value.is_empty() {
-                m.remove(key);
-            } else {
-                m.insert(key.to_string(), value.to_string());
-            }
-            body.object.attr.insert(
-                "이벤트설정리스트".to_string(),
-                Value::String(format_event_string(&m)),
-            );
+            let updated = event_list_set(&body.get_string("이벤트설정리스트"), key, value);
+            mark_body_attr_as_json_array(body, "이벤트설정리스트");
+            body.object
+                .attr
+                .insert("이벤트설정리스트".to_string(), Value::String(updated));
             let path = format!("data/user/{}.json", body.get_name());
             let _ = save_body_to_json(body, &path);
         },
@@ -8234,12 +8495,11 @@ pub fn create_engine_with_body_and_output(
     let body_ptr_ev3 = body_ptr;
     engine.register_fn("del_user_event", move |_ob: &mut rhai::Map, key: &str| {
         let body = unsafe { &mut *body_ptr_ev3 };
-        let mut m = parse_event_string(&body.get_string("이벤트설정리스트"));
-        m.remove(key);
-        body.object.attr.insert(
-            "이벤트설정리스트".to_string(),
-            Value::String(format_event_string(&m)),
-        );
+        let updated = event_list_remove(&body.get_string("이벤트설정리스트"), key);
+        mark_body_attr_as_json_array(body, "이벤트설정리스트");
+        body.object
+            .attr
+            .insert("이벤트설정리스트".to_string(), Value::String(updated));
         let path = format!("data/user/{}.json", body.get_name());
         let _ = save_body_to_json(body, &path);
     });
@@ -8736,103 +8996,7 @@ pub fn create_engine_with_body_and_output(
         "check_summon_destination",
         move |_ob: &mut rhai::Map, zone: &str, room: &str| -> String {
             let body = unsafe { &*body_ptr_summon_check };
-            let mut world = match get_world_state().write() {
-                Ok(world) => world,
-                Err(_) => return "fail".into(),
-            };
-            let room_arc = match world.room_cache.get_room(zone, room) {
-                Ok(room) => room,
-                Err(_) => return "fail".into(),
-            };
-            if world
-                .get_player_position(&body.get_name())
-                .is_some_and(|position| position.zone == zone && position.room == room)
-            {
-                return "same_place".into();
-            }
-            let room_guard = match room_arc.read() {
-                Ok(room) => room,
-                Err(_) => return "fail".into(),
-            };
-            let attrs = world
-                .room_attrs
-                .get(&format!("{zone}:{room}"))
-                .cloned()
-                .unwrap_or_default();
-            let raw_info = std::fs::read_to_string(format!("data/map/{zone}/{room}.json"))
-                .ok()
-                .and_then(|source| serde_json::from_str::<serde_json::Value>(&source).ok())
-                .and_then(|root| {
-                    root.get("맵정보")
-                        .and_then(|value| value.as_object())
-                        .cloned()
-                })
-                .unwrap_or_default();
-            let raw_int = |key: &str, fallback: i64| {
-                raw_info.get(key).map_or(fallback, |value| match value {
-                    serde_json::Value::Number(number) => number.as_i64().unwrap_or(fallback),
-                    serde_json::Value::String(text) => text.trim().parse().unwrap_or(fallback),
-                    _ => fallback,
-                })
-            };
-            let int_attr = |key: &str, fallback: i64| {
-                attrs
-                    .get(key)
-                    .and_then(|value| value.trim().parse::<i64>().ok())
-                    .unwrap_or(fallback)
-            };
-            let level = body.get_int("레벨");
-            let level_upper = int_attr("레벨상한", raw_int("레벨상한", room_guard.level_upper));
-            let level_lower = int_attr("레벨제한", raw_int("레벨제한", room_guard.level_limit));
-            let strength_upper = int_attr("힘상한제한", raw_int("힘상한제한", 0));
-            let dexterity_upper = int_attr("민첩상한제한", raw_int("민첩상한제한", 0));
-            if (level_upper > 0 && level_upper < level)
-                || level_lower > level
-                || (strength_upper > 0 && strength_upper < body.get_int("힘"))
-                || (dexterity_upper > 0 && dexterity_upper < body.get_dex())
-            {
-                return "pressure".into();
-            }
-            let property_limit = room_guard
-                .properties
-                .iter()
-                .find_map(|property| {
-                    let mut words = property.split_whitespace();
-                    (words.next() == Some("인원제한"))
-                        .then(|| words.next()?.parse::<i64>().ok())
-                        .flatten()
-                })
-                .unwrap_or(0);
-            drop(room_guard);
-            if property_limit > 0
-                && world.get_players_in_room(zone, room).len() as i64 >= property_limit
-            {
-                return "room_full".into();
-            }
-            let properties = room_arc
-                .read()
-                .map(|room| room.properties.clone())
-                .unwrap_or_default();
-            let personality = body.get_string("성격");
-            if properties.iter().any(|property| property == "사파출입금지") && personality == "사파"
-            {
-                return "evil_forbidden".into();
-            }
-            if properties.iter().any(|property| property == "정파출입금지") && personality == "정파"
-            {
-                return "good_forbidden".into();
-            }
-            let guild_owner = attrs.get("방파주인").cloned().unwrap_or_else(|| {
-                raw_info
-                    .get("방파주인")
-                    .and_then(|value| value.as_str())
-                    .unwrap_or_default()
-                    .to_string()
-            });
-            if !guild_owner.is_empty() && guild_owner != body.get_string("소속") {
-                return "guild_forbidden".into();
-            }
-            String::new()
+            check_summon_destination(body, zone, room)
         },
     );
 
@@ -9074,6 +9238,7 @@ pub fn create_engine_with_body_and_output(
                 Summoned(u64),
                 Mob(u64),
                 Object(Arc<Mutex<Object>>),
+                Fixture(u64),
             }
             let ordered_target = get_world_state().read().ok().and_then(|world| {
                 let floor = world.get_room_objs(&zone, &room);
@@ -9198,6 +9363,11 @@ pub fn create_engine_with_body_and_output(
                                 (exact || prefixes > 0)
                                     .then_some((OrderedValueTarget::Summoned(id), exact, prefixes))
                             }),
+                        RoomObjectRef::Fixture(id) => world.get_fixture(id).and_then(|fixture| {
+                            let (exact, prefixes) = fixture.match_counts(query);
+                            (exact || prefixes > 0)
+                                .then_some((OrderedValueTarget::Fixture(id), exact, prefixes))
+                        }),
                       };
                       let (selected, exact, prefixes) = candidate?;
                       if exact {
@@ -9234,6 +9404,36 @@ pub fn create_engine_with_body_and_output(
                     Err(()) => return "invalid".into(),
                 };
                 user.body.set(key, value);
+                return "ok".into();
+            }
+
+            if let Some(OrderedValueTarget::Fixture(id)) = ordered_target.as_ref() {
+                let mut world = get_world_state().write().unwrap();
+                let Some(fixture) = world.get_fixture_mut(*id) else {
+                    return "missing".into();
+                };
+                let value = match fixture.attribute(key) {
+                    Some(serde_json::Value::Number(number)) if number.is_i64() => raw
+                        .parse::<i64>()
+                        .map(|value| serde_json::Value::Number(value.into()))
+                        .map_err(|_| ()),
+                    Some(serde_json::Value::Number(_)) => raw
+                        .parse::<f64>()
+                        .ok()
+                        .and_then(serde_json::Number::from_f64)
+                        .map(serde_json::Value::Number)
+                        .ok_or(()),
+                    Some(serde_json::Value::Bool(_)) => match raw {
+                        "true" | "True" | "1" => Ok(serde_json::Value::Bool(true)),
+                        "false" | "False" | "0" => Ok(serde_json::Value::Bool(false)),
+                        _ => Err(()),
+                    },
+                    _ => Ok(serde_json::Value::String(raw.to_string())),
+                };
+                let Ok(value) = value else {
+                    return "invalid".into();
+                };
+                fixture.set_attribute(key, value);
                 return "ok".into();
             }
 
@@ -9638,6 +9838,15 @@ pub fn create_engine_with_body_and_output(
                         })
                         .unwrap_or(false)
                 }
+                RoomObjectRef::Fixture(id) => get_world_state()
+                    .write()
+                    .ok()
+                    .and_then(|mut world| {
+                        world
+                            .get_fixture_mut(id)
+                            .map(|fixture| fixture.attributes.remove(key).is_some())
+                    })
+                    .unwrap_or(false),
             };
             if removed {
                 "ok".into()
@@ -9752,6 +9961,34 @@ pub fn create_engine_with_body_and_output(
                         })
                         .unwrap_or_else(|| "no_target".into())
                 }
+                RoomObjectRef::Fixture(id) => get_world_state()
+                    .write()
+                    .ok()
+                    .and_then(|mut world| {
+                        let fixture = world.get_fixture_mut(id)?;
+                        let result = match fixture.attribute(key).cloned() {
+                            None => {
+                                let value = wanted
+                                    .parse::<i64>()
+                                    .map(|value| serde_json::Value::Number(value.into()))
+                                    .unwrap_or_else(|_| {
+                                        serde_json::Value::String(wanted.to_string())
+                                    });
+                                fixture.set_attribute(key, value);
+                                "ok"
+                            }
+                            Some(serde_json::Value::String(current)) => {
+                                fixture.set_attribute(
+                                    key,
+                                    serde_json::Value::String(format!("{current}\r\n{wanted}")),
+                                );
+                                "ok"
+                            }
+                            Some(_) => "failed",
+                        };
+                        Some(result.to_string())
+                    })
+                    .unwrap_or_else(|| "no_target".into()),
             }
         },
     );
@@ -9870,6 +10107,39 @@ pub fn create_engine_with_body_and_output(
                         })
                         .unwrap_or_else(|| "no_target".into())
                 }
+                RoomObjectRef::Fixture(id) => get_world_state()
+                    .write()
+                    .ok()
+                    .and_then(|mut world| {
+                        let fixture = world.get_fixture_mut(id)?;
+                        let Some(serde_json::Value::String(raw)) =
+                            fixture.attribute(key).cloned()
+                        else {
+                            return Some(if fixture.attribute(key).is_some() {
+                                "not_value".to_string()
+                            } else {
+                                "no_key".to_string()
+                            });
+                        };
+                        let values = raw.split("\r\n").collect::<Vec<_>>();
+                        if !values.contains(&wanted) {
+                            return Some("not_value".to_string());
+                        }
+                        let kept = values
+                            .into_iter()
+                            .filter(|value| *value != wanted)
+                            .collect::<Vec<_>>();
+                        if kept.is_empty() {
+                            fixture.attributes.remove(key);
+                        } else {
+                            fixture.set_attribute(
+                                key,
+                                serde_json::Value::String(kept.join("\r\n")),
+                            );
+                        }
+                        Some("ok".to_string())
+                    })
+                    .unwrap_or_else(|| "no_target".into()),
             }
         },
     );
@@ -10193,7 +10463,8 @@ pub fn create_engine_with_body_and_output(
                         RoomObjectRef::FloorItem(_)
                         | RoomObjectRef::Box(_)
                         | RoomObjectRef::InstalledBox(_)
-                        | RoomObjectRef::SummonedUser(_) => Some(CompareTarget::Invalid),
+                        | RoomObjectRef::SummonedUser(_)
+                        | RoomObjectRef::Fixture(_) => Some(CompareTarget::Invalid),
                     };
                     if resolved.is_some() {
                         return resolved;
@@ -12951,6 +13222,15 @@ pub fn create_engine_with_body_and_output(
                             target.insert("name".into(), Dynamic::from(user.body.get_name()));
                             (Dynamic::from(target), exact, prefixes)
                         }),
+                    RoomObjectRef::Fixture(id) => world.get_fixture(id).and_then(|fixture| {
+                        let (exact, prefixes) = fixture.match_counts(query);
+                        (exact || prefixes > 0).then(|| {
+                            let mut target = rhai::Map::new();
+                            target.insert("kind".into(), Dynamic::from("fixture"));
+                            target.insert("id".into(), Dynamic::from(id as i64));
+                            (Dynamic::from(target), exact, prefixes)
+                        })
+                    }),
                 };
                 if let Some((selected, exact, prefixes)) = selected {
                     if exact {
@@ -15354,6 +15634,15 @@ pub fn create_engine_with_body_and_output(
                             return name;
                         }
                     }
+                    RoomObjectRef::Fixture(id) => {
+                        let (exact, prefixes) = world
+                            .get_fixture(id)
+                            .map(|fixture| fixture.match_counts(query))
+                            .unwrap_or((false, 0));
+                        if selected(exact, prefixes) {
+                            return String::new();
+                        }
+                    }
                 }
             }
             // Legacy snapshots without unified index entries retain their
@@ -15512,6 +15801,9 @@ pub fn create_engine_with_body_and_output(
                         {
                             return chars(raw);
                         }
+                    }
+                    RoomObjectRef::Fixture(_) => {
+                        return Dynamic::from_array(rhai::Array::new());
                     }
                 }
             }
@@ -15780,6 +16072,7 @@ pub fn create_engine_with_body_and_output(
                         object.set("이벤트설정리스트", updated);
                         return "deleted".into();
                     }
+                    RoomObjectRef::Fixture(_) => return "missing".into(),
                 }
             }
 
@@ -16022,6 +16315,7 @@ pub fn create_engine_with_body_and_output(
                         object.set("이벤트설정리스트", updated);
                         return "set".into();
                     }
+                    RoomObjectRef::Fixture(_) => return "missing".into(),
                 }
             }
             enum EventTarget {
@@ -16586,6 +16880,9 @@ pub fn create_engine_with_body_and_output(
                         crate::world::RoomObjectRef::InstalledBox(ordinal) => installed
                             .get(ordinal)
                             .and_then(|object| object.lock().ok().map(|object| object.getName())),
+                        crate::world::RoomObjectRef::Fixture(id) => {
+                            world.get_fixture(id).map(|fixture| fixture.name().to_string())
+                        }
                     };
                     if name.as_deref() == Some(wanted) {
                         matches += 1;
@@ -19158,24 +19455,184 @@ fn python_json_repr(value: &serde_json::Value) -> String {
     }
 }
 
-/// Script storage - stores raw script source code
+/// Script storage - stores source metadata and compiled Rhai ASTs.
 pub struct ScriptStorage {
     scripts: HashMap<String, StoredScript>,
     /// Library scripts loaded from lib/ directory (hot-reloadable)
     libraries: HashMap<String, String>,
+    /// Modification times used to detect added, removed, and changed libraries.
+    library_modified: HashMap<String, std::time::SystemTime>,
+    /// Libraries are combined only when a library file changes.
+    library_source: String,
     config: ScriptConfig,
     /// 글로벌 데이터 캐시 참조
     global_data: Option<SharedGlobalData>,
 }
 
-unsafe impl Send for ScriptStorage {}
-unsafe impl Sync for ScriptStorage {}
+static NEXT_SCRIPT_REVISION: AtomicU64 = AtomicU64::new(1);
+
+thread_local! {
+    /// Rhai without its `sync` feature uses `Rc` inside AST, so an AST must not
+    /// be shared across Tokio worker threads. Each worker keeps a compiled AST
+    /// per script revision; ordinary executions on that worker only evaluate.
+    static SCRIPT_AST_CACHE: RefCell<HashMap<(String, u64), (AST, AST)>> = RefCell::new(HashMap::new());
+}
 
 impl ScriptStorage {
+    fn compile_script_asts(
+        name: &str,
+        source: &str,
+        library_source: &str,
+    ) -> Result<(AST, AST), Box<dyn std::error::Error>> {
+        let engine = Engine::new();
+        let ast = engine
+            .compile(source)
+            .map_err(|error| format!("compile {name}: {error}"))?;
+        let command_source = format!("{library_source}\n{source}\nmain(ob, cmdline)");
+        let command_ast = engine
+            .compile(&command_source)
+            .map_err(|error| format!("compile {name} with libraries: {error}"))?;
+        Ok((ast, command_ast))
+    }
+
+    fn next_revision() -> u64 {
+        NEXT_SCRIPT_REVISION.fetch_add(1, Ordering::Relaxed)
+    }
+
+    fn cache_asts(name: &str, revision: u64, asts: (AST, AST)) {
+        SCRIPT_AST_CACHE.with(|cache| {
+            let mut cache = cache.borrow_mut();
+            cache.retain(|(cached_name, _), _| cached_name != name);
+            cache.insert((name.to_string(), revision), asts);
+        });
+    }
+
+    fn cached_asts(
+        &self,
+        name: &str,
+        script: &StoredScript,
+    ) -> Result<(AST, AST), Box<dyn std::error::Error>> {
+        let key = (name.to_string(), script.revision);
+        if let Some(asts) = SCRIPT_AST_CACHE.with(|cache| cache.borrow().get(&key).cloned()) {
+            return Ok(asts);
+        }
+        let compile_started = Instant::now();
+        let asts = Self::compile_script_asts(name, &script.source, &self.library_source)?;
+        Self::cache_asts(name, script.revision, asts.clone());
+        tracing::debug!(
+            script = name,
+            revision = script.revision,
+            compile_us = compile_started.elapsed().as_micros(),
+            "Warmed Rhai AST cache on worker thread"
+        );
+        Ok(asts)
+    }
+
+    fn combined_library_source(libraries: &HashMap<String, String>) -> String {
+        let mut combined = String::new();
+        for (name, source) in libraries {
+            combined.push_str("// Library: ");
+            combined.push_str(name);
+            combined.push('\n');
+            combined.push_str(source);
+            combined.push('\n');
+        }
+        combined
+    }
+
+    fn read_libraries_recursive(
+        root: &Path,
+        dir: &Path,
+        libraries: &mut HashMap<String, String>,
+        modified: &mut HashMap<String, std::time::SystemTime>,
+    ) -> Result<(), Box<dyn std::error::Error>> {
+        for entry in std::fs::read_dir(dir)? {
+            let path = entry?.path();
+            if path.is_dir() {
+                if path
+                    .file_name()
+                    .is_some_and(|name| name == "std" || name == "doumi")
+                {
+                    continue;
+                }
+                Self::read_libraries_recursive(root, &path, libraries, modified)?;
+                continue;
+            }
+            if path.extension().and_then(std::ffi::OsStr::to_str) != Some("rhai") {
+                continue;
+            }
+            let rel_path = path
+                .strip_prefix(root)
+                .unwrap_or(&path)
+                .to_string_lossy()
+                .replace(std::path::MAIN_SEPARATOR, "/");
+            if rel_path.starts_with("std/") || rel_path.starts_with("doumi/") {
+                continue;
+            }
+            let name = rel_path
+                .strip_suffix(".rhai")
+                .unwrap_or(&rel_path)
+                .to_string();
+            let metadata = std::fs::metadata(&path)?;
+            libraries.insert(name.clone(), std::fs::read_to_string(&path)?);
+            modified.insert(name.clone(), metadata.modified()?);
+            debug!(library = name, path = %path.display(), "Loaded Rhai library");
+        }
+        Ok(())
+    }
+
+    fn read_library_snapshot(
+        &self,
+    ) -> Result<
+        (
+            HashMap<String, String>,
+            HashMap<String, std::time::SystemTime>,
+        ),
+        Box<dyn std::error::Error>,
+    > {
+        let mut libraries = HashMap::new();
+        let mut modified = HashMap::new();
+        if self.config.lib_dir.exists() {
+            Self::read_libraries_recursive(
+                &self.config.lib_dir,
+                &self.config.lib_dir,
+                &mut libraries,
+                &mut modified,
+            )?;
+        }
+        Ok((libraries, modified))
+    }
+
+    fn install_library_snapshot(
+        &mut self,
+        libraries: HashMap<String, String>,
+        modified: HashMap<String, std::time::SystemTime>,
+    ) -> Result<(), Box<dyn std::error::Error>> {
+        let library_source = Self::combined_library_source(&libraries);
+        let mut compiled = HashMap::with_capacity(self.scripts.len());
+        for (name, script) in &self.scripts {
+            let asts = Self::compile_script_asts(name, &script.source, &library_source)?;
+            compiled.insert(name.clone(), asts);
+        }
+        for (name, asts) in compiled {
+            let revision = Self::next_revision();
+            Self::cache_asts(&name, revision, asts);
+            if let Some(script) = self.scripts.get_mut(&name) {
+                script.revision = revision;
+            }
+        }
+        self.libraries = libraries;
+        self.library_modified = modified;
+        self.library_source = library_source;
+        Ok(())
+    }
+
     pub fn new(config: ScriptConfig) -> Self {
         let mut storage = Self {
             scripts: HashMap::new(),
             libraries: HashMap::new(),
+            library_modified: HashMap::new(),
+            library_source: String::new(),
             config,
             global_data: None,
         };
@@ -19189,6 +19646,8 @@ impl ScriptStorage {
         let mut storage = Self {
             scripts: HashMap::new(),
             libraries: HashMap::new(),
+            library_modified: HashMap::new(),
+            library_source: String::new(),
             config,
             global_data: Some(global_data),
         };
@@ -19260,14 +19719,16 @@ impl ScriptStorage {
                 .unwrap_or("unknown")
                 .to_string();
             let source = std::fs::read_to_string(&path)?;
-            Engine::new()
-                .compile(&source)
+            let asts = Self::compile_script_asts(&name, &source, &self.library_source)
                 .map_err(|error| format!("{}: {}", path.display(), error))?;
+            let revision = Self::next_revision();
+            Self::cache_asts(&name, revision, asts);
             let modified = std::fs::metadata(&path)?.modified()?;
             self.scripts.insert(
                 name.clone(),
                 StoredScript {
                     source,
+                    revision,
                     modified,
                     _name: name,
                 },
@@ -19284,7 +19745,8 @@ impl ScriptStorage {
             return Ok(());
         }
 
-        self.load_libraries_recursive(&dir)?;
+        let (libraries, modified) = self.read_library_snapshot()?;
+        self.install_library_snapshot(libraries, modified)?;
 
         info!(
             "Loaded {} library scripts from {:?}",
@@ -19294,68 +19756,16 @@ impl ScriptStorage {
         Ok(())
     }
 
-    /// Recursively load .rhai files from a directory
-    fn load_libraries_recursive(&mut self, dir: &Path) -> Result<(), Box<dyn std::error::Error>> {
-        let entries = std::fs::read_dir(dir)?;
-        for entry in entries {
-            let entry = entry?;
-            let path = entry.path();
-            if path.is_dir() {
-                // Skip lib/std/ and lib/doumi/ directories
-                // lib/std/ files define object templates with duplicate function names
-                // lib/doumi/ files are DOUMI character creation scripts, not libraries
-                if let Some(file_name) = path.file_name() {
-                    if file_name == "std" || file_name == "doumi" {
-                        continue;
-                    }
-                }
-                // Recursively load from subdirectories
-                self.load_libraries_recursive(&path)?;
-            } else if path.extension().and_then(std::ffi::OsStr::to_str) == Some("rhai") {
-                // Create a unique name based on relative path from lib_dir
-                let rel_path = path
-                    .strip_prefix(&self.config.lib_dir)
-                    .unwrap_or(&path)
-                    .to_string_lossy()
-                    .replace(std::path::MAIN_SEPARATOR, "/");
-
-                // Skip std/ and doumi/ directory files
-                if rel_path.starts_with("std/") || rel_path.starts_with("doumi/") {
-                    continue;
-                }
-
-                // Remove .rhai extension from the relative path to get a unique library name
-                let name = rel_path
-                    .strip_suffix(".rhai")
-                    .unwrap_or(&rel_path)
-                    .to_string();
-
-                let source = std::fs::read_to_string(&path)?;
-                debug!("Loaded library: {} from {:?}", name, path);
-                self.libraries.insert(name, source);
-            }
-        }
-        Ok(())
-    }
-
     /// Reload all library scripts from lib/ directory
     pub fn reload_libraries(&mut self) -> Result<usize, Box<dyn std::error::Error>> {
-        self.libraries.clear();
-        self.load_all_libraries()?;
+        let (libraries, modified) = self.read_library_snapshot()?;
+        self.install_library_snapshot(libraries, modified)?;
         Ok(self.libraries.len())
     }
 
     /// Get combined library source code to prepend to scripts
     pub fn get_library_source(&self) -> String {
-        let mut combined = String::new();
-        for (name, source) in &self.libraries {
-            combined.push_str("// Library: ");
-            combined.push_str(name);
-            combined.push('\n');
-            combined.push_str(source);
-            combined.push('\n');
-        }
-        combined
+        self.library_source.clone()
     }
 
     pub fn load_script(
@@ -19366,10 +19776,14 @@ impl ScriptStorage {
         let metadata = std::fs::metadata(path)?;
         let modified = metadata.modified()?;
         let source = std::fs::read_to_string(path)?;
+        let asts = Self::compile_script_asts(name, &source, &self.library_source)?;
+        let revision = Self::next_revision();
+        Self::cache_asts(name, revision, asts);
         self.scripts.insert(
             name.to_string(),
             StoredScript {
                 source,
+                revision,
                 modified,
                 _name: name.to_string(),
             },
@@ -19394,10 +19808,14 @@ impl ScriptStorage {
         }
 
         let source = std::fs::read_to_string(&script_path)?;
+        let asts = Self::compile_script_asts(name, &source, &self.library_source)?;
+        let revision = Self::next_revision();
+        Self::cache_asts(name, revision, asts);
         self.scripts.insert(
             name.to_string(),
             StoredScript {
                 source,
+                revision,
                 modified,
                 _name: name.to_string(),
             },
@@ -19409,6 +19827,15 @@ impl ScriptStorage {
 
     pub fn reload_all(&mut self) -> Result<usize, Box<dyn std::error::Error>> {
         let mut reloaded = 0;
+        let (libraries, modified) = self.read_library_snapshot()?;
+        if modified != self.library_modified {
+            self.install_library_snapshot(libraries, modified)?;
+            reloaded += self.scripts.len();
+            info!(
+                scripts = self.scripts.len(),
+                "Recompiled Rhai ASTs after library change"
+            );
+        }
         let names: Vec<String> = self.scripts.keys().cloned().collect();
         for name in names {
             if self.reload_script(&name)? {
@@ -19431,25 +19858,23 @@ impl ScriptStorage {
         get_other_players_map: Option<Arc<dyn Fn() -> HashMap<String, String> + Send + Sync>>,
         call_out_scheduler: Option<Arc<CallOutScheduler>>,
     ) -> Result<(Vec<String>, Option<CommandResult>), Box<dyn std::error::Error>> {
-        // Native efuns below capture a raw pointer to this command's Body and
-        // a few Python-compatible registries are process-global. Running two
-        // engines concurrently can therefore route a native call to the
-        // wrong command context. Serialize the complete evaluation scope.
-        let _execution_guard = RHAI_EXECUTION_LOCK
-            .get_or_init(|| Mutex::new(()))
-            .lock()
-            .unwrap_or_else(|poisoned| poisoned.into_inner());
+        let total_started = Instant::now();
         tracing::debug!(script = name, "Executing Rhai script");
         let script = self
             .scripts
             .get(name)
             .ok_or_else(|| format!("Script not found: {}", name))?;
+        let (_, command_ast) = self.cached_asts(name, script)?;
 
         let output_collector = Arc::new(Mutex::new(Vec::new()));
         let output_clone = output_collector.clone();
         let special_collector = Arc::new(Mutex::new(None));
         let user_sends = Arc::new(Mutex::new(Vec::new()));
 
+        let engine_started = Instant::now();
+        // Native efuns capture this invocation's exclusively borrowed Body.
+        // The Engine therefore stays command-local, while a worker-local AST
+        // is reused without a process-wide execution mutex.
         let engine = create_engine_with_body_and_output(
             player,
             output_clone,
@@ -19461,6 +19886,8 @@ impl ScriptStorage {
             Some(name),
             self.global_data.clone(),
         );
+        let engine_setup = engine_started.elapsed();
+        let scope_started = Instant::now();
         let mut scope = Scope::new();
 
         let player_data = build_ob_from_body(player);
@@ -19477,22 +19904,21 @@ impl ScriptStorage {
         // DOUMI system global variables for script suspension/resumption
         scope.push("_doumi_resume_op", "" as &str);
         scope.push("_doumi_resume_input", "" as &str);
-
-        // Prepend library source for hot-reloadable functions
-        let library_source = self.get_library_source();
-        let script_with_main = format!("{}\n{}\nmain(ob, cmdline)", library_source, script.source);
-        tracing::debug!(
-            script = name,
-            source_length = script_with_main.len(),
-            "Running Rhai script"
-        );
-        let result = engine.run_with_scope(&mut scope, &script_with_main);
+        let scope_setup = scope_started.elapsed();
+        tracing::debug!(script = name, "Running cached Rhai AST");
+        let eval_started = Instant::now();
+        let result = engine.run_ast_with_scope(&mut scope, &command_ast);
+        let eval_elapsed = eval_started.elapsed();
         tracing::debug!(
             script = name,
             success = result.is_ok(),
+            engine_setup_us = engine_setup.as_micros(),
+            scope_setup_us = scope_setup.as_micros(),
+            rhai_and_efun_us = eval_elapsed.as_micros(),
             "Rhai script finished"
         );
         result.map_err(|e| format!("스크립트 실행 오류: {}", e))?;
+        let postprocess_started = Instant::now();
 
         // Affix commands also update their command-local `ob` map. Read that
         // authoritative per-evaluation value back so native pointer context
@@ -19554,6 +19980,12 @@ impl ScriptStorage {
                 ))
             };
         }
+        tracing::debug!(
+            script = name,
+            postprocess_us = postprocess_started.elapsed().as_micros(),
+            total_us = total_started.elapsed().as_micros(),
+            "Completed Rhai command processing"
+        );
         Ok((expanded, special))
     }
 
@@ -19566,8 +19998,9 @@ impl ScriptStorage {
             .scripts
             .get(name)
             .ok_or_else(|| format!("Script not found: {}", name))?;
+        let (ast, _) = self.cached_asts(name, script)?;
         let engine = create_engine();
-        engine.run_with_scope(scope, &script.source)?;
+        engine.run_ast_with_scope(scope, &ast)?;
         Ok(())
     }
 
@@ -19584,6 +20017,16 @@ impl ScriptStorage {
         self.scripts.get(name).map(|s| s.source.clone())
     }
 
+    /// Get the cached definition AST for call_out and other driver applies.
+    pub fn get_script_ast(&self, name: &str) -> Result<Option<AST>, String> {
+        let Some(script) = self.scripts.get(name) else {
+            return Ok(None);
+        };
+        self.cached_asts(name, script)
+            .map(|(ast, _)| Some(ast))
+            .map_err(|error| error.to_string())
+    }
+
     /// Call a named function from a loaded Rhai script. This is the driver
     /// boundary used by Master/heartbeat; the script still owns the policy.
     pub fn call_script_function(
@@ -19596,11 +20039,10 @@ impl ScriptStorage {
             .scripts
             .get(name)
             .ok_or_else(|| format!("script not found: {name}"))?;
-        let source = script.source.clone();
+        let (ast, _) = self
+            .cached_asts(name, script)
+            .map_err(|error| error.to_string())?;
         let engine = create_engine();
-        let ast = engine
-            .compile(&source)
-            .map_err(|error| format!("compile {name}: {error}"))?;
         let mut scope = Scope::new();
         let result = match args.as_slice() {
             [] => engine.call_fn::<Dynamic>(&mut scope, &ast, function, ()),
@@ -19632,11 +20074,10 @@ impl ScriptStorage {
             .scripts
             .get(name)
             .ok_or_else(|| format!("script not found: {name}"))?;
-        let source = script.source.clone();
+        let (ast, _) = self
+            .cached_asts(name, script)
+            .map_err(|error| error.to_string())?;
         let engine = create_engine();
-        let ast = engine
-            .compile(&source)
-            .map_err(|error| format!("compile {name}: {error}"))?;
         let mut scope = Scope::new();
         engine
             .call_fn::<String>(&mut scope, &ast, function, (arg.to_string(),))
@@ -19648,11 +20089,10 @@ impl ScriptStorage {
             .scripts
             .get(name)
             .ok_or_else(|| format!("script not found: {name}"))?;
-        let source = script.source.clone();
+        let (ast, _) = self
+            .cached_asts(name, script)
+            .map_err(|error| error.to_string())?;
         let engine = create_engine();
-        let ast = engine
-            .compile(&source)
-            .map_err(|error| format!("compile {name}: {error}"))?;
         let mut scope = Scope::new();
         engine
             .call_fn::<String>(&mut scope, &ast, function, ())
@@ -19670,11 +20110,10 @@ impl ScriptStorage {
             .scripts
             .get(name)
             .ok_or_else(|| format!("script not found: {name}"))?;
-        let source = script.source.clone();
+        let (ast, _) = self
+            .cached_asts(name, script)
+            .map_err(|error| error.to_string())?;
         let engine = create_engine();
-        let ast = engine
-            .compile(&source)
-            .map_err(|error| format!("compile {name}: {error}"))?;
         let mut scope = Scope::new();
         engine
             .call_fn::<String>(
@@ -19697,11 +20136,10 @@ impl ScriptStorage {
             .scripts
             .get(name)
             .ok_or_else(|| format!("script not found: {name}"))?;
-        let source = script.source.clone();
+        let (ast, _) = self
+            .cached_asts(name, script)
+            .map_err(|error| error.to_string())?;
         let engine = create_engine();
-        let ast = engine
-            .compile(&source)
-            .map_err(|error| format!("compile {name}: {error}"))?;
         let mut scope = Scope::new();
         engine
             .call_fn::<bool>(
@@ -19723,11 +20161,10 @@ impl ScriptStorage {
             .scripts
             .get(name)
             .ok_or_else(|| format!("script not found: {name}"))?;
-        let source = script.source.clone();
+        let (ast, _) = self
+            .cached_asts(name, script)
+            .map_err(|error| error.to_string())?;
         let engine = create_engine();
-        let ast = engine
-            .compile(&source)
-            .map_err(|error| format!("compile {name}: {error}"))?;
         let mut scope = Scope::new();
         let result = match args.as_slice() {
             [] => engine.call_fn::<()>(&mut scope, &ast, function, ()),
@@ -19835,14 +20272,11 @@ pub fn create_call_out_script_runner_with_scheduler(
         move |target: &str, script: Option<&str>, function: &str, args: Vec<serde_json::Value>| {
             let script = script.ok_or_else(|| "call_out: script name required".to_string())?;
             // process_due는 tokio 워커에서 호출되므로 blocking_read 전에 block_in_place로 블로킹 허용
-            let (source, global_data) = tokio::task::block_in_place(|| {
+            let (ast, global_data) = tokio::task::block_in_place(|| {
                 let storage = script_storage.blocking_read();
-                (
-                    storage.get_script_source(script),
-                    storage.global_data.clone(),
-                )
+                (storage.get_script_ast(script), storage.global_data.clone())
             });
-            let source = source.ok_or_else(|| format!("script not found: {}", script))?;
+            let ast = ast?.ok_or_else(|| format!("script not found: {}", script))?;
 
             // 클로저 안에서는 clients 락이 잡혀 있으므로 send_to_by_player_name(→clients.lock()) 호출 금지.
             // 메시지만 수집하고, 락 해제 후 밖에서 전송.
@@ -19862,9 +20296,6 @@ pub fn create_call_out_script_runner_with_scheduler(
                     Some(script),
                     global_data.clone(),
                 );
-                let ast = engine
-                    .compile(&source)
-                    .map_err(|e| format!("compile: {}", e))?;
                 let mut scope = Scope::new();
                 let ob = Dynamic::from(build_ob_from_body(body));
                 if let Some(argument) = args.first().and_then(serde_json::Value::as_str) {

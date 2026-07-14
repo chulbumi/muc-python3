@@ -1066,19 +1066,14 @@ fn resolve_box(body: &Body, raw_name: &str) -> Result<Arc<Mutex<Object>>, Transf
                         (connected_player_occurrences(&name, &query.name), None)
                     }
                     crate::world::RoomObjectRef::SummonedUser(id) => {
-                        let Some(user) = world
-                            .summoned_users()
-                            .iter()
-                            .find(|user| user.id == id)
+                        let Some(user) = world.summoned_users().iter().find(|user| user.id == id)
                         else {
                             continue;
                         };
                         if user.body.get_int("투명상태") == 1 {
                             continue;
                         }
-                        let aliases = super::reaction_names(
-                            &user.body.get_string("반응이름"),
-                        );
+                        let aliases = super::reaction_names(&user.body.get_string("반응이름"));
                         let count = if user.body.get_name() == query.name
                             || aliases.iter().any(|alias| alias == &query.name)
                         {
@@ -1089,6 +1084,16 @@ fn resolve_box(body: &Body, raw_name: &str) -> Result<Arc<Mutex<Object>>, Transf
                                 .filter(|alias| alias.starts_with(&query.name))
                                 .count() as i64
                         };
+                        (count, None)
+                    }
+                    crate::world::RoomObjectRef::Fixture(id) => {
+                        let count = world
+                            .get_fixture(id)
+                            .map(|fixture| {
+                                let (exact, prefixes) = fixture.match_counts(&query.name);
+                                if exact { 1 } else { prefixes as i64 }
+                            })
+                            .unwrap_or(0);
                         (count, None)
                     }
                 };
@@ -2397,10 +2402,10 @@ mod tests {
             let mut summoned = Body::new();
             summoned.set("이름", "보관소환경쟁자");
             summoned.set("반응이름", "충돌보관함");
-            get_world_state().write().unwrap().add_summoned_user(
-                summoned,
-                PlayerPosition::new(zone.clone(), room.into()),
-            )
+            get_world_state()
+                .write()
+                .unwrap()
+                .add_summoned_user(summoned, PlayerPosition::new(zone.clone(), room.into()))
         };
         assert_eq!(
             resolve_box(&body, "충돌보관함").unwrap_err(),

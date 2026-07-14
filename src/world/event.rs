@@ -13,12 +13,21 @@ use rhai::{Dynamic, Engine, EvalAltResult, Map, Position, Scope};
 use crate::command::CommandResult;
 use crate::hangul::han_iga;
 use crate::object::{Object, Value};
-use crate::player::Body;
+use crate::player::{ActiveSkill, Body};
 use crate::script::{
-    format_event_string, load_script_file, object_from_item_json, parse_event_string,
-    save_body_to_json,
+    event_list_remove, event_list_set, load_script_file, mark_body_attr_as_json_array,
+    mark_item_field_as_json_array, object_from_item_json, parse_event_string, save_body_to_json,
 };
 use crate::world::{get_world_state, EventScript, RawMobData};
+
+/// Internal event-output boundary for Python `$특성치변경`'s immediate
+/// `lpPrompt()`.  This is not player-visible text: the network writer expands
+/// it with the current HP/MP prompt only when that prompt is enabled.
+pub const EVENT_LP_PROMPT_MARKER: &str = "\u{001e}event-lp-prompt\u{001e}";
+/// Signals the command boundary to run the existing `__combat_tick` and
+/// `__death` Rhai presentation/drop sequence immediately after a lethal
+/// event directive, matching Python `Player.die()`.
+pub const EVENT_DEATH_FINISH_REQUEST: &str = "_event_death_finish_request";
 
 /// getNextWords: 첫 토큰 제외한 나머지. "이벤트 $대화 $대" -> "$대화 $대"
 fn get_next_words(key: &str) -> String {
@@ -109,29 +118,19 @@ fn get_user_event(body: &Body, key: &str) -> String {
 }
 
 fn set_user_event(body: &mut Body, key: &str, value: &str) {
-    let mut m = parse_event_string(&body.get_string("이벤트설정리스트"));
-    if value.is_empty() {
-        m.remove(key);
-    } else {
-        m.insert(key.to_string(), value.to_string());
-    }
-    body.object.attr.insert(
-        "이벤트설정리스트".to_string(),
-        Value::String(format_event_string(&m)),
-    );
-    let path = format!("data/user/{}.json", body.get_name());
-    let _ = save_body_to_json(body, &path);
+    let updated = event_list_set(&body.get_string("이벤트설정리스트"), key, value);
+    mark_body_attr_as_json_array(body, "이벤트설정리스트");
+    body.object
+        .attr
+        .insert("이벤트설정리스트".to_string(), Value::String(updated));
 }
 
 fn del_user_event(body: &mut Body, key: &str) {
-    let mut m = parse_event_string(&body.get_string("이벤트설정리스트"));
-    m.remove(key);
-    body.object.attr.insert(
-        "이벤트설정리스트".to_string(),
-        Value::String(format_event_string(&m)),
-    );
-    let path = format!("data/user/{}.json", body.get_name());
-    let _ = save_body_to_json(body, &path);
+    let updated = event_list_remove(&body.get_string("이벤트설정리스트"), key);
+    mark_body_attr_as_json_array(body, "이벤트설정리스트");
+    body.object
+        .attr
+        .insert("이벤트설정리스트".to_string(), Value::String(updated));
 }
 
 /// Python Player.getTendency(). 완성=무림별호 있음, 정파/사파=성격별 PK 수치 판정.
@@ -151,22 +150,46 @@ fn get_tendency(body: &Body, t: &str) -> bool {
         "정파" => enough_kills && evil <= righteous,
         // Python: 사파는 정파 성향(p2)이 사파 성향(p3)보다 많으면 실패한다.
         "사파" => enough_kills && righteous <= evil,
-        _ => true,
+        // Python falls through with None for an unknown condition; event
+        // checks treat that as false rather than granting a pass-through.
+        _ => false,
     }
 }
 
 /// $출력 / 일반 줄: [공], [사용자이름], [공](이/가) 치환.
 fn substitute_line(line: &str, player_name: &str) -> String {
-    let r = line.replace("[사용자이름]", player_name).replace(
-        "[공](이/가)",
-        &format!("{}{}", player_name, han_iga(player_name)),
-    );
-    r.replace("[공]", player_name)
+    let r = line
+        .replace("[사용자이름]", player_name)
+        .replace("[공]", player_name);
+    crate::hangul::post_position1(&r)
 }
 
 /// Rhai 이벤트용 output efun: [공], [사용자이름], [공](이/가) 치환.
 fn event_substitute(line: &str, player_name: &str) -> String {
     substitute_line(line, player_name)
+}
+
+/// Python event self output is not the same as a room/global recipient.
+/// `$출력` and `$순위갱신` replace `[공]` with `당신` before applying the
+/// Korean particle marker, while observer messages use the player's name.
+fn event_self_substitute(line: &str, player_name: &str) -> String {
+    let rendered = line
+        .replace("[사용자이름]", player_name)
+        .replace("[공]", "당신");
+    crate::hangul::post_position1(&rendered)
+}
+
+/// Python Player.printScript()'s same-room recipient form.  It substitutes
+/// `[공]` with `getNameA()` (bold ANSI name), whereas the caller form uses
+/// the literal `당신` and ordinary event substitution uses a plain name.
+fn event_room_substitute(line: &str, player_name: &str) -> String {
+    // Python Player.getNameA(): '\x1b[1m' + name + '\x1b[0;37m'.
+    // This must not use the yellow NPC-name palette (`\x1b[33m...\x1b[37m`).
+    let colored_name = format!("\x1b[1m{player_name}\x1b[0;37m");
+    let rendered = line
+        .replace("[사용자이름]", player_name)
+        .replace("[공]", &colored_name);
+    crate::hangul::post_position1(&rendered)
 }
 
 /// room_spec "존:방" 파싱.
@@ -203,6 +226,7 @@ pub fn do_event(
     let words_ref: Vec<&str> = words.iter().map(|s| s.as_str()).collect();
 
     let mut output: Vec<String> = Vec::new();
+    let mut room_broadcast_lines: Vec<String> = Vec::new();
     let mut set_position: Option<(String, String)> = None;
     let mut search_end = false;
     let mut tab = 0i32;
@@ -259,6 +283,7 @@ pub fn do_event(
                         output_lines: output,
                         set_position: set_position.clone(),
                         broadcast_lines: Vec::new(),
+                        room_broadcast_lines,
                         mob_key: mob_key.to_string(),
                         event_key: event_key.to_string(),
                         words: words.to_vec(),
@@ -278,11 +303,12 @@ pub fn do_event(
                     }
                 }
                 "$이벤트설정" => {
-                    let v: Vec<&str> = next_words.split_whitespace().collect();
-                    if v.len() >= 2 {
-                        set_user_event(body, v[0], v[1]);
-                    } else if !v.is_empty() {
-                        set_user_event(body, v[0], "1");
+                    // Python `setEvent(nextWords)` appends the whole
+                    // remainder as one `이벤트설정리스트` element.  In
+                    // particular, `오소리가죽 이벤트` and `무당산우물 끝`
+                    // are single flag names, not a key/value pair.
+                    if !next_words.is_empty() {
+                        set_user_event(body, &next_words, "1");
                     }
                 }
                 "$이벤트삭제" => {
@@ -303,8 +329,12 @@ pub fn do_event(
                     break;
                 }
                 "$출력" => {
-                    let buf = substitute_line(&next_words, &player_name);
-                    output.push(buf);
+                    // Python Player.printScript() renders `$출력` twice:
+                    // the caller receives `[공]` as `당신`, while same-room
+                    // observers receive Player.getNameA().  Keep this
+                    // legacy-array fallback identical to the Rhai path.
+                    output.push(event_self_substitute(&next_words, &player_name));
+                    room_broadcast_lines.push(event_room_substitute(&next_words, &player_name));
                 }
                 "$무림별호조건" => {
                     if !get_tendency(body, &next_words) {
@@ -322,7 +352,11 @@ pub fn do_event(
                         search_end = true;
                         continue;
                     }
-                    if words_ref.get(c + 1).copied() != v.get(2).copied() {
+                    // Python compares `words[c]`: `words` still includes
+                    // the mob target at index 0, so `$변수확인 1 242`
+                    // checks the first argument (`words[1]`), not the event
+                    // verb at `words[2]`.
+                    if words_ref.get(c).copied() != v.get(2).copied() {
                         search_end = true;
                     }
                 }
@@ -331,22 +365,13 @@ pub fn do_event(
                     if index.is_empty() {
                         continue;
                     }
-                    if index == "은전" {
-                        let v = body.get_int("은전") + cnt;
-                        body.set("은전", v);
-                        continue;
-                    }
-                    if index == "금전" {
-                        let v = body.get_int("금전") + cnt;
-                        body.set("금전", v);
-                        continue;
-                    }
-                    for _ in 0..cnt {
-                        if let Some((arc, _)) = object_from_item_json(&index) {
-                            // Python Body.addItem uses insert(), so every
-                            // granted item becomes the first inventory object.
-                            body.object.objs.insert(0, arc);
-                        }
+                    let mut roll = |min: i64, max: i64| fastrand::i64(min..=max);
+                    give_event_item_with_roll(body, &index, cnt, 0, &mut roll);
+                }
+                "$아이템삭제" => {
+                    let (index, cnt) = get_str_cnt(&sline_mut);
+                    if !index.is_empty() {
+                        del_item_from_body(body, &index, cnt);
                     }
                 }
                 "$스크립트호출" => {
@@ -382,12 +407,14 @@ pub fn do_event(
             output_lines: output,
             set_position: Some((z, r)),
             broadcast_lines: Vec::new(),
+            room_broadcast_lines,
         }
     } else {
         CommandResult::MobEvent {
             output_lines: output,
             set_position: None,
             broadcast_lines: Vec::new(),
+            room_broadcast_lines,
         }
     }
 }
@@ -403,8 +430,6 @@ pub fn do_event_rhai(
     path: &str,
     resume_func: Option<String>,
 ) -> CommandResult {
-    let player_name = body.get_name().to_string();
-    let words_vec = words.to_vec();
     let path_trim = path.trim();
     let with_ext = if path_trim.ends_with(".rhai") {
         path_trim.to_string()
@@ -419,20 +444,57 @@ pub fn do_event_rhai(
         Err(_) => return CommandResult::Output("(이벤트 스크립트 파일 없음)".to_string()),
     };
 
+    do_event_rhai_source(body, data, event_key, words, mob_key, &src, resume_func)
+}
+
+/// 이미 읽은 Rhai 이벤트 소스를 실행한다. 파일 기반 경로와 동일한 efun 등록을
+/// 사용하므로, 테스트에서도 임시 스크립트 파일 없이 실제 이벤트 경계를 검증할 수 있다.
+fn do_event_rhai_source(
+    body: &mut Body,
+    data: &RawMobData,
+    event_key: &str,
+    words: &[String],
+    mob_key: &str,
+    src: &str,
+    resume_func: Option<String>,
+) -> CommandResult {
+    let player_name = body.get_name().to_string();
+    let words_vec = words.to_vec();
+
     let mut out_lines: Vec<String> = Vec::new();
     let mut out_broadcast_lines: Vec<String> = Vec::new();
+    let mut out_room_broadcast_lines: Vec<String> = Vec::new();
     let mut out_set_position: Option<(String, String)> = None;
     let out_ptr = &mut out_lines as *mut Vec<String>;
     let broadcast_ptr = &mut out_broadcast_lines as *mut Vec<String>;
+    let room_broadcast_ptr = &mut out_room_broadcast_lines as *mut Vec<String>;
     let pos_ptr = &mut out_set_position as *mut Option<(String, String)>;
     let body_ptr = body as *mut Body;
     let player_name_out = player_name.clone();
+    // Python `$위치이동` prefixes the destination zone with the selected
+    // mob's raw 난이도 value (`zone:room` -> `zone{난이도}:room`).  Most
+    // current mobs do not carry that attribute, but the handler is part of
+    // the source contract and must keep working for a hot-reloaded mob.
+    let mob_difficulty = data
+        .attributes
+        .get("난이도")
+        .and_then(|value| match value {
+            serde_json::Value::String(value) => Some(value.clone()),
+            serde_json::Value::Number(value) => Some(value.to_string()),
+            _ => None,
+        })
+        .unwrap_or_default();
 
     let mut engine = Engine::new();
 
     // end_event()는 Rhai에서 throw로 종료. 사용자 스크립트와 같은 컴파일 단위에 넣어야 call_fn 시 노출됨.
     const END_EVENT_PREAMBLE: &str = r#"fn end_event() { throw #{ type: "event_complete" }; }"#;
-    let src_with_preamble = format!("{}\n\n{}", END_EVENT_PREAMBLE, src);
+    // Keep reusable event presentation in Rhai rather than Rust.  This file
+    // is read for every invocation so it follows the same hot-reload rule as
+    // the selected event script.
+    let common = std::fs::read_to_string("data/script/event_common.rhai")
+        .unwrap_or_else(|error| panic!("missing shared event Rhai helpers: {error}"));
+    let src_with_preamble = format!("{}\n\n{}\n\n{}", END_EVENT_PREAMBLE, common, src);
 
     engine.register_fn("output", move |msg: &str| {
         let line = event_substitute(msg, &player_name_out);
@@ -440,6 +502,21 @@ pub fn do_event_rhai(
             (*out_ptr).push(line);
         }
     });
+    let player_name_self = player_name.clone();
+    engine.register_fn("self_output", move |msg: &str| {
+        let line = event_self_substitute(msg, &player_name_self);
+        unsafe {
+            (*out_ptr).push(line);
+        }
+    });
+    // Ordinary legacy event text is not `$출력`: Python only substitutes
+    // `[사용자이름]` before it reaches this path and leaves a literal `[공]`
+    // untouched.  The few converted scripts that carry such text opt in to
+    // this raw sink instead of the recipient-aware output helpers above.
+    engine.register_fn("literal_output", move |msg: &str| unsafe {
+        (*out_ptr).push(msg.to_string());
+    });
+    engine.register_fn("post_position_once", crate::hangul::post_position1);
     let player_name_broadcast = player_name.clone();
     engine.register_fn("broadcast_output", move |msg: &str| {
         let line = event_substitute(msg, &player_name_broadcast);
@@ -447,14 +524,59 @@ pub fn do_event_rhai(
             (*broadcast_ptr).push(line);
         }
     });
+    let player_name_room_broadcast = player_name.clone();
+    engine.register_fn("room_broadcast_output", move |msg: &str| {
+        let line = event_room_substitute(msg, &player_name_room_broadcast);
+        unsafe {
+            (*room_broadcast_ptr).push(line);
+        }
+    });
     let player_name_for_rank = player_name.clone();
     engine.register_fn("event_player_name", move || player_name_for_rank.clone());
-    engine.register_fn("event_to_int", |value: &str| {
-        value.parse::<i64>().unwrap_or(0)
-    });
+    // Event directives call Python `getInt()`: `1번` means 1, while a
+    // non-numeric name (and a zero-prefixed non-number such as `0번`) stays
+    // on the name-lookup branch.  Rank-board Rhai uses this for its own
+    // rendered templates too.
+    engine.register_fn("event_to_int", parse_int);
     engine.register_fn("get_stat", move |key: &str| -> i64 {
         let b = unsafe { &*body_ptr };
         b.get_int(key)
+    });
+    // Python `$무공시전`/`$무공시전2` applies the named defense skill once.
+    // The event Rhai script owns the corresponding presentation.
+    engine.register_fn("apply_defense_skill", move |name: &str| -> bool {
+        let b = unsafe { &mut *body_ptr };
+        if b.active_skills.iter().any(|effect| effect.name == name) {
+            return false;
+        }
+        let Some(skill) = crate::world::get_skill(name) else {
+            return false;
+        };
+
+        let mut effect = ActiveSkill::new(skill.name.clone(), skill.defense_time as i32);
+        effect.str_bonus = skill.str_bonus as i32;
+        effect.dex_bonus = skill.dex_bonus as i32;
+        effect.arm_bonus = skill.arm_bonus as i32;
+        effect.mp_bonus = skill.mp_bonus as i32;
+        effect.max_mp_bonus = skill.max_mp_bonus as i32;
+        effect.hp_bonus = skill.hp_bonus as i32;
+        effect.max_hp_bonus = skill.max_hp_bonus as i32;
+        effect.anti_type = skill.deny;
+        effect.category = skill.category;
+        effect.recovery_percent = skill.recovery_percent;
+        effect.recovery_script = skill.recovery_script;
+        effect.release_script = skill.release_script;
+
+        b._str += effect.str_bonus;
+        b._dex += effect.dex_bonus;
+        b._arm += effect.arm_bonus;
+        b._mp += effect.mp_bonus;
+        b._maxmp += effect.max_mp_bonus;
+        b._hp += effect.hp_bonus;
+        b._maxhp += effect.max_hp_bonus;
+        b.active_skills.push(effect);
+        b.sync_active_skills_to_attrs();
+        true
     });
     engine.register_fn("rank_write", crate::world::rank::rank_write);
     engine.register_fn("rank_read", crate::world::rank::rank_read);
@@ -462,8 +584,106 @@ pub fn do_event_rhai(
         crate::world::rank::rank_get_num(ty, position).unwrap_or_default()
     });
     engine.register_fn("rank_get_all", crate::world::rank::rank_get_all);
+    // Python `$순위기록` keeps the old and new positions for following
+    // `$순위갱신` lines.  The text itself remains in Rhai, where it can be
+    // emitted to the caller and broadcast only when this returns true.
+    let rank_record_player_name = player_name.clone();
+    engine.register_fn("rank_record", move |limit: i64, ty: &str| -> bool {
+        let b = unsafe { &*body_ptr };
+        let old_rank = crate::world::rank::rank_read(ty, &rank_record_player_name);
+        let raw_value = b.get_string(ty);
+        let value = if raw_value.is_empty() {
+            -1
+        } else {
+            b.get_int(ty)
+        };
+        let new_rank = crate::world::rank::rank_write(ty, &rank_record_player_name, value, limit);
+        old_rank != new_rank && new_rank == 1
+    });
+    // `$순위기록` itself controls the following braced block by whether the
+    // player remained inside the requested limit, not by whether they became
+    // first.  `$순위갱신` then separately uses the old/new first-place rule.
+    let rank_recorded_player_name = player_name.clone();
+    engine.register_fn("rank_recorded", move |ty: &str| -> bool {
+        crate::world::rank::rank_read(ty, &rank_recorded_player_name) > 0
+    });
+    // Python `$순위확인 최대순위 종류`: resolve the optional `[대상|숫자|모두]`
+    // argument into data only. Each Rhai event owns its own rendered text.
+    let rank_words = words_vec.clone();
+    let rank_player_name = player_name.clone();
+    engine.register_fn("rank_query", move |limit: i64, ty: &str| -> Map {
+        let mut result = Map::new();
+        let mut name = rank_player_name.clone();
+        let mut position = 0_i64;
+        let mut all = false;
+        let mut all_text = String::new();
+
+        if rank_words.len() == 3 {
+            let requested = rank_words[1].trim();
+            if requested == "모두" {
+                all = true;
+                all_text = crate::world::rank::rank_get_all(ty);
+            } else {
+                let number = parse_int(requested);
+                if number > 0 {
+                    position = number.min(limit);
+                    name = crate::world::rank::rank_get_num(ty, position)
+                        .unwrap_or_else(|| format!("[{position}위]"));
+                } else {
+                    name = requested.to_string();
+                    position = crate::world::rank::rank_read(ty, &name);
+                }
+            }
+        } else {
+            position = crate::world::rank::rank_read(ty, &name);
+        }
+
+        result.insert("all".into(), Dynamic::from(all));
+        result.insert("all_text".into(), Dynamic::from(all_text));
+        result.insert("name".into(), Dynamic::from(name));
+        result.insert("position".into(), Dynamic::from(position));
+        result.insert("found".into(), Dynamic::from(!all && position > 0));
+        result
+    });
+    // Templates are owned by the Rhai event. This helper only applies the
+    // Python rank-selection rule and replaces its two data placeholders.
+    let rank_render_words = words_vec.clone();
+    let rank_render_player_name = player_name.clone();
+    engine.register_fn(
+        "rank_render",
+        move |limit: i64, ty: &str, success: &str, missing: &str| -> String {
+            let mut name = rank_render_player_name.clone();
+            let position: i64;
+            if rank_render_words.len() == 3 {
+                let requested = rank_render_words[1].trim();
+                if requested == "모두" {
+                    return crate::world::rank::rank_get_all(ty);
+                }
+                let number = parse_int(requested);
+                if number > 0 {
+                    position = number.min(limit);
+                    name = crate::world::rank::rank_get_num(ty, position)
+                        .unwrap_or_else(|| format!("[{position}위]"));
+                } else {
+                    name = requested.to_string();
+                    position = crate::world::rank::rank_read(ty, &name);
+                }
+            } else {
+                position = crate::world::rank::rank_read(ty, &name);
+            }
+            let template = if position > 0 { success } else { missing };
+            template
+                .replace("[순위자]", &name)
+                .replace("[순위]", &position.to_string())
+        },
+    );
     engine.register_fn("set_position", move |zone: &str, room: &str| unsafe {
-        *pos_ptr = Some((zone.to_string(), room.to_string()));
+        let zone = if mob_difficulty.is_empty() {
+            zone.to_string()
+        } else {
+            format!("{zone}{mob_difficulty}")
+        };
+        *pos_ptr = Some((zone, room.to_string()));
     });
     engine.register_fn("check_event", move |key: &str| -> bool {
         let b = unsafe { &*body_ptr };
@@ -491,28 +711,14 @@ pub fn do_event_rhai(
     });
     engine.register_fn("give_item", move |index: &str, cnt: i64| {
         let b = unsafe { &mut *body_ptr };
-        if index == "은전" {
-            b.set("은전", b.get_int("은전") + cnt);
-            return;
-        }
-        if index == "금전" {
-            b.set("금전", b.get_int("금전") + cnt);
-            return;
-        }
-        for _ in 0..cnt {
-            if let Some((arc, _)) = object_from_item_json(index) {
-                let is_one_item = arc
-                    .lock()
-                    .is_ok_and(|item| item.checkAttr("아이템속성", "단일아이템"));
-                b.object.objs.insert(0, arc);
-                // Python `$아이템주기` claims a 단일아이템 as it is handed
-                // over.  Without this, later event branches observe it as
-                // still unclaimed and repeatedly award the genuine item.
-                if is_one_item {
-                    let _ = crate::oneitem::oneitem_have(index, &b.get_name());
-                }
-            }
-        }
+        let mut roll = |min: i64, max: i64| fastrand::i64(min..=max);
+        give_event_item_with_roll(b, index, cnt, 0, &mut roll);
+    });
+    // Python getStrCnt() selects one candidate with randint when an event
+    // `$아이템주기` directive contains several item indices.  Event Rhai has
+    // its own engine, so expose the same inclusive range helper here too.
+    engine.register_fn("random", |min: i64, max: i64| -> i64 {
+        fastrand::i64(min..=max)
     });
     engine.register_fn("get_tendency", move |t: &str| -> bool {
         let b = unsafe { &*body_ptr };
@@ -522,11 +728,272 @@ pub fn do_event_rhai(
         let b = unsafe { &*body_ptr };
         body_has_item_spec(b, index)
     });
+    // Python `$아이템착용확인` delegates to
+    // `checkItemIndex(index, count, checkInUse=True)`: money keeps its
+    // normal balance rule, while ordinary items must be individually worn.
+    engine.register_fn("has_equipped_item", move |index: &str| -> bool {
+        let b = unsafe { &*body_ptr };
+        body_has_equipped_item_spec(b, index)
+    });
+    // The remaining legacy item directives use Python Body.getItemName(): an
+    // exact, ANSI-stripped display-name lookup that includes equipped items.
+    // Keep selection/state here; the event's success and failure prose stays
+    // in Rhai.
+    engine.register_fn("item_kind_is", move |name: &str, kind: &str| -> bool {
+        let b = unsafe { &*body_ptr };
+        body_item_named(b, name)
+            .is_some_and(|item| item.lock().is_ok_and(|item| item.getString("종류") == kind))
+    });
+    engine.register_fn("item_is_equipped", move |name: &str| -> bool {
+        let b = unsafe { &*body_ptr };
+        body_item_named(b, name)
+            .is_some_and(|item| item.lock().is_ok_and(|item| item.getBool("inUse")))
+    });
+    engine.register_fn("item_has_extension", move |name: &str| -> bool {
+        let b = unsafe { &*body_ptr };
+        body_item_named(b, name).is_some_and(|item| {
+            item.lock()
+                .is_ok_and(|item| !item.getString("확장 이름").is_empty())
+        })
+    });
+    engine.register_fn("clear_item_extension", move |name: &str| -> bool {
+        let b = unsafe { &mut *body_ptr };
+        let Some(item) = body_item_named(b, name) else {
+            return false;
+        };
+        let Ok(mut item) = item.lock() else {
+            return false;
+        };
+        let extension = item.getString("확장 이름");
+        if extension.is_empty() {
+            return false;
+        }
+        // Python `list.remove()` removes only the first matching alias.
+        // Do not filter all equal aliases: old saves (or a pre-existing
+        // alias equal to the engraving) may legitimately contain a second
+        // identical value that must remain after the engraving is erased.
+        let mut names = item
+            .getString("반응이름")
+            .split('\n')
+            .map(ToString::to_string)
+            .collect::<Vec<_>>();
+        if let Some(position) = names.iter().position(|candidate| candidate == &extension) {
+            names.remove(position);
+        }
+        let names = names.join("\n");
+        item.set("반응이름", names);
+        item.set("확장 이름", "");
+        true
+    });
+    engine.register_fn(
+        "set_item_extension",
+        move |name: &str, extension: &str| -> bool {
+            let b = unsafe { &mut *body_ptr };
+            if extension.is_empty() {
+                return false;
+            }
+            let Some(item) = body_item_named(b, name) else {
+                return false;
+            };
+            let Ok(mut item) = item.lock() else {
+                return false;
+            };
+            item.set("확장 이름", extension);
+            item.setAttr("아이템속성", "팔지못함");
+            // Python `$아이템확장설정` uses Object.setAttr/`list.append`,
+            // so both fields must persist as JSON arrays even though Rust
+            // keeps their values newline-delimited at runtime.
+            mark_item_field_as_json_array(&mut item, "아이템속성");
+            // Python writes `item['반응이름'].append(extension)`, rather
+            // than Object.setAttr().  It deliberately preserves duplicate
+            // aliases; the matching `clear_item_extension` above removes
+            // only the appended first match.
+            let names = item.getString("반응이름");
+            let names = if names.is_empty() {
+                extension.to_string()
+            } else {
+                format!("{names}\n{extension}")
+            };
+            item.set("반응이름", names);
+            mark_item_field_as_json_array(&mut item, "반응이름");
+            true
+        },
+    );
+    engine.register_fn("item_exists_named", move |name: &str| -> bool {
+        let b = unsafe { &*body_ptr };
+        body_item_named(b, name).is_some()
+    });
+    // Dynamic `$아이템착용확인[!] $변수:1` is intentionally unlike the
+    // ordinary index form.  Python calls `checkItemName(name, count, True)`,
+    // whose `True` means *do not exclude* worn objects; it therefore counts
+    // both worn and unworn display-name matches.
+    engine.register_fn("has_named_item", move |name: &str, count: i64| -> bool {
+        if count < 1 {
+            return false;
+        }
+        let b = unsafe { &*body_ptr };
+        if name == "은전" || name == "금전" {
+            return b.get_int(name) >= count;
+        }
+        b.object
+            .objs
+            .iter()
+            .filter(|item| {
+                item.lock()
+                    .is_ok_and(|item| strip_event_ansi(&item.getName()) == name)
+            })
+            .count() as i64
+            >= count
+    });
+    // Python `$아이템확인! $변수:1` calls `checkItemName(name, cnt)` with
+    // its default `checkInUse=False`; unlike `checkItemIndex`, that excludes
+    // worn objects.  `$아이템착용확인!` is the distinct directive that passes
+    // `True` and accepts both states.
+    engine.register_fn(
+        "item_exists_unworn_named",
+        move |name: &str, count: i64| -> bool {
+            if count < 1 {
+                return false;
+            }
+            let b = unsafe { &*body_ptr };
+            if name == "은전" || name == "금전" {
+                return b.get_int(name) >= count;
+            }
+            b.object
+                .objs
+                .iter()
+                .filter(|item| {
+                    item.lock().is_ok_and(|item| {
+                        !item.getBool("inUse") && strip_event_ansi(&item.getName()) == name
+                    })
+                })
+                .count() as i64
+                >= count
+        },
+    );
+    engine.register_fn("item_use_count", move |name: &str| -> i64 {
+        let b = unsafe { &*body_ptr };
+        body_item_use_count(b, name)
+    });
+    engine.register_fn("learnable_item_skill_count", move |name: &str| -> i64 {
+        let b = unsafe { &*body_ptr };
+        body_learnable_item_skill_count(b, name)
+    });
+    engine.register_fn("clear_item_options", move |name: &str| -> bool {
+        let b = unsafe { &mut *body_ptr };
+        let Some(item) = body_item_named(b, name) else {
+            return false;
+        };
+        let Ok(mut item) = item.lock() else {
+            return false;
+        };
+        // Python Item.delOption deletes both keys when the item exists.  Do
+        // not reconstruct presentation or equipment text in this helper.
+        item.attr.remove("아이템속성");
+        item.attr.remove("옵션");
+        true
+    });
+    engine.register_fn("item_has_options", move |name: &str| -> bool {
+        let b = unsafe { &*body_ptr };
+        body_item_named(b, name).is_some_and(|item| {
+            item.lock()
+                .is_ok_and(|item| !item.getString("옵션").is_empty())
+        })
+    });
+    engine.register_fn("delete_item_named", move |name: &str| -> bool {
+        let b = unsafe { &mut *body_ptr };
+        let Some(item) = body_item_named(b, name) else {
+            return false;
+        };
+        // Python `$아이템삭제 $변수:1` is `self.remove(item)`, not a
+        // discard command.  In particular it does *not* release ONEITEM's
+        // global owner record when an event consumes a unique item.
+        b.object.remove(&item);
+        true
+    });
+    // `$속성템주기` uses Python getStrCnt's full random candidate list, then
+    // Body.addItem(index, 1, gamble=1).  The source list remains data-owned
+    // in the original mob definition instead of being shortened in Rust.
+    engine.register_fn("give_lottery_attribute_item", move || -> bool {
+        let b = unsafe { &mut *body_ptr };
+        let Some(index) = lottery_attribute_item_index() else {
+            return false;
+        };
+        let Some((item, _)) = object_from_item_json(&index) else {
+            return false;
+        };
+        if let Ok(mut item_value) = item.lock() {
+            let mut roll = |min: i64, max: i64| fastrand::i64(min..=max);
+            let _ = crate::script::apply_item_magic_with_roll(
+                &mut item_value,
+                b.get_int("레벨"),
+                0,
+                true,
+                &mut roll,
+            );
+            item_value.setAttr("아이템속성", "버리지못함");
+            item_value.setAttr("아이템속성", "줄수없음");
+            mark_item_field_as_json_array(&mut item_value, "아이템속성");
+            if item_value.checkAttr("아이템속성", "단일아이템") {
+                let _ =
+                    crate::oneitem::oneitem_have(&item_value.getString("인덱스"), &b.get_name());
+            }
+        }
+        b.object.objs.insert(0, item);
+        true
+    });
+    engine.register_fn("get_body_text", move |key: &str| -> String {
+        let b = unsafe { &*body_ptr };
+        b.get_string(key)
+    });
+    engine.register_fn("set_body_text", move |key: &str, value: &str| {
+        let b = unsafe { &mut *body_ptr };
+        b.set(key, value);
+    });
+    let word_count = words_vec.len() as i64;
+    engine.register_fn("word_count", move || word_count);
+    // `$별호변경` uses the same global registry as the ordinary nickname
+    // command.  The event script retains Python's validation and every user
+    // message; these functions only commit registry state.
+    engine.register_fn("nickname_exists", crate::world::nickname::nickname_exists);
+    engine.register_fn("nickname_reserve", crate::world::nickname::nickname_reserve);
+    engine.register_fn("nickname_release", crate::world::nickname::nickname_release);
+    engine.register_fn("request_event_command", move |command: &str| {
+        let b = unsafe { &mut *body_ptr };
+        b.temp_mut().insert(
+            crate::script::EVENT_COMMAND_REQUEST.to_string(),
+            Value::String(command.to_string()),
+        );
+    });
+    engine.register_fn(
+        "item_attack_below",
+        move |index: &str, limit: i64| -> bool {
+            let b = unsafe { &*body_ptr };
+            b.object
+                .find_by_index(index)
+                .and_then(|item| item.lock().ok().map(|item| item.getInt("공격력")))
+                .is_some_and(|attack| attack < limit)
+        },
+    );
+    engine.register_fn("is_olsuk_complete", move || -> bool {
+        let b = unsafe { &*body_ptr };
+        b.get_int("올숙완료") == 1
+    });
+    engine.register_fn("has_olsuk_qualification", move || -> bool {
+        let b = unsafe { &*body_ptr };
+        (1..=5).all(|weapon_type| b.get_int(&format!("{weapon_type} 숙련도")) >= 1_000)
+    });
     // Python `$무공확인 이름`: 이벤트 분기에서 습득한 무공 여부를 확인한다.
     // 아이템 조건과 달리 `skill_list`가 저장 순서와 중복 없는 실제 무공 목록이다.
     engine.register_fn("has_skill", move |name: &str| -> bool {
         let b = unsafe { &*body_ptr };
         b.skill_list.iter().any(|skill| skill == name)
+    });
+    engine.register_fn("has_all_skills", move |names: &str| -> bool {
+        let b = unsafe { &*body_ptr };
+        let mut requested = names.split_whitespace();
+        requested.clone().next().is_some()
+            && requested.all(|name| b.skill_list.iter().any(|skill| skill == name))
     });
     // Python `$비전종류확인!` checks the exact 비전이름 array, while
     // `$무공개수확인` and `$무공전수` use the ordinary skill list.
@@ -542,10 +1009,67 @@ pub fn do_event_rhai(
         let b = unsafe { &mut *body_ptr };
         if !b.skill_list.iter().any(|skill| skill == name) {
             b.skill_list.push(name.to_string());
-            b.skill_map
-                .insert(name.to_string(), crate::player::SkillTraining::new(1, 0));
+            // Python `addMugong()` changes only skillList.  In particular a
+            // later re-teach after `$무공회수` must retain the old skillMap
+            // training record rather than resetting it to 초급/0.
             b.sync_skill_state_to_attrs();
         }
+    });
+    engine.register_fn("remove_skill", move |name: &str| {
+        let b = unsafe { &mut *body_ptr };
+        // Python `delMugong()` is list.remove(): remove one occurrence only.
+        // It deliberately leaves skillMap untouched, so the old training
+        // record survives a later re-teach/save cycle.
+        if let Some(index) = b.skill_list.iter().position(|skill| skill == name) {
+            b.skill_list.remove(index);
+        }
+        b.sync_skill_state_to_attrs();
+    });
+    engine.register_fn("vision_training_allowed", |name: &str, allowed: &str| {
+        allowed
+            .split_whitespace()
+            .any(|candidate| candidate == name)
+    });
+    // These cover the remaining Python vision directives even where the
+    // current source data has no active caller.  Keep all branch prose in
+    // Rhai; the helpers are only the exact Body attribute transitions.
+    engine.register_fn("add_vision_name", move |name: &str| {
+        let b = unsafe { &mut *body_ptr };
+        b.add_secret_skill(name);
+    });
+    engine.register_fn("vision_training_is_empty", move || -> bool {
+        let b = unsafe { &*body_ptr };
+        b.get_string("비전수련").is_empty()
+    });
+    engine.register_fn(
+        "vision_training_equals",
+        move |left: &str, right: &str| -> bool { left == right },
+    );
+    engine.register_fn("set_vision_training_name", move |name: &str| {
+        let b = unsafe { &mut *body_ptr };
+        b.set_vision_training(name, 0);
+    });
+    engine.register_fn("clear_vision_training_name", move || {
+        let b = unsafe { &mut *body_ptr };
+        b.clear_vision_training();
+    });
+    // Python `$난이도재진입확인` treats a missing value as zero and compares
+    // against a five-minute wall-clock window.  Expose the predicate so the
+    // Rhai event owns the normal/inverted branch layout.
+    engine.register_fn("record_difficulty_entry", move || {
+        let b = unsafe { &mut *body_ptr };
+        b.set("난이도진입시간", chrono::Utc::now().timestamp());
+    });
+    engine.register_fn("difficulty_reentry_expired", move || -> bool {
+        let b = unsafe { &mut *body_ptr };
+        let saved = b.get_string("난이도진입시간");
+        let entered = if saved.is_empty() {
+            b.set("난이도진입시간", 0_i64);
+            0
+        } else {
+            saved.parse::<i64>().unwrap_or(0)
+        };
+        chrono::Utc::now().timestamp() > entered.saturating_add(60 * 5)
     });
     engine.register_fn("one_item_exists", move |index: &str| -> bool {
         !crate::oneitem::oneitem_get(index).is_empty()
@@ -559,9 +1083,29 @@ pub fn do_event_rhai(
             format!("{}{}", owner, han_iga(owner))
         }
     });
+    // Python `$기연확인[!]` stores the bare owner token in
+    // `sub['[기연소지자]']`.  Keep this separate from `one_item_owner()`,
+    // whose particle-bearing value is for converted `(이/가)` prose.
+    engine.register_fn("one_item_owner_raw", move |index: &str| -> String {
+        crate::oneitem::oneitem_get(index)
+            .split_whitespace()
+            .next()
+            .unwrap_or_default()
+            .to_string()
+    });
     engine.register_fn("one_item_exists_name", move |name: &str| -> bool {
         let index = crate::oneitem::oneitem_get_index_by_name(name);
         !index.is_empty() && !crate::oneitem::oneitem_get(&index).is_empty()
+    });
+    engine.register_fn("one_item_owner_name", move |name: &str| -> String {
+        let index = crate::oneitem::oneitem_get_index_by_name(name);
+        // `$기연존재확인` puts the bare owner in `[기연소지자]`; the
+        // converted prose supplies its own following particle (`에게`).
+        crate::oneitem::oneitem_get(&index)
+            .split_whitespace()
+            .next()
+            .unwrap_or_default()
+            .to_string()
     });
     engine.register_fn("selected_mob_is_corpse", move || -> bool {
         let b = unsafe { &*body_ptr };
@@ -575,6 +1119,13 @@ pub fn do_event_rhai(
         b.temp_mut()
             .insert("_event_selected_mob_set_regen".to_string(), Value::Int(1));
     });
+    // Python `Mob.setAct("리젠후생성")` calls doRegen() immediately.  This
+    // differs from `리젠`, which only moves a corpse to the regen wait state.
+    engine.register_fn("respawn_selected_mob", move || {
+        let b = unsafe { &mut *body_ptr };
+        b.temp_mut()
+            .insert("_event_selected_mob_respawn".to_string(), Value::Int(1));
+    });
     engine.register_fn("start_selected_mob_combat", move || {
         let b = unsafe { &mut *body_ptr };
         b.temp_mut().insert(
@@ -582,18 +1133,153 @@ pub fn do_event_rhai(
             Value::Int(1),
         );
     });
+    // Python `$전투시작` distinguishes a dead target, an already selected
+    // target, a target fighting someone else, and the caller fighting another
+    // target.  The Rhai script renders each message; this helper only returns
+    // the state transition outcome and sets the deferred combat marker.
+    engine.register_fn("try_start_selected_mob_combat", move || -> String {
+        let b = unsafe { &mut *body_ptr };
+        let selected_is_corpse = matches!(
+            b.temp().get("_event_selected_mob_corpse"),
+            Some(Value::Int(1))
+        );
+        if selected_is_corpse {
+            return "dead".to_string();
+        }
+        let selected_is_target = matches!(
+            b.temp().get("_event_selected_mob_targeted_by_player"),
+            Some(Value::Int(1))
+        );
+        let selected_is_fighting = matches!(
+            b.temp().get("_event_selected_mob_fighting"),
+            Some(Value::Int(1))
+        );
+        if selected_is_fighting {
+            return if selected_is_target {
+                "already_attacking"
+            } else {
+                "target_busy"
+            }
+            .to_string();
+        }
+        if b.act == crate::player::ActState::Fight {
+            return if selected_is_target {
+                "already_attacking"
+            } else {
+                "self_busy"
+            }
+            .to_string();
+        }
+        b.temp_mut().insert(
+            "_event_selected_mob_start_combat".to_string(),
+            Value::Int(1),
+        );
+        "started".to_string()
+    });
+    // `$전투강제시작` is deliberately less restrictive than `$전투시작`:
+    // Python does not reject a target merely because it is already fighting
+    // someone else.  It only applies the corpse/self-fight guards below.
+    engine.register_fn("force_start_selected_mob_combat", move || -> String {
+        let b = unsafe { &mut *body_ptr };
+        if matches!(
+            b.temp().get("_event_selected_mob_corpse"),
+            Some(Value::Int(1))
+        ) {
+            return "dead".to_string();
+        }
+        let selected_is_target = matches!(
+            b.temp().get("_event_selected_mob_targeted_by_player"),
+            Some(Value::Int(1))
+        );
+        if b.act == crate::player::ActState::Fight {
+            return if selected_is_target {
+                "already_attacking"
+            } else {
+                "self_busy"
+            }
+            .to_string();
+        }
+        b.temp_mut().insert(
+            "_event_selected_mob_start_combat".to_string(),
+            Value::Int(1),
+        );
+        "started".to_string()
+    });
     engine.register_fn("set_selected_mob_corpse", move || {
         let b = unsafe { &mut *body_ptr };
         b.temp_mut()
             .insert("_event_selected_mob_set_corpse".to_string(), Value::Int(1));
     });
+    let stat_prompt_out_ptr = out_ptr;
     engine.register_fn("change_stat", move |key: &str, amount: i64| {
         let b = unsafe { &mut *body_ptr };
         b.set(key, b.get_int(key).saturating_add(amount));
+        // Python `$특성치변경` calls `lpPrompt()` after every individual
+        // attribute update. Keep only the wire boundary here; client.rs owns
+        // the actual prompt rendering.
+        unsafe {
+            (*stat_prompt_out_ptr).push(EVENT_LP_PROMPT_MARKER.to_string());
+        }
+    });
+    engine.register_fn("set_stat", move |key: &str, value: i64| {
+        let b = unsafe { &mut *body_ptr };
+        b.set(key, value);
+    });
+    // Python `$속성설정` writes the literal key as integer 1 when nonempty.
+    engine.register_fn("set_body_flag", move |key: &str| {
+        if key.is_empty() {
+            return;
+        }
+        let b = unsafe { &mut *body_ptr };
+        b.set(key, 1_i64);
+    });
+    // `$특성치복사저/복사/복사고` changes the selected runtime mob, not
+    // its immutable template.  Store only the requested variant here; the
+    // caller applies it to the selected instance after Rhai returns.
+    engine.register_fn("copy_player_stats_to_selected_mob", move |variant: &str| {
+        let b = unsafe { &mut *body_ptr };
+        b.temp_mut().insert(
+            "_event_selected_mob_copy_stats".to_string(),
+            Value::String(variant.to_string()),
+        );
+    });
+    // Python `$중급수련` is intentionally not one of the full stat-copy
+    // variants: only strength, level and evasion on the selected sparring
+    // mob change.
+    engine.register_fn("apply_intermediate_training_to_selected_mob", move || {
+        let b = unsafe { &mut *body_ptr };
+        b.temp_mut().insert(
+            "_event_selected_mob_copy_stats".to_string(),
+            Value::String("intermediate".to_string()),
+        );
     });
     engine.register_fn("consume_hp", move |amount: i64| {
         let b = unsafe { &mut *body_ptr };
-        b.set("체력", b.get_int("체력").saturating_sub(amount));
+        // Python `$체력소모`/`$체력감소` delegates to `minusHP()`.  A
+        // lethal event damage immediately enters Player.die() state, rather
+        // than merely leaving a zero-HP standing character until a later
+        // combat heartbeat notices it.
+        if b.minus_hp(amount) {
+            b.act = crate::player::ActState::Death;
+            b.unwear_all();
+            b.clear_targets_death();
+            b.clear_skills();
+            b.set_death_step(0);
+            crate::script::combat_commands::queue_combat_presentation_event(
+                b,
+                serde_json::json!({ "kind": "player_death" }),
+            );
+            b.temp_mut()
+                .insert(EVENT_DEATH_FINISH_REQUEST.to_string(), Value::Int(1));
+        }
+    });
+    engine.register_fn("consume_mp", move |amount: i64| {
+        let b = unsafe { &mut *body_ptr };
+        // This deliberately retains the Python `Body.minusMP()` assignment
+        // order: it briefly writes zero then writes `cc`, so a directive can
+        // leave negative current MP.  Combat costs use their own guards and
+        // do not call this event-only helper.
+        b.set("내공", b.get_int("내공").saturating_sub(amount));
     });
     engine.register_fn("tendency_switch", move || {
         let b = unsafe { &mut *body_ptr };
@@ -609,12 +1295,15 @@ pub fn do_event_rhai(
         let p1 = (b.get_int("힘") - 600).max(15);
         b.set("힘", p1);
         let r = b.get_int("전직");
-        let mapgip = if r > 0 {
-            b.get_int("맷집") * 2 / 3
+        if r > 0 {
+            // `objs/player.py:setGiIn()` runs under Python 3, so `/` keeps
+            // the fractional value in the persisted attribute.  `getInt()`
+            // truncates it only at later integer consumers; truncating here
+            // would make the immediately saved Rust character differ.
+            b.set("맷집", b.get_int("맷집") as f64 * 2.0 / 3.0);
         } else {
-            15
-        };
-        b.set("맷집", mapgip);
+            b.set("맷집", 15_i64);
+        }
         b.set("레벨", 1);
         b.set("현재경험치", 0);
         b.set("힘경험치", 0);
@@ -622,9 +1311,11 @@ pub fn do_event_rhai(
         b.set("기존성격", b.get_string("성격"));
         b.set("성격", "기인");
         b.set("내공증진아이템리스트", "");
-        set_user_event(b, "소오강호끝", "1");
-        let path = format!("data/user/{}.json", b.get_name());
-        let _ = save_body_to_json(b, &path);
+        // Player.setGiIn() assigns this field directly.  Do not retain
+        // unrelated quest flags that preceded `$소오강호설정`; the following
+        // Rhai `$이벤트설정 소오강호진짜끝` may then append its one source
+        // mandated completion flag.
+        b.set("이벤트설정리스트", "소오강호끝");
     });
     engine.register_fn("set_sunin", move || {
         let b = unsafe { &mut *body_ptr };
@@ -634,12 +1325,42 @@ pub fn do_event_rhai(
         // Python Player.setSunIn() replaces, rather than appends to, the
         // event list at ascension time.
         b.set("이벤트설정리스트", "우화등선끝");
-        let path = format!("data/user/{}.json", b.get_name());
-        let _ = save_body_to_json(b, &path);
+    });
+    // Python Player.setEunDun(): unlike `set_giin`, 맷집 is retained and the
+    // transfer count advances once.  The event still owns the later movement
+    // to 전직:1.
+    engine.register_fn("set_eundun", move || {
+        let b = unsafe { &mut *body_ptr };
+        b.set("힘", (b.get_int("힘") - 2_000).max(15));
+        b.set("레벨", 1);
+        b.set("현재경험치", 0);
+        b.set("힘경험치", 0);
+        b.set("맷집경험치", 0);
+        b.set("기존성격", b.get_string("성격"));
+        b.set("성격", "은둔칩거");
+        b.set("내공증진아이템리스트", "");
+        b.set("이벤트설정리스트", "은둔칩거끝");
+        b.set("전직", b.get_int("전직").saturating_add(1));
+        b.set("위치각인", "낙양성:1");
     });
     engine.register_fn("words", move |i: i64| -> String {
         words_vec.get(i as usize).cloned().unwrap_or_default()
     });
+    // Python `$스크립트호출` hands the interactive flow to a data/script
+    // program.  Rhai events use the same result path instead of embedding
+    // prompt/output handling in the event engine.
+    engine.register_fn(
+        "start_script",
+        |name: &str| -> Result<(), Box<EvalAltResult>> {
+            let mut m = Map::new();
+            m.insert("type".into(), Dynamic::from("event_start_script"));
+            m.insert("script_name".into(), Dynamic::from(name.to_string()));
+            Err(Box::new(EvalAltResult::ErrorRuntime(
+                Dynamic::from(m),
+                Position::default(),
+            )))
+        },
+    );
     engine.register_fn(
         "wait_enter",
         move |next_func: &str, prompt: &str| -> Result<(), Box<EvalAltResult>> {
@@ -667,6 +1388,7 @@ pub fn do_event_rhai(
             output_lines: out_lines,
             set_position: out_set_position,
             broadcast_lines: out_broadcast_lines,
+            room_broadcast_lines: out_room_broadcast_lines,
         },
         Err(e) => {
             // end_event()의 throw는 ErrorInFunctionCall로 감싸져 올 수 있음. 안쪽 ErrorRuntime까지 풀어서 확인.
@@ -693,6 +1415,7 @@ pub fn do_event_rhai(
                             output_lines: out_lines,
                             set_position: out_set_position,
                             broadcast_lines: out_broadcast_lines,
+                            room_broadcast_lines: out_room_broadcast_lines,
                             mob_key: mob_key.to_string(),
                             event_key: event_key.to_string(),
                             words: words.to_vec(),
@@ -701,11 +1424,23 @@ pub fn do_event_rhai(
                             resume_func: Some(next_func),
                         };
                     }
+                    if t == "event_start_script" {
+                        let script_name: String = m
+                            .get("script_name")
+                            .and_then(|v: &Dynamic| v.clone().into_string().ok())
+                            .unwrap_or_default();
+                        return CommandResult::StartScript {
+                            script_name,
+                            lines: vec![],
+                            use_rhai: true,
+                        };
+                    }
                     if t == "event_complete" {
                         return CommandResult::MobEvent {
                             output_lines: out_lines,
                             set_position: out_set_position,
                             broadcast_lines: out_broadcast_lines,
+                            room_broadcast_lines: out_room_broadcast_lines,
                         };
                     }
                 }
@@ -716,6 +1451,7 @@ pub fn do_event_rhai(
                         output_lines: out_lines,
                         set_position: out_set_position,
                         broadcast_lines: out_broadcast_lines,
+                        room_broadcast_lines: out_room_broadcast_lines,
                     };
                 }
             }
@@ -750,7 +1486,7 @@ pub fn try_mob_event(
     };
     let mut candidates = {
         let world = get_world_state().read().ok()?;
-        let mut candidates: Vec<(u64, String, String, bool, RawMobData)> = Vec::new();
+        let mut candidates: Vec<(u64, String, String, bool, bool, RawMobData)> = Vec::new();
         for inst in world.mob_cache.get_all_mobs_in_room(zone, room) {
             let data = match world.mob_cache.get_instance_data(inst) {
                 Some(data) => data,
@@ -770,6 +1506,7 @@ pub fn try_mob_event(
                     inst.mob_key.clone(),
                     inst.name.clone(),
                     corpse,
+                    inst.act == 1,
                     data.clone(),
                 ));
             }
@@ -779,7 +1516,7 @@ pub fn try_mob_event(
     if let Some(number) = corpse_number {
         candidates = candidates.into_iter().nth(number - 1).into_iter().collect();
     } else {
-        candidates.sort_by_key(|(_, _, mob_name, _, _)| std::cmp::Reverse(mob_name.len()));
+        candidates.sort_by_key(|(_, _, mob_name, _, _, _)| std::cmp::Reverse(mob_name.len()));
     }
 
     let words_ref: Vec<&str> = words.iter().map(|s| s.as_str()).collect();
@@ -789,7 +1526,7 @@ pub fn try_mob_event(
             words_ref, zone, room
         );
     }
-    if let Some((instance_id, mob_key, mob_name, corpse, data)) = candidates.first() {
+    if let Some((instance_id, mob_key, mob_name, corpse, fighting, data)) = candidates.first() {
         let event_key = match check_event_key(data, &words_ref) {
             Some(k) => k,
             None => {
@@ -810,8 +1547,21 @@ pub fn try_mob_event(
             body.temp_mut()
                 .insert("_event_selected_mob_corpse".to_string(), Value::Int(1));
         }
+        if *fighting {
+            body.temp_mut()
+                .insert("_event_selected_mob_fighting".to_string(), Value::Int(1));
+        }
+        if crate::script::combat_commands::combat_target_instance_ids(body).contains(instance_id) {
+            body.temp_mut().insert(
+                "_event_selected_mob_targeted_by_player".to_string(),
+                Value::Int(1),
+            );
+        }
         let result = do_event(body, data, &event_key, &words, mob_key, None, None);
         body.temp_mut().remove("_event_selected_mob_corpse");
+        body.temp_mut().remove("_event_selected_mob_fighting");
+        body.temp_mut()
+            .remove("_event_selected_mob_targeted_by_player");
         let set_regen = body
             .temp_mut()
             .remove("_event_selected_mob_set_regen")
@@ -824,12 +1574,79 @@ pub fn try_mob_event(
             .temp_mut()
             .remove("_event_selected_mob_set_corpse")
             .is_some();
+        let respawn = body
+            .temp_mut()
+            .remove("_event_selected_mob_respawn")
+            .is_some();
+        let copied_stats = body
+            .temp_mut()
+            .remove("_event_selected_mob_copy_stats")
+            .and_then(|value| value.as_str().map(str::to_string));
         if set_regen {
             if let Ok(mut world) = get_world_state().write() {
                 if let Some(mobs) = world.mob_cache.get_all_mobs_in_room_mut(zone, room) {
                     if let Some(mob) = mobs.iter_mut().find(|mob| mob.instance_id == *instance_id) {
                         mob.act = 3;
                         mob.targets.clear();
+                    }
+                }
+            }
+        }
+        if let Some(variant) = copied_stats {
+            if variant == "intermediate" {
+                if let Ok(mut world) = get_world_state().write() {
+                    if let Some(mobs) = world.mob_cache.get_all_mobs_in_room_mut(zone, room) {
+                        if let Some(mob) =
+                            mobs.iter_mut().find(|mob| mob.instance_id == *instance_id)
+                        {
+                            mob.strength = body.get_int("힘").div_euclid(100).saturating_add(1);
+                            mob.level = body.get_int("레벨").saturating_add(150);
+                            mob.miss = 0;
+                            mob.runtime_attrs.insert("회피".to_string(), Value::Int(0));
+                        }
+                    }
+                }
+            }
+            let hp_multiplier = match variant.as_str() {
+                "low" => 1,
+                "normal" => 20,
+                "high" => 30,
+                _ => 0,
+            };
+            if hp_multiplier > 0 {
+                let strength_multiplier = match variant.as_str() {
+                    "low" => 1,
+                    "normal" => 3,
+                    "high" => 8,
+                    _ => unreachable!(),
+                };
+                let arm_multiplier = if variant == "high" { 3 } else { 1 };
+                let hp = body.get_int("최고체력").saturating_mul(hp_multiplier);
+                let strength = body.get_int("힘").saturating_mul(strength_multiplier);
+                let level = body.get_int("레벨").saturating_add(150);
+                let arm = body.get_int("맷집").saturating_mul(arm_multiplier);
+                let agility = body.get_int("민첩성");
+                if let Ok(mut world) = get_world_state().write() {
+                    if let Some(mobs) = world.mob_cache.get_all_mobs_in_room_mut(zone, room) {
+                        if let Some(mob) =
+                            mobs.iter_mut().find(|mob| mob.instance_id == *instance_id)
+                        {
+                            mob.hp = hp;
+                            mob.max_hp = hp;
+                            mob.strength = strength;
+                            mob.level = level;
+                            mob.arm = arm;
+                            mob.agility = agility;
+                            mob.miss = 0;
+                            mob.hit = 400;
+                            mob.luck = 100;
+                            mob.critical = 100;
+                            for (key, value) in
+                                [("회피", 0), ("명중", 400), ("운", 100), ("필살", 100)]
+                            {
+                                mob.runtime_attrs.insert(key.to_string(), Value::Int(value));
+                            }
+                        }
                     }
                 }
             }
@@ -873,6 +1690,25 @@ pub fn try_mob_event(
             body.clear_target(None);
             body.act = crate::player::ActState::Stand;
         }
+        if respawn {
+            if let Ok(mut world) = get_world_state().write() {
+                // Clone first so `respawn` can mutate the instance without
+                // overlapping an immutable cache borrow.
+                let data = world
+                    .mob_cache
+                    .get_all_mobs_in_room(zone, room)
+                    .into_iter()
+                    .find(|mob| mob.instance_id == *instance_id)
+                    .and_then(|mob| world.mob_cache.get_instance_data(mob).cloned());
+                if let (Some(data), Some(mobs)) =
+                    (data, world.mob_cache.get_all_mobs_in_room_mut(zone, room))
+                {
+                    if let Some(mob) = mobs.iter_mut().find(|mob| mob.instance_id == *instance_id) {
+                        mob.respawn(&data);
+                    }
+                }
+            }
+        }
         return Some(result);
     }
 
@@ -897,16 +1733,59 @@ pub enum ScriptNext {
     },
 }
 
+/// Python `Body.addItem`을 사용하는 `$아이템주기`의 상태 변경 부분.
+///
+/// Python은 요청한 전체 수량이 정확히 하나일 때만 `applyMagic(level, 0, 1)`을
+/// 적용한다. `gamble`은 `$속성템주기`가 쓰는 버리지/거래 불가 표식이다.
+fn give_event_item_with_roll(
+    body: &mut Body,
+    index: &str,
+    cnt: i64,
+    gamble: i64,
+    roll: &mut dyn FnMut(i64, i64) -> i64,
+) {
+    if index == "은전" || index == "금전" {
+        body.set(index, body.get_int(index) + cnt);
+        return;
+    }
+    for _ in 0..cnt {
+        let Some((arc, _)) = object_from_item_json(index) else {
+            continue;
+        };
+        let is_one_item = if let Ok(mut item) = arc.lock() {
+            if cnt == 1 {
+                let _ = crate::script::apply_item_magic_with_roll(
+                    &mut item,
+                    body.get_int("레벨"),
+                    0,
+                    true,
+                    roll,
+                );
+                if gamble != 0 {
+                    item.setAttr("아이템속성", "버리지못함");
+                    item.setAttr("아이템속성", "줄수없음");
+                    mark_item_field_as_json_array(&mut item, "아이템속성");
+                }
+            }
+            item.checkAttr("아이템속성", "단일아이템")
+        } else {
+            false
+        };
+        body.object.objs.insert(0, arc);
+        if is_one_item {
+            let _ = crate::oneitem::oneitem_have(index, &body.get_name());
+        }
+    }
+}
+
 /// $아이템삭제: 은전/금전이면 속성 감소, objs에서 인덱스 일치 cnt개 제거, 부족하면 inv_stack에서 차감.
 fn del_item_from_body(body: &mut Body, index: &str, cnt: i64) {
     if index == "은전" {
-        let v = (body.get_int("은전") - cnt).max(0);
-        body.set("은전", v);
+        body.set("은전", body.get_int("은전") - cnt);
         return;
     }
     if index == "금전" {
-        let v = (body.get_int("금전") - cnt).max(0);
-        body.set("금전", v);
+        body.set("금전", body.get_int("금전") - cnt);
         return;
     }
     let mut need = cnt;
@@ -957,6 +1836,151 @@ fn body_has_item_spec(body: &Body, spec: &str) -> bool {
         .count() as i64;
     let stacked = *body.object.inv_stack.get(index).unwrap_or(&0);
     individual.saturating_add(stacked) >= required
+}
+
+/// Python `Body.checkItemIndex(index, cnt, checkInUse=True)` for event
+/// directives.  Stacked inventory entries cannot be equipped; currency keeps
+/// the early-return balance behavior of the Python method.
+fn body_has_equipped_item_spec(body: &Body, spec: &str) -> bool {
+    let mut parts = spec.rsplitn(2, char::is_whitespace);
+    let tail = parts.next().unwrap_or_default();
+    let (index, required) = match (parts.next(), tail.parse::<i64>()) {
+        (Some(index), Ok(required)) if required > 0 => (index.trim_end(), required),
+        _ => (spec, 1),
+    };
+    if index == "은전" || index == "금전" {
+        return body.get_int(index) >= required;
+    }
+    body.object
+        .objs
+        .iter()
+        .filter(|item| {
+            item.lock()
+                .is_ok_and(|item| item.getString("인덱스") == index && item.getBool("inUse"))
+        })
+        .count() as i64
+        >= required
+}
+
+/// Python `Body.getItemName` is deliberately narrower than the general
+/// command selector: it scans inventory insertion order and compares the
+/// stripped display name exactly, while still seeing worn equipment.
+fn body_item_named(body: &Body, name: &str) -> Option<Arc<Mutex<Object>>> {
+    body.object.objs.iter().find_map(|item| {
+        let item_name = item.lock().ok()?.getName();
+        (strip_event_ansi(&item_name) == name).then(|| item.clone())
+    })
+}
+
+/// Python's `[아이템사용횟수]` event placeholder: find the first unworn item
+/// by its stripped display name, then read `itemSkillMap` using that item's
+/// original (ANSI-preserving) name.
+fn body_item_use_count(body: &Body, name: &str) -> i64 {
+    body.object
+        .objs
+        .iter()
+        .find_map(|item| {
+            let item = item.lock().ok()?;
+            (!item.getBool("inUse") && strip_event_ansi(&item.getName()) == name)
+                .then(|| item.getName())
+        })
+        .and_then(|raw_name| body.item_skill_map.get(&raw_name).copied())
+        .map(i64::from)
+        .unwrap_or(0)
+}
+
+/// Preserve array boundaries from the authoritative item JSON for Python's
+/// `[배울무공이름갯수]` placeholder.  Runtime items saved by older servers may
+/// only retain a single declaration, so keep that string as a fallback.
+fn item_skill_declarations(item: &Object) -> Vec<String> {
+    let index = item.getString("인덱스");
+    let path = format!("data/item/{index}.json");
+    if let Ok(source) = std::fs::read_to_string(path) {
+        if let Ok(json) = serde_json::from_str::<serde_json::Value>(&source) {
+            if let Some(value) = json.pointer("/아이템정보/무공이름") {
+                if let Some(values) = value.as_array() {
+                    return values
+                        .iter()
+                        .filter_map(serde_json::Value::as_str)
+                        .map(str::to_string)
+                        .collect();
+                }
+                if let Some(value) = value.as_str() {
+                    return vec![value.to_string()];
+                }
+            }
+        }
+    }
+    let raw = item.getString("무공이름");
+    if raw.is_empty() {
+        Vec::new()
+    } else {
+        raw.split('|').map(str::to_string).collect()
+    }
+}
+
+/// Python `[배울무공이름갯수]`: count the selected unworn weapon's declared
+/// skills which are not learned and are compatible with the player's 성격.
+fn body_learnable_item_skill_count(body: &Body, name: &str) -> i64 {
+    let Some(item) = body.object.findObjInven(name, 1) else {
+        return 0;
+    };
+    let Ok(item) = item.lock() else {
+        return 0;
+    };
+    let personality = body.get_string("성격");
+    item_skill_declarations(&item)
+        .into_iter()
+        .filter(|declaration| {
+            let words = declaration.split_whitespace().collect::<Vec<_>>();
+            let Some(skill_name) = words.first() else {
+                return false;
+            };
+            let Some(kind) = words.get(1) else {
+                return false;
+            };
+            !body.skill_list.iter().any(|skill| skill == *skill_name)
+                && (*kind == "정사"
+                    || personality == *kind
+                    || personality == "기인"
+                    || personality == "선인")
+        })
+        .count() as i64
+}
+
+/// Read the authoritative legacy `$속성템주기` candidate list. Python's
+/// `getStrCnt` picks one token from positions 1..-2 and treats the final `1`
+/// as the count, so retain every preceding item key exactly as authored.
+fn lottery_attribute_item_index() -> Option<String> {
+    let source = std::fs::read_to_string("data/mob/낙양성/복권맨.mob").ok()?;
+    let line = source
+        .lines()
+        .find(|line| line.starts_with(":$속성템주기 "))?;
+    let candidates = line
+        .trim_start_matches(":$속성템주기 ")
+        .split_whitespace()
+        .collect::<Vec<_>>();
+    if candidates.len() < 2 {
+        return None;
+    }
+    Some(candidates[fastrand::usize(..candidates.len() - 1)].to_string())
+}
+
+fn strip_event_ansi(value: &str) -> String {
+    let mut out = String::new();
+    let mut escape = false;
+    for ch in value.chars() {
+        if escape {
+            if ch == 'm' {
+                escape = false;
+            }
+        } else if ch == '\x1b' {
+            escape = true;
+        } else if ch != '\u{009b}' {
+            out.push(ch);
+        }
+    }
+    out
 }
 
 /// 무기강화 $옵션확인 / option_confirm efun 로직. mat=합시실, op=특성치명.
@@ -1368,10 +2392,23 @@ pub fn try_mob_event_resume(
 
 #[cfg(test)]
 mod tests {
-    use super::{body_has_item_spec, check_event_key, do_event_rhai, get_tendency, get_user_event};
+    use std::sync::{
+        atomic::{AtomicU64, Ordering},
+        Arc, Mutex,
+    };
+
+    use super::{
+        body_has_item_spec, check_event_key, del_item_from_body, do_event, do_event_rhai,
+        get_tendency, get_user_event, give_event_item_with_roll,
+    };
     use crate::command::CommandResult;
+    use crate::object::{Object, Value};
     use crate::player::Body;
     use crate::world::{EventScript, MobCache, MobInstance, RawMobData, RoomCache};
+
+    // Rank storage is process-global and persisted.  Tests that deliberately
+    // fill/clear the same legacy board must not interleave under libtest.
+    static RANK_TEST_LOCK: Mutex<()> = Mutex::new(());
 
     fn add_test_items(body: &mut Body, index: &str, count: usize) {
         for _ in 0..count {
@@ -1381,6 +2418,2058 @@ mod tests {
                     .0,
             );
         }
+    }
+
+    /// Unique-reward event tests must not inherit a prior test run's owner
+    /// from the persistent ONEITEM registry.  Each test lists only the
+    /// reward indices it creates, so unrelated configured unique items stay
+    /// intact.
+    fn clear_test_oneitems(indices: &[&str]) {
+        for index in indices {
+            let _ = crate::oneitem::oneitem_destroy(index);
+        }
+    }
+
+    #[test]
+    fn event_item_grant_preserves_python_single_count_magic_and_money_subtraction() {
+        // Python Body.addItem(index, cnt) only calls applyMagic when the
+        // requested cnt is exactly one.  The fixed low roll keeps the result
+        // deterministic while still exercising the forced-magic path.
+        let mut single = Body::new();
+        single.set("레벨", 1);
+        give_event_item_with_roll(&mut single, "31", 1, 0, &mut |low, _| low);
+        assert_eq!(single.object.objs.len(), 1);
+        assert!(
+            !single.object.objs[0]
+                .lock()
+                .unwrap()
+                .getString("옵션")
+                .is_empty(),
+            "a one-item event reward must receive Python's forced magic roll"
+        );
+
+        // `$속성템주기` calls addItem(..., gamble=1). Python saves both
+        // Item.setOption() and the new non-trade attributes as JSON lists,
+        // never newline-delimited scalars.
+        let mut lottery = Body::new();
+        lottery.set("이름", "이벤트속성저장회귀");
+        give_event_item_with_roll(&mut lottery, "31", 1, 1, &mut |low, _| low);
+        let lottery_path = "data/user/이벤트속성저장회귀.json";
+        assert!(crate::script::save_body_to_json(&mut lottery, lottery_path));
+        let lottery_save: serde_json::Value = serde_json::from_str(
+            &std::fs::read_to_string(lottery_path).expect("attribute reward save"),
+        )
+        .expect("valid attribute reward save");
+        assert!(lottery_save["아이템"][0]["옵션"].is_array());
+        assert_eq!(
+            lottery_save["아이템"][0]["아이템속성"],
+            serde_json::json!(["버리지못함", "줄수없음"])
+        );
+        let _ = std::fs::remove_file(lottery_path);
+
+        let mut multiple = Body::new();
+        multiple.set("레벨", 10_000);
+        give_event_item_with_roll(&mut multiple, "31", 2, 0, &mut |_, high| high);
+        assert_eq!(multiple.object.objs.len(), 2);
+        assert!(multiple
+            .object
+            .objs
+            .iter()
+            .all(|item| { item.lock().unwrap().getString("옵션").is_empty() }));
+
+        // Python Body.delItem deliberately permits event scripts to take a
+        // balance below zero; it does not clamp 은전/금전.
+        multiple.set("은전", 3);
+        multiple.set("금전", 2);
+        del_item_from_body(&mut multiple, "은전", 5);
+        del_item_from_body(&mut multiple, "금전", 5);
+        assert_eq!(multiple.get_int("은전"), -2);
+        assert_eq!(multiple.get_int("금전"), -3);
+    }
+
+    #[test]
+    fn currently_unused_python_directive_efuns_keep_their_state_predicates() {
+        // Some Python `$` handlers currently have no authored `.mob` caller,
+        // but must remain executable for a future data reload.  Exercise the
+        // source-level predicates through Rhai instead of treating absence of
+        // a call site as proof of implementation.
+        let mut body = Body::new();
+        body.set("이름", "미사용동작회귀");
+        body.set("내공", 10_i64);
+        body.set("은전", 3_i64);
+        body.set("난이도진입시간", 0_i64);
+        body.set("비전이름", "기존비전");
+        body.skill_list.push("시험무공".to_string());
+        let mut weapon = Object::new();
+        weapon.set("이름", "시험검");
+        weapon.set("인덱스", "시험검");
+        weapon.set("공격력", 3_999_i64);
+        weapon.set("inUse", 1_i64);
+        body.object.objs.push(Arc::new(Mutex::new(weapon)));
+        let mut unworn_weapon = Object::new();
+        unworn_weapon.set("이름", "시험검");
+        unworn_weapon.set("인덱스", "시험검");
+        unworn_weapon.set("inUse", 0_i64);
+        body.object.objs.push(Arc::new(Mutex::new(unworn_weapon)));
+
+        let (output, _) = run_zone_event_source(
+            &mut body,
+            "낙양성",
+            r#"
+fn event() {
+    if item_attack_below("시험검", 4000) { output("below"); }
+    if item_is_equipped("시험검") { output("equipped"); }
+    if has_equipped_item("시험검 1") { output("equipped-count"); }
+    if !has_equipped_item("시험검 2") { output("equipped-missing"); }
+    // `$아이템착용확인[!] $변수:1` uses checkItemName(..., True): both
+    // copies count even though only the first one is worn.
+    if has_named_item("시험검", 2) { output("named-both-states"); }
+    if !has_named_item("시험검", 3) { output("named-count-missing"); }
+    if has_named_item("은전", 3) { output("named-money"); }
+    if !has_named_item("은전", 0) { output("named-zero-rejected"); }
+    if has_equipped_item("은전 3") { output("money"); }
+    if has_skill("시험무공") { output("skill"); }
+    // The currently-unused `$무공확인!` skips its following block only
+    // when the named ordinary skill is already learned.
+    if !has_skill("없는무공") { output("skill-inverse"); }
+    set_body_flag("원본속성");
+    consume_mp(7);
+    // Python `$비전설정` calls setAttr(): it appends a new vision but
+    // preserves the existing list and ignores a duplicate.
+    add_vision_name("기존비전");
+    add_vision_name("시험비전");
+    set_vision_training_name("시험수련");
+    if !vision_training_is_empty() { output("training"); }
+    clear_vision_training_name();
+    // `$난이도재진입확인!` continues only after the five-minute window,
+    // while the non-! directive continues only while it is still fresh.
+    if difficulty_reentry_expired() { output("inverse-expired"); }
+    record_difficulty_entry();
+    if !difficulty_reentry_expired() { output("normal-fresh"); }
+    end_event();
+}
+"#,
+            None,
+        );
+        assert_eq!(
+            output,
+            vec![
+                "below",
+                "equipped",
+                "equipped-count",
+                "equipped-missing",
+                "named-both-states",
+                "named-count-missing",
+                "named-money",
+                "named-zero-rejected",
+                "money",
+                "skill",
+                "skill-inverse",
+                "training",
+                "inverse-expired",
+                "normal-fresh",
+            ]
+        );
+        assert_eq!(body.get_int("원본속성"), 1);
+        assert_eq!(body.get_int("내공"), 3);
+        assert_eq!(
+            body.get_secret_skills(),
+            vec!["기존비전".to_string(), "시험비전".to_string()],
+            "Python setAttr preserves earlier visions and de-duplicates the requested one"
+        );
+        // Python `$비전설정` calls Object.setAttr(), so the persisted value
+        // is a JSON list rather than Rust's internal separator string.
+        let save_path = "data/user/미사용비전동작회귀.json";
+        assert!(crate::script::save_body_to_json(&mut body, save_path));
+        let saved: serde_json::Value = serde_json::from_str(
+            &std::fs::read_to_string(save_path).expect("saved unused vision directive body"),
+        )
+        .expect("valid unused vision directive body");
+        assert_eq!(
+            saved["사용자오브젝트"]["비전이름"],
+            serde_json::json!(["기존비전", "시험비전"])
+        );
+        let _ = std::fs::remove_file(save_path);
+        assert!(body.get_string("비전수련").is_empty());
+    }
+
+    #[test]
+    fn event_position_move_prefixes_the_zone_with_the_python_mob_difficulty() {
+        // `objs/event.py` inserts the selected mob's 난이도 immediately
+        // before the colon in `zone:room`, i.e. it changes the zone name,
+        // not the room number.  No current data mob takes this branch, so
+        // keep the source-level handler covered for hot-reloaded data.
+        let mut body = Body::new();
+        for difficulty in [
+            serde_json::Value::String("3".to_string()),
+            serde_json::Value::Number(serde_json::Number::from(3)),
+        ] {
+            let mut data = RawMobData::new();
+            data.zone = "낙양성".to_string();
+            data.attributes.insert("난이도".to_string(), difficulty);
+            let result = super::do_event_rhai_source(
+                &mut body,
+                &data,
+                "test",
+                &[],
+                "test",
+                "fn event() { set_position(\"낙양성\", \"42\"); end_event(); }",
+                None,
+            );
+            let CommandResult::MobEvent { set_position, .. } = result else {
+                panic!("difficulty position event returned a non-event result");
+            };
+            assert_eq!(
+                set_position,
+                Some(("낙양성3".to_string(), "42".to_string()))
+            );
+        }
+    }
+
+    #[test]
+    fn event_room_output_uses_python_get_name_a_for_the_actor() {
+        // `$출력` reaches Player.printScript(): the caller sees `당신`, but
+        // room observers see the actor through getNameA(), including yellow
+        // ANSI before the Korean subject-particle conversion.
+        let mut body = Body::new();
+        body.set("이름", "가람");
+        let mut data = RawMobData::new();
+        data.zone = "낙양성".to_string();
+        let result = super::do_event_rhai_source(
+            &mut body,
+            &data,
+            "test",
+            &[],
+            "test",
+            r#"fn event() { room_broadcast_output("[공](이/가) 절을 합니다."); end_event(); }"#,
+            None,
+        );
+        let CommandResult::MobEvent {
+            output_lines,
+            room_broadcast_lines,
+            ..
+        } = result
+        else {
+            panic!("room-output event returned a non-event result");
+        };
+        assert!(output_lines.is_empty());
+        assert_eq!(
+            room_broadcast_lines,
+            vec!["\x1b[1m가람\x1b[0;37m이 절을 합니다."]
+        );
+    }
+
+    #[test]
+    fn event_state_directives_do_not_persist_before_the_python_save_tick() {
+        // Python `doEvent()` calls setEvent/delEvent and the three transition
+        // methods in memory only; Player.update() performs the later periodic
+        // save.  A quest command must not overwrite an existing save file at
+        // the event helper boundary.
+        let name = format!("이벤트즉시저장회귀-{}", std::process::id());
+        let path = format!("data/user/{name}.json");
+        let sentinel = b"python-save-must-remain-unchanged";
+        std::fs::write(&path, sentinel).expect("write event save sentinel");
+
+        let scripts = [
+            "fn event() { set_event(\"시험완료\", \"1\"); end_event(); }",
+            "fn event() { del_event(\"시험완료\"); end_event(); }",
+            "fn event() { set_giin(); end_event(); }",
+            "fn event() { set_sunin(); end_event(); }",
+            "fn event() { set_eundun(); end_event(); }",
+        ];
+        for source in scripts {
+            let mut body = Body::new();
+            body.set("이름", name.as_str());
+            body.set("힘", 3_000_i64);
+            body.set("맷집", 90_i64);
+            body.set("성격", "정파");
+            run_zone_event_source(&mut body, "낙양성", source, None);
+            assert_eq!(
+                std::fs::read(&path).expect("event helper must not replace save"),
+                sentinel,
+                "{source}"
+            );
+        }
+        let _ = std::fs::remove_file(path);
+    }
+
+    #[test]
+    fn stat_change_keeps_python_lp_prompt_boundary_before_later_event_text() {
+        let mut body = Body::new();
+        body.set("최고내공", 20_i64);
+        let (output, _) = run_zone_event_source(
+            &mut body,
+            "낙양성",
+            r#"
+fn event() {
+    change_stat("최고내공", 10);
+    output("뒤문장");
+    end_event();
+}
+"#,
+            None,
+        );
+
+        assert_eq!(body.get_int("최고내공"), 30);
+        assert_eq!(
+            output,
+            vec![
+                super::EVENT_LP_PROMPT_MARKER.to_string(),
+                "뒤문장".to_string()
+            ]
+        );
+    }
+
+    #[test]
+    fn event_mp_loss_keeps_python_minus_mp_negative_assignment() {
+        let mut body = Body::new();
+        body.set("내공", 10_i64);
+        run_zone_event_source(
+            &mut body,
+            "낙양성",
+            r#"
+fn event() {
+    consume_mp(17);
+    end_event();
+}
+"#,
+            None,
+        );
+        assert_eq!(body.get_int("내공"), -7);
+    }
+
+    #[test]
+    fn event_flags_round_trip_as_python_arrays_and_keep_all_loaded_entries() {
+        // Python Player.save() writes `이벤트설정리스트` as a list after
+        // setEvent(). Rust internally receives that list as `다|나`; both
+        // entries must remain independently visible to `$이벤트확인`, and a
+        // later Rust mutation must save a list again for Python.
+        let name = format!("이벤트배열왕복{}", std::process::id());
+        let path = format!("data/user/{name}.json");
+        let mut body = Body::new();
+        body.set("이름", name.as_str());
+        body.set("이벤트설정리스트", "다|나");
+        let (output, _) = run_zone_event_source(
+            &mut body,
+            "낙양성",
+            r#"
+fn event() {
+    if check_event("다") { output("first"); }
+    if check_event("나") { output("second"); }
+    set_event("가", "1");
+    del_event("다");
+    end_event();
+}
+"#,
+            None,
+        );
+        assert_eq!(output, vec!["first", "second"]);
+        assert!(crate::script::save_body_to_json(&mut body, &path));
+
+        let saved: serde_json::Value =
+            serde_json::from_str(&std::fs::read_to_string(&path).unwrap()).unwrap();
+        assert_eq!(
+            saved["사용자오브젝트"]["이벤트설정리스트"],
+            serde_json::json!(["나", "가"])
+        );
+
+        let verify = r#"
+from client import Player
+import os
+name = os.environ['MUC_EVENT_ARRAY_USER']
+player = Player()
+assert player.load(name)
+assert type(player['이벤트설정리스트']) is list
+assert player.checkEvent('나') and player.checkEvent('가')
+assert not player.checkEvent('다')
+player.delEvent('나')
+assert player['이벤트설정리스트'] == ['가']
+"#;
+        let result = std::process::Command::new("python3")
+            .arg("-c")
+            .arg(verify)
+            .env("MUC_EVENT_ARRAY_USER", &name)
+            .output()
+            .expect("python event-array round-trip must launch");
+        assert!(
+            result.status.success(),
+            "Python event-array round-trip failed:\nstdout={}\nstderr={}",
+            String::from_utf8_lossy(&result.stdout),
+            String::from_utf8_lossy(&result.stderr)
+        );
+        let _ = std::fs::remove_file(path);
+    }
+
+    #[test]
+    fn event_rank_self_output_uses_python_dangsin_while_observers_receive_the_name() {
+        // Python `$순위갱신` uses a global sendToAll1 recipient with a plain
+        // character name, whereas `$출력` uses printScript/sendRoom and
+        // therefore getNameA() for same-room observers. Keep all three
+        // recipient renderings distinct.
+        let mut body = Body::new();
+        body.set("이름", "회귀자");
+        let CommandResult::MobEvent {
+            output_lines,
+            broadcast_lines,
+            room_broadcast_lines,
+            ..
+        } = super::do_event_rhai_source(
+            &mut body,
+            &RawMobData::new(),
+            "self-output-regression",
+            &[],
+            "test",
+            r#"
+fn event() {
+    self_output("[공](이/가) 시험합니다");
+    literal_output("[공]이 원문입니다");
+    broadcast_output("[공](이/가) 시험합니다");
+    room_broadcast_output("[공](이/가) 시험합니다");
+    end_event();
+}
+"#,
+            None,
+        )
+        else {
+            panic!("event output regression must complete as MobEvent");
+        };
+        // Python's ordinary-event path preserves the literal `[공]`, but
+        // still calls postPosition1() because this text carries `(이/가)`.
+        assert_eq!(output_lines, vec!["당신이 시험합니다", "[공]이 원문입니다"]);
+        assert_eq!(broadcast_lines, vec!["회귀자가 시험합니다"]);
+        assert_eq!(
+            room_broadcast_lines,
+            vec!["\x1b[1m회귀자\x1b[0;37m가 시험합니다"]
+        );
+
+        for (path, expected) in [
+            ("data/script/낙양성/93_돌려_돌.rhai", 1),
+            ("data/script/강소성/육자홍_절.rhai", 3),
+        ] {
+            let source = std::fs::read_to_string(path).expect("literal legacy event script");
+            assert_eq!(
+                source
+                    .lines()
+                    .filter(|line| line.contains("literal_output(") && line.contains("[공]"))
+                    .count(),
+                expected,
+                "{path} must keep Python's literal ordinary-event [공] text"
+            );
+        }
+
+        // These are not merely source templates: Python's ordinary doEvent
+        // path preserves `[공]` but resolves its following `(이/가)` through
+        // postPosition1().  Execute both authored paths to lock that odd but
+        // player-visible legacy result down.
+        let mut statue = Body::new();
+        statue.set("이름", "석상원문회귀");
+        let (statue_output, statue_position) = run_luoyang_event(&mut statue, "93_돌려_돌.rhai");
+        assert_eq!(
+            statue_position,
+            Some(("낙양성".to_string(), "1455".to_string()))
+        );
+        assert!(
+            statue_output
+                .iter()
+                .any(|line| line.contains("[공]") && line.ends_with("이 지하로 내려갑니다")),
+            "ordinary statue text must retain Python's literal [공] plus resolved particle: {statue_output:?}"
+        );
+
+        clear_test_oneitems(&["황룡마조"]);
+        let mut elder = Body::new();
+        elder.set("이름", "육자홍원문회귀");
+        for event in ["진마혁끝", "황룡마조1"] {
+            super::set_user_event(&mut elder, event, "1");
+        }
+        let (elder_output, _) = run_zone_event(&mut elder, "강소성", "육자홍_절.rhai", None);
+        assert!(
+            elder_output.iter().any(|line| {
+                line.contains("[공]이") && line.contains("육자홍") && line.contains("먼지가되어")
+            }),
+            "ordinary Yuk Jahong text must retain Python's literal [공] plus resolved particle: {elder_output:?}"
+        );
+        clear_test_oneitems(&["황룡마조"]);
+    }
+
+    #[test]
+    fn craft_name_extension_events_keep_python_item_and_money_order() {
+        // `이름맨.mob` uses `$아이템확장확인`, `$아이템종류확인`,
+        // `$아이템확장설정[지움]`, and `$아이템삭제` as one transaction.
+        // Execute the authored Rhai scripts with the same input layout as
+        // Python's `words`: target, item, requested extension, command.
+        let mut body = Body::new();
+        body.set("이름", "이름새김회귀");
+        body.set("은전", 1_000_000_i64);
+        add_test_items(&mut body, "31", 1);
+
+        let engrave = std::fs::read_to_string("data/script/낙양성/이름맨_이름새김.rhai")
+            .expect("craft engraving script");
+        let engraving_words = vec![
+            "크래프트".to_string(),
+            "명왕검".to_string(),
+            "회귀명".to_string(),
+            "이름새김".to_string(),
+        ];
+        let (output, _) =
+            run_zone_event_source_with_words(&mut body, "낙양성", &engrave, &engraving_words, None);
+        assert!(output.iter().any(|line| line.contains("이름을 새겨")));
+        assert_eq!(body.get_int("은전"), 0);
+        {
+            let item = body.object.objs[0].lock().unwrap();
+            assert_eq!(item.getString("확장 이름"), "회귀명");
+            assert!(item.checkAttr("아이템속성", "팔지못함"));
+            assert!(item.checkAttr("반응이름", "명왕검"));
+            assert!(item.checkAttr("반응이름", "회귀명"));
+        }
+        // `Player.save()` must retain Python's list shape after the event:
+        // `$아이템확장설정` calls setAttr for 아이템속성 and append for
+        // 반응이름, neither of which is a scalar in the Python save format.
+        let engrave_save_path = "data/user/이름새김회귀.json";
+        assert!(crate::script::save_body_to_json(
+            &mut body,
+            engrave_save_path
+        ));
+        let engraved_save: serde_json::Value = serde_json::from_str(
+            &std::fs::read_to_string(engrave_save_path).expect("engraved item save"),
+        )
+        .expect("valid engraved item save");
+        assert_eq!(
+            engraved_save["아이템"][0]["반응이름"],
+            serde_json::json!(["명왕검", "회귀명"])
+        );
+        assert_eq!(
+            engraved_save["아이템"][0]["아이템속성"],
+            serde_json::json!(["팔지못함"])
+        );
+        let _ = std::fs::remove_file(engrave_save_path);
+
+        // `$아이템확장확인 이름` must reject a second engraving before it
+        // mutates the item or takes another fee.
+        body.set("은전", 1_000_000_i64);
+        let (output, _) =
+            run_zone_event_source_with_words(&mut body, "낙양성", &engrave, &engraving_words, None);
+        assert!(output
+            .iter()
+            .any(|line| line.contains("이미 이름이 새겨진")));
+        assert_eq!(body.get_int("은전"), 1_000_000);
+
+        let erase = std::fs::read_to_string("data/script/낙양성/이름맨_이름지움_이름삭제.rhai")
+            .expect("craft erasing script");
+        let erase_words = vec![
+            "크래프트".to_string(),
+            "명왕검".to_string(),
+            "이름지움".to_string(),
+        ];
+
+        // `$아이템확장확인!` enters the following rejection block when a
+        // matching item has no extension.  This must happen before the
+        // million-silver guard, so an ordinary unengraved weapon is neither
+        // changed nor charged.
+        let mut unengraved = Body::new();
+        unengraved.set("이름", "이름지움미새김회귀");
+        unengraved.set("은전", 1_000_000_i64);
+        add_test_items(&mut unengraved, "31", 1);
+        let (output, _) =
+            run_zone_event_source_with_words(&mut unengraved, "낙양성", &erase, &erase_words, None);
+        assert!(output
+            .iter()
+            .any(|line| line.contains("이름이 새겨지지 않은 장비")));
+        assert_eq!(unengraved.get_int("은전"), 1_000_000);
+
+        let (output, _) =
+            run_zone_event_source_with_words(&mut body, "낙양성", &erase, &erase_words, None);
+        assert!(output.iter().any(|line| line.contains("이름을 지워")));
+        assert_eq!(body.get_int("은전"), 0);
+        let item = body.object.objs[0].lock().unwrap();
+        assert!(item.getString("확장 이름").is_empty());
+        assert!(item.checkAttr("반응이름", "명왕검"));
+        assert!(!item.checkAttr("반응이름", "회귀명"));
+
+        // Python `$아이템확장설정` has its own `len(words) == 4` guard.
+        // The subsequent `$아이템삭제` and source prose remain unconditional,
+        // so an overlong input spends the fee and reports completion without
+        // mutating the item's extension.
+        let mut overlong = Body::new();
+        overlong.set("이름", "이름새김초과회귀");
+        overlong.set("은전", 1_000_000_i64);
+        add_test_items(&mut overlong, "31", 1);
+        let overlong_words = vec![
+            "크래프트".to_string(),
+            "명왕검".to_string(),
+            "회귀명".to_string(),
+            "이름새김".to_string(),
+            "추가인자".to_string(),
+        ];
+        let (output, _) = run_zone_event_source_with_words(
+            &mut overlong,
+            "낙양성",
+            &engrave,
+            &overlong_words,
+            None,
+        );
+        assert!(output.iter().any(|line| line.contains("이름을 새겨")));
+        assert_eq!(overlong.get_int("은전"), 0);
+        let item = overlong.object.objs[0].lock().unwrap();
+        assert!(item.getString("확장 이름").is_empty());
+        assert!(!item.checkAttr("반응이름", "회귀명"));
+
+        // `$아이템확장설정지움` has the symmetric `len(words) == 3`
+        // condition in Python.  An overlong erase command still consumes the
+        // fee and emits the source prose, but retains the engraved name.
+        let mut overlong_erase = Body::new();
+        overlong_erase.set("이름", "이름지움초과회귀");
+        overlong_erase.set("은전", 1_000_000_i64);
+        add_test_items(&mut overlong_erase, "31", 1);
+        {
+            let mut item = overlong_erase.object.objs[0].lock().unwrap();
+            item.set("확장 이름", "회귀명");
+            item.setAttr("반응이름", "회귀명");
+        }
+        let overlong_erase_words = vec![
+            "크래프트".to_string(),
+            "명왕검".to_string(),
+            "이름지움".to_string(),
+            "추가인자".to_string(),
+        ];
+        let (output, _) = run_zone_event_source_with_words(
+            &mut overlong_erase,
+            "낙양성",
+            &erase,
+            &overlong_erase_words,
+            None,
+        );
+        assert!(output.iter().any(|line| line.contains("이름을 지워")));
+        assert_eq!(overlong_erase.get_int("은전"), 0);
+        let item = overlong_erase.object.objs[0].lock().unwrap();
+        assert_eq!(item.getString("확장 이름"), "회귀명");
+        assert!(item.checkAttr("반응이름", "회귀명"));
+
+        // `$아이템확장설정` is Python list.append(), not setAttr(): a
+        // pre-existing identical reaction name stays duplicated, and the
+        // later Python list.remove() clears only one occurrence.
+        let mut duplicate_alias = Body::new();
+        duplicate_alias.set("이름", "이름새김중복별칭회귀");
+        duplicate_alias.set("은전", 1_000_000_i64);
+        add_test_items(&mut duplicate_alias, "31", 1);
+        {
+            let mut item = duplicate_alias.object.objs[0].lock().unwrap();
+            item.set("반응이름", "명왕검\n회귀명");
+        }
+        run_zone_event_source_with_words(
+            &mut duplicate_alias,
+            "낙양성",
+            &engrave,
+            &engraving_words,
+            None,
+        );
+        {
+            let item = duplicate_alias.object.objs[0].lock().unwrap();
+            assert_eq!(item.getString("반응이름"), "명왕검\n회귀명\n회귀명");
+        }
+        duplicate_alias.set("은전", 1_000_000_i64);
+        run_zone_event_source_with_words(
+            &mut duplicate_alias,
+            "낙양성",
+            &erase,
+            &erase_words,
+            None,
+        );
+        let item = duplicate_alias.object.objs[0].lock().unwrap();
+        assert!(item.getString("확장 이름").is_empty());
+        assert_eq!(item.getString("반응이름"), "명왕검\n회귀명");
+    }
+
+    #[test]
+    fn information_clerk_item_fee_gate_uses_python_inverted_item_check() {
+        let room = format!("진영정보회귀-{}", std::process::id());
+        let (mob_key, _) = place_event_mob("낙양성", "정보맨", &room);
+
+        let mut poor = Body::new();
+        poor.set("이름", "진영정보부족회귀");
+        poor.set("은전", 999_i64);
+        add_test_items(&mut poor, "31", 1);
+        let CommandResult::MobEvent { output_lines, .. } =
+            super::try_mob_event(&mut poor, "낙양성", &room, "진영 명왕검 정보")
+                .expect("information event must select the clerk")
+        else {
+            panic!("insufficient-fee information event must not wait for enter");
+        };
+        assert!(output_lines
+            .iter()
+            .any(|line| line.contains("은전 1000개가 필요")));
+        assert_eq!(poor.get_int("은전"), 999);
+
+        for (verb, expected) in [("정보", "깨우칠 수 있는"), ("감정", "물건에 난 흠집")]
+        {
+            let mut rich = Body::new();
+            rich.set("이름", format!("진영{verb}회귀"));
+            rich.set("은전", 1_000_i64);
+            add_test_items(&mut rich, "31", 1);
+            let command = format!("진영 명왕검 {verb}");
+            let CommandResult::MobEventEnter {
+                event_key,
+                words,
+                line_num,
+                resume_func,
+                ..
+            } = super::try_mob_event(&mut rich, "낙양성", &room, &command)
+                .expect("sufficient-fee clerk event must select")
+            else {
+                panic!("sufficient-fee {verb} must wait for enter");
+            };
+            let CommandResult::MobEvent { output_lines, .. } = super::try_mob_event_resume(
+                &mut rich,
+                "낙양성",
+                &room,
+                &mob_key,
+                &event_key,
+                words,
+                line_num,
+                resume_func,
+            )
+            .expect("clerk event must resume after enter") else {
+                panic!("resumed {verb} event must complete");
+            };
+            assert!(output_lines.iter().any(|line| line.contains(expected)));
+            assert_eq!(rich.get_int("은전"), 0);
+        }
+
+        // The source has four `$아이템종류확인` gates, all with the same
+        // rejection prose.  Each must stop before `$엔터$`; otherwise the
+        // player could pay the fee for food/armor/miscellaneous items.
+        for kind in ["호위", "먹는것", "방어구", "기타"] {
+            for verb in ["정보", "감정"] {
+                let mut rejected = Body::new();
+                rejected.set("이름", format!("진영{kind}{verb}회귀"));
+                rejected.set("은전", 1_000_i64);
+                let mut item = Object::new();
+                item.set("이름", "검사물");
+                item.set("인덱스", "검사물");
+                item.set("종류", kind);
+                rejected.object.objs.push(Arc::new(Mutex::new(item)));
+                let command = format!("진영 검사물 {verb}");
+                let CommandResult::MobEvent { output_lines, .. } =
+                    super::try_mob_event(&mut rejected, "낙양성", &room, &command)
+                        .expect("non-weapon clerk event must select")
+                else {
+                    panic!("{verb}/{kind} must end before the Enter pause");
+                };
+                assert!(
+                    output_lines
+                        .iter()
+                        .any(|line| line.contains("확인이 가능한것은 무기뿐이네요")),
+                    "{verb}/{kind}: {output_lines:?}"
+                );
+                assert_eq!(rejected.get_int("은전"), 1_000, "{verb}/{kind}");
+            }
+        }
+
+        let mut world = crate::world::get_world_state().write().unwrap();
+        world.mob_cache.remove_mob(&mob_key);
+    }
+
+    #[test]
+    fn all_source_item_kind_directives_keep_their_rhai_rejection_predicates() {
+        // Keep the legacy directive inventory tied to its JSON/Rhai targets.
+        // This catches a partial conversion such as retaining only the first
+        // 정보맨 kind check while silently allowing the later kinds through.
+        let cases = [
+            (
+                "data/mob/낙양성/이름맨.mob",
+                "data/script/낙양성/이름맨_이름새김.rhai",
+                ["호위", "먹는것"].as_slice(),
+            ),
+            (
+                "data/mob/낙양성/정보맨.mob",
+                "data/script/낙양성/정보맨_정보_정.rhai",
+                ["호위", "먹는것", "방어구", "기타"].as_slice(),
+            ),
+            (
+                "data/mob/낙양성/정보맨.mob",
+                "data/script/낙양성/정보맨_감_감정.rhai",
+                ["호위", "먹는것", "방어구", "기타"].as_slice(),
+            ),
+        ];
+        for (mob_path, script_path, kinds) in cases {
+            let mob_source = std::fs::read_to_string(mob_path).expect("legacy mob source");
+            let script_source = std::fs::read_to_string(script_path).expect("Rhai event source");
+            for kind in kinds {
+                let directive = format!("$아이템종류확인 {kind} $변수:1");
+                assert!(
+                    mob_source.contains(&directive),
+                    "{mob_path}: original directive inventory changed: {directive}"
+                );
+                let predicate = format!("item_kind_is(words(1), \"{kind}\")");
+                assert!(
+                    script_source.contains(&predicate),
+                    "{script_path}: missing Python item-kind predicate {predicate}"
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn all_source_inverted_skill_list_checks_keep_their_rhai_branches() {
+        // Python `$무공리스트확인!` skips its immediately following block
+        // only when every listed ordinary skill is present.  The 비전노인
+        // conversion therefore rejects `!has_all_skills`, while each
+        // 옥황상제 single-skill block rejects `has_skill` (already learned).
+        let trainer_mob = std::fs::read_to_string("data/mob/낙양성/무공맨.mob")
+            .expect("vision trainer legacy source");
+        let trainer_script = std::fs::read_to_string("data/script/낙양성/무공맨_수련_수.rhai")
+            .expect("vision trainer Rhai source");
+        let trainer_requirements = [
+            "분근착골수 장안기공 사량발천근 금나수",
+            "대력금나수",
+            "투골타혈법 전암전회",
+            "이화접목 차기미기",
+            "전이대법 격체전공",
+            "건곤대나이 흡성대법",
+            "공수탈백인",
+            "음양귀혼",
+        ];
+        for names in trainer_requirements {
+            assert!(
+                trainer_mob.contains(&format!("$무공리스트확인! {names}")),
+                "vision trainer legacy directive missing: {names}"
+            );
+            assert!(
+                trainer_script.contains(&format!("!has_all_skills(\"{names}\")")),
+                "vision trainer Rhai predicate missing: {names}"
+            );
+        }
+
+        let jade_mob = std::fs::read_to_string("data/mob/선인/옥황상제.mob")
+            .expect("Jade Emperor legacy source");
+        let jade_scripts = [
+            ("역근경", "옥황상제_대화_대_역근경.rhai"),
+            ("태극강기", "옥황상제_대화_대_태극강기.rhai"),
+            ("고영신공", "옥황상제_대화_대_고영신공.rhai"),
+            ("가의신공", "옥황상제_대화_대_가의신공.rhai"),
+            ("명옥공", "옥황상제_대화_대_명옥공.rhai"),
+            ("북명신공", "옥황상제_대화_대_북명신공.rhai"),
+            ("천외비선", "옥황상제_대화_대_천외비선.rhai"),
+        ];
+        for (skill, script) in jade_scripts {
+            assert!(
+                jade_mob.contains(&format!("$무공리스트확인! {skill}")),
+                "Jade Emperor legacy directive missing: {skill}"
+            );
+            let source = std::fs::read_to_string(format!("data/script/선인/{script}"))
+                .expect("Jade Emperor Rhai source");
+            assert!(
+                source.contains(&format!("has_skill(\"{skill}\")")),
+                "{script}: already-learned Python !-branch missing"
+            );
+        }
+    }
+
+    #[test]
+    fn information_clerk_restores_python_item_usage_and_learnable_skill_placeholders() {
+        // These are ordinary legacy text lines, not `$출력` directives.
+        // Python doEvent fills them immediately before sendLine, so Rhai must
+        // compose the numbers instead of leaving the placeholders literal.
+        let appraisal = std::fs::read_to_string("data/script/낙양성/정보맨_감_감정.rhai")
+            .expect("information-clerk appraisal script");
+        let information = std::fs::read_to_string("data/script/낙양성/정보맨_정보_정.rhai")
+            .expect("information-clerk information script");
+        let words = vec![
+            "진영".to_string(),
+            "독각신창".to_string(),
+            "감정".to_string(),
+        ];
+
+        let make_body = |name: &str| {
+            let mut body = Body::new();
+            body.set("이름", name);
+            body.set("은전", 1_000_i64);
+            body.set("성격", "정파");
+            body.object.objs.push(
+                super::object_from_item_json("216")
+                    .expect("source weapon")
+                    .0,
+            );
+            body.item_skill_map.insert("독각신창".to_string(), 17);
+            body.skill_list.push("철포삼".to_string());
+            body
+        };
+
+        let mut appraisal_body = make_body("정보감정회귀");
+        let (output, _) = run_zone_event_source_with_words(
+            &mut appraisal_body,
+            "낙양성",
+            &appraisal,
+            &words,
+            Some("step1"),
+        );
+        assert!(output.iter().any(|line| line.contains("17번 정도 사용")));
+        assert!(output.iter().all(|line| !line.contains("[아이템사용횟수]")));
+        assert_eq!(appraisal_body.get_int("은전"), 0);
+
+        let mut information_body = make_body("정보무공회귀");
+        let (output, _) = run_zone_event_source_with_words(
+            &mut information_body,
+            "낙양성",
+            &information,
+            &words,
+            Some("step1"),
+        );
+        // 독각신창의 원본 열 무공 중 사파 둘과 이미 배운 철포삼을 제외한다.
+        assert!(output.iter().any(|line| line.contains("7개 정도 되는군요")));
+        assert!(output
+            .iter()
+            .all(|line| !line.contains("[배울무공이름갯수]")));
+        assert_eq!(information_body.get_int("은전"), 0);
+
+        let riddle =
+            std::fs::read_to_string("data/script/산서성/46_답.rhai").expect("riddle answer script");
+        let wrong_words = vec!["불혼곡주".to_string(), "241".to_string(), "답".to_string()];
+        let mut riddle_body = Body::new();
+        super::set_user_event(&mut riddle_body, "불혼곡", "1");
+        let (output, _) = run_zone_event_source_with_words(
+            &mut riddle_body,
+            "산서성",
+            &riddle,
+            &wrong_words,
+            None,
+        );
+        assert!(output
+            .iter()
+            .any(|line| line.contains("그것은 241개 아닌가")));
+        assert!(output.iter().all(|line| !line.contains("[변수]")));
+
+        clear_test_oneitems(&["해왕조"]);
+        assert!(crate::oneitem::oneitem_have("해왕조", "해왕조선점회귀"));
+        let correct_words = vec!["불혼곡주".to_string(), "242".to_string(), "답".to_string()];
+        let mut claimed_riddle_body = Body::new();
+        super::set_user_event(&mut claimed_riddle_body, "불혼곡", "1");
+        let (output, _) = run_zone_event_source_with_words(
+            &mut claimed_riddle_body,
+            "산서성",
+            &riddle,
+            &correct_words,
+            None,
+        );
+        assert!(output
+            .iter()
+            .any(|line| line.contains("해왕조선점회귀가 먼저 왔었다네")));
+        assert!(output
+            .iter()
+            .any(|line| line.contains("이름만 똑같은 가짜를 주겠네")));
+        assert!(body_has_item_spec(&claimed_riddle_body, "해왕조-5"));
+        clear_test_oneitems(&["해왕조"]);
+    }
+
+    #[test]
+    fn porter_deposit_dynamic_item_check_uses_the_requested_amount_and_negation() {
+        let source = std::fs::read_to_string("data/script/낙양성/길쌈이_입금.rhai").unwrap();
+        let words = vec!["길쌈이".into(), "10".into(), "입금".into()];
+
+        let mut poor = Body::new();
+        poor.set("이름", "길쌈이입금부족회귀");
+        poor.set("은전", 9_i64);
+        let (output, _) =
+            run_zone_event_source_with_words(&mut poor, "낙양성", &source, &words, None);
+        assert!(output.iter().any(|line| line.contains("돈이 모자라지")));
+
+        let mut enough = Body::new();
+        enough.set("이름", "길쌈이입금충분회귀");
+        enough.set("은전", 10_i64);
+        let (output, _) =
+            run_zone_event_source_with_words(&mut enough, "낙양성", &source, &words, None);
+        assert_eq!(output, vec!["입금을 하겠는가?"]);
+    }
+
+    #[test]
+    fn event_defense_skill_directives_apply_once_and_keep_their_python_branches() {
+        // Python `$무공시전` always applies the event-defense skill and
+        // `$무공시전2` always applies Santa's blessing.  Both suppress a
+        // duplicate effect before asking Mob.makeFightScript() for its
+        // player-facing text.  Exercise the authored Rhai events rather than
+        // only the shared efun.
+        crate::world::skill::reload_skill_cache().expect("event skill definitions");
+
+        let guard_script = std::fs::read_to_string("data/script/낙양성/포졸_축하.rhai")
+            .expect("guard celebration script");
+        let mut guard = Body::new();
+        guard.set("이름", "이벤트무공회귀");
+        guard.set("레벨", 299_i64);
+        let (first, _) = run_luoyang_event(&mut guard, "포졸_축하.rhai");
+        assert!(first.iter().any(|line| line.contains("힘을 불어 넣습니다")));
+        assert_eq!(
+            guard
+                .active_skills
+                .iter()
+                .filter(|skill| skill.name == "이벤트")
+                .count(),
+            1
+        );
+        let (second, _) = run_luoyang_event(&mut guard, "포졸_축하.rhai");
+        assert!(!second
+            .iter()
+            .any(|line| line.contains("힘을 불어 넣습니다")));
+        assert_eq!(
+            guard
+                .active_skills
+                .iter()
+                .filter(|skill| skill.name == "이벤트")
+                .count(),
+            1
+        );
+
+        // At level 300 the source's `$특성치확인 레벨 300` branch ends
+        // before `$무공시전`; no defense effect is added.
+        let mut high_level = Body::new();
+        high_level.set("이름", "이벤트무공고레벨회귀");
+        high_level.set("레벨", 300_i64);
+        let (blocked, _) = run_luoyang_event(&mut high_level, "포졸_축하.rhai");
+        assert!(blocked.iter().any(|line| line.contains("300레벨 이상")));
+        assert!(high_level.active_skills.is_empty());
+
+        let santa_script = std::fs::read_to_string("data/script/낙양성/산타통닭_인사.rhai")
+            .expect("Santa greeting script");
+        let mut santa = Body::new();
+        santa.set("이름", "산타축복회귀");
+        super::set_user_event(&mut santa, "2020년크리스마스", "1");
+        let (first, _) = run_luoyang_event(&mut santa, "산타통닭_인사.rhai");
+        assert!(first.iter().any(|line| line.contains("산타의축복을")));
+        assert_eq!(
+            santa
+                .active_skills
+                .iter()
+                .filter(|skill| skill.name == "산타의축복")
+                .count(),
+            1
+        );
+        let (second, _) = run_luoyang_event(&mut santa, "산타통닭_인사.rhai");
+        assert!(!second.iter().any(|line| line.contains("산타의축복을")));
+        assert_eq!(
+            santa
+                .active_skills
+                .iter()
+                .filter(|skill| skill.name == "산타의축복")
+                .count(),
+            1
+        );
+
+        // Keep the reads above anchored to the authored files: a future
+        // script rename must not turn this into an efun-only test.
+        assert!(guard_script.contains("apply_defense_skill(\"이벤트\")"));
+        assert!(santa_script.contains("apply_defense_skill(\"산타의축복\")"));
+    }
+
+    #[test]
+    fn fortune_teller_unique_owner_check_charges_only_when_python_condition_matches() {
+        // `$기연존재확인 $변수:1` enters its block only for an existing
+        // unique item.  The surrounding `$아이템확인 은전 30000000` keeps
+        // the poor-player branch ahead of that lookup; an unknown unique name
+        // reports absence without taking the fee.
+        let oneitem_path = std::path::Path::new("data/config/oneitem.json");
+        let saved_oneitem_file = std::fs::read(oneitem_path).ok();
+        crate::oneitem::oneitem_clear();
+        let script = std::fs::read_to_string("data/script/낙양성/기연맨_위치확인_위치_확인.rhai")
+            .expect("fortune teller event script");
+        let words = vec![
+            "팔괘노야".to_string(),
+            "황룡마조".to_string(),
+            "위치확인".to_string(),
+        ];
+
+        let mut poor = Body::new();
+        poor.set("이름", "기연복채부족회귀");
+        poor.set("은전", 29_999_999_i64);
+        let (output, _) =
+            run_zone_event_source_with_words(&mut poor, "낙양성", &script, &words, None);
+        assert!(output.iter().any(|line| line.contains("돈 가져와")));
+        assert_eq!(poor.get_int("은전"), 29_999_999);
+
+        let mut missing = Body::new();
+        missing.set("이름", "기연부재회귀");
+        missing.set("은전", 30_000_000_i64);
+        let (output, _) =
+            run_zone_event_source_with_words(&mut missing, "낙양성", &script, &words, None);
+        assert!(output.iter().any(|line| line.contains("강호에 없다네")));
+        assert_eq!(missing.get_int("은전"), 30_000_000);
+
+        let owner = "기연소유자회귀";
+        let index = crate::oneitem::oneitem_get_index_by_name("황룡마조");
+        assert!(!index.is_empty(), "source unique item name must resolve");
+        assert!(crate::oneitem::oneitem_have(&index, owner));
+        let mut found = Body::new();
+        found.set("이름", "기연존재회귀");
+        found.set("은전", 30_000_000_i64);
+        let (output, _) =
+            run_zone_event_source_with_words(&mut found, "낙양성", &script, &words, None);
+        assert!(output.iter().any(|line| line.contains(owner)));
+        assert_eq!(found.get_int("은전"), 0);
+
+        crate::oneitem::oneitem_clear();
+        if let Some(contents) = saved_oneitem_file {
+            std::fs::write(oneitem_path, contents).expect("restore unique-item registry");
+        } else {
+            let _ = std::fs::remove_file(oneitem_path);
+        }
+        assert!(script.contains("one_item_exists_name(words(1))"));
+    }
+
+    #[test]
+    fn blacksmith_decomposition_keeps_python_dynamic_item_guard_order() {
+        // The legacy `$분해` event chains dynamic-name item existence,
+        // unequipped state, option presence, removal, and reward creation.
+        // Check every guard in the authored NPC event so a helper with the
+        // right standalone predicate cannot silently change its order.
+        let room = format!("대장장이분해회귀-{}", std::process::id());
+        let (mob_key, _) = place_event_mob("낙양성", "합체맨", &room);
+
+        let mut missing = Body::new();
+        missing.set("이름", "분해없음회귀");
+        let CommandResult::MobEvent { output_lines, .. } =
+            super::try_mob_event(&mut missing, "낙양성", &room, "대장장이 시험검 분해")
+                .expect("missing item decomposition event")
+        else {
+            panic!("missing item decomposition returned a non-event result");
+        };
+        assert!(output_lines
+            .iter()
+            .any(|line| line.contains("그런 아이템이 없")));
+
+        let make_item = |equipped: bool, options: &str| {
+            let mut item = Object::new();
+            item.set("이름", "시험검");
+            item.set("인덱스", "시험검");
+            item.set("옵션", options);
+            item.set("inUse", i64::from(equipped));
+            Arc::new(Mutex::new(item))
+        };
+
+        let mut equipped = Body::new();
+        equipped.set("이름", "분해착용회귀");
+        equipped.object.objs.push(make_item(true, "힘 10"));
+        let CommandResult::MobEvent { output_lines, .. } =
+            super::try_mob_event(&mut equipped, "낙양성", &room, "대장장이 시험검 분해")
+                .expect("equipped item decomposition event")
+        else {
+            panic!("equipped item decomposition returned a non-event result");
+        };
+        // `$아이템확인! $변수:1` uses the default `checkInUse=False`, so a
+        // lone worn object is rejected before `$착용확인!` is reached.
+        assert!(output_lines
+            .iter()
+            .any(|line| line.contains("그런 아이템이 없")));
+        assert_eq!(equipped.object.objs.len(), 1);
+
+        // An unworn duplicate makes the first guard pass, then `getItemName`
+        // inspects the first matching object; a worn first entry therefore
+        // takes the `$착용확인!` rejection.
+        let mut mixed = Body::new();
+        mixed.set("이름", "분해혼합회귀");
+        mixed.object.objs.push(make_item(true, "힘 10"));
+        mixed.object.objs.push(make_item(false, "힘 10"));
+        let CommandResult::MobEvent { output_lines, .. } =
+            super::try_mob_event(&mut mixed, "낙양성", &room, "대장장이 시험검 분해")
+                .expect("mixed item decomposition event")
+        else {
+            panic!("mixed item decomposition returned a non-event result");
+        };
+        assert!(output_lines.iter().any(|line| line.contains("착용 중인건")));
+        assert_eq!(mixed.object.objs.len(), 2);
+
+        let mut plain = Body::new();
+        plain.set("이름", "분해무옵션회귀");
+        plain.object.objs.push(make_item(false, ""));
+        let CommandResult::MobEvent { output_lines, .. } =
+            super::try_mob_event(&mut plain, "낙양성", &room, "대장장이 시험검 분해")
+                .expect("plain item decomposition event")
+        else {
+            panic!("plain item decomposition returned a non-event result");
+        };
+        assert!(output_lines
+            .iter()
+            .any(|line| line.contains("속성 아이템이 아니")));
+        assert_eq!(plain.object.objs.len(), 1);
+
+        let mut optioned = Body::new();
+        optioned.set("이름", "분해성공회귀");
+        optioned.object.objs.push(make_item(false, "힘 10"));
+        let CommandResult::MobEvent { output_lines, .. } =
+            super::try_mob_event(&mut optioned, "낙양성", &room, "대장장이 시험검 분해")
+                .expect("optioned item decomposition event")
+        else {
+            panic!("optioned item decomposition returned a non-event result");
+        };
+        assert!(output_lines.iter().any(|line| line.contains("강철조각")));
+        assert!(!optioned
+            .object
+            .objs
+            .iter()
+            .any(|item| item.lock().is_ok_and(|item| item.getName() == "시험검")));
+        assert!(body_has_item_spec(&optioned, "강철조각"));
+
+        // There are five current legacy `$아이템확인! $변수:1` call sites.
+        // All route through Python `checkItemName(..., False)` by default,
+        // which excludes worn objects.
+        let dynamic_checks = [
+            "data/script/낙양성/합체맨_분해.rhai",
+            "data/script/낙양성/이름맨_이름지움_이름삭제.rhai",
+            "data/script/낙양성/이름맨_이름새김.rhai",
+            "data/script/낙양성/정보맨_감_감정.rhai",
+            "data/script/낙양성/정보맨_정보_정.rhai",
+        ];
+        assert_eq!(dynamic_checks.len(), 5);
+        for path in dynamic_checks {
+            let source = std::fs::read_to_string(path).unwrap_or_else(|error| {
+                panic!("missing dynamic item-check script {path}: {error}")
+            });
+            assert!(
+                source.contains("item_exists_unworn_named(words(1), 1)"),
+                "{path} must preserve Python checkItemName(..., False)"
+            );
+        }
+
+        let mut world = crate::world::get_world_state().write().unwrap();
+        world.mob_cache.remove_mob(&mob_key);
+    }
+
+    #[test]
+    fn dynamic_unworn_name_check_keeps_python_quantity_and_currency_rules() {
+        // Python `$아이템확인! $변수:1` invokes
+        // `checkItemName(name, count, False)`: worn objects are excluded,
+        // but the authored count still matters and money follows the normal
+        // balance check.  Current source calls request one item, yet the
+        // helper must retain this contract for hot-reloaded event data too.
+        let source = r#"
+fn event() {
+    if item_exists_unworn_named(words(1), 2) { output("two-items"); }
+    if item_exists_unworn_named("은전", 20) { output("enough-silver"); }
+    if item_exists_unworn_named("금전", 1) { output("enough-gold"); }
+    end_event();
+}
+"#;
+        let words = vec![
+            "시험맨".to_string(),
+            "시험검".to_string(),
+            "확인".to_string(),
+        ];
+
+        let make_item = |worn: bool| {
+            let mut item = Object::new();
+            item.set("이름", "시험검");
+            item.set("인덱스", "시험검");
+            item.set("inUse", i64::from(worn));
+            Arc::new(Mutex::new(item))
+        };
+        let mut one_unworn_one_worn = Body::new();
+        one_unworn_one_worn.set("은전", 19_i64);
+        one_unworn_one_worn.set("금전", 1_i64);
+        one_unworn_one_worn.object.objs.push(make_item(false));
+        one_unworn_one_worn.object.objs.push(make_item(true));
+        let (output, _) = run_zone_event_source_with_words(
+            &mut one_unworn_one_worn,
+            "낙양성",
+            source,
+            &words,
+            None,
+        );
+        assert_eq!(output, vec!["enough-gold"]);
+
+        let mut enough = Body::new();
+        enough.set("은전", 20_i64);
+        enough.object.objs.push(make_item(false));
+        enough.object.objs.push(make_item(false));
+        let (output, _) =
+            run_zone_event_source_with_words(&mut enough, "낙양성", source, &words, None);
+        assert_eq!(output, vec!["two-items", "enough-silver"]);
+    }
+
+    #[test]
+    fn dynamic_event_item_delete_keeps_python_unique_owner_record() {
+        // Python `$아이템삭제 $변수:1` calls Object.remove(item).  That
+        // consumes the particular inventory object but deliberately does not
+        // turn a globally claimed ONEITEM back into an unclaimed reward.
+        let index = crate::oneitem::oneitem_get_index_by_name("황룡마조");
+        assert!(!index.is_empty(), "fixture unique item must have an index");
+        clear_test_oneitems(&[&index]);
+        let owner = "동적삭제기연소유회귀";
+        assert!(crate::oneitem::oneitem_have(&index, owner));
+
+        let mut body = Body::new();
+        body.set("이름", owner);
+        let mut item = Object::new();
+        item.set("이름", "황룡마조");
+        item.set("인덱스", index.clone());
+        item.setAttr("아이템속성", "단일아이템");
+        body.object.objs.push(Arc::new(Mutex::new(item)));
+
+        let (output, _) = run_zone_event_source(
+            &mut body,
+            "낙양성",
+            r#"
+fn event() {
+    delete_item_named("황룡마조");
+    output("삭제완료");
+    end_event();
+}
+"#,
+            None,
+        );
+        assert_eq!(output, vec!["삭제완료"]);
+        assert!(body.object.objs.is_empty());
+        assert_eq!(
+            crate::oneitem::oneitem_get(&index),
+            owner,
+            "event deletion must preserve Python's permanently claimed unique reward"
+        );
+        clear_test_oneitems(&[&index]);
+    }
+
+    #[test]
+    fn wang_daehyup_tendency_switch_requires_the_source_head_and_toggles_once() {
+        // Python `$정사전환` changes only 정파/사파 after the authored
+        // `장문머리` exchange.  Keep the missing-item dialogue separate so
+        // the state mutation cannot happen merely by selecting the event.
+        let room = format!("정사전환회귀-{}", std::process::id());
+        let (mob_key, _) = place_event_mob("낙양성", "83", &room);
+
+        let mut missing = Body::new();
+        missing.set("이름", "정사전환부족회귀");
+        missing.set("성격", "사파");
+        let CommandResult::MobEvent { output_lines, .. } =
+            super::try_mob_event(&mut missing, "낙양성", &room, "왕대협 정사전환 대화")
+                .expect("missing-head tendency event")
+        else {
+            panic!("missing-head tendency event returned a non-event result");
+        };
+        assert!(output_lines
+            .iter()
+            .any(|line| line.contains("각오를 보이게")));
+        assert_eq!(missing.get_string("성격"), "사파");
+        assert!(get_user_event(&missing, "정사전환이벤트").is_empty());
+
+        let mut switched = Body::new();
+        switched.set("이름", "정사전환성공회귀");
+        switched.set("성격", "사파");
+        add_test_items(&mut switched, "장문머리", 1);
+        super::try_mob_event(&mut switched, "낙양성", &room, "왕대협 정사전환 대화")
+            .expect("head exchange tendency event");
+        assert_eq!(switched.get_string("성격"), "정파");
+        assert!(!get_user_event(&switched, "정사전환이벤트").is_empty());
+        assert!(!body_has_item_spec(&switched, "장문머리"));
+        assert_eq!(
+            switched
+                .object
+                .objs
+                .iter()
+                .filter(|item| item
+                    .lock()
+                    .is_ok_and(|item| item.getString("인덱스") == "합성11"))
+                .count(),
+            2
+        );
+
+        // The source's first event check makes a repeat a message-only
+        // branch; it must not toggle the restored 정파 state back to 사파.
+        super::try_mob_event(&mut switched, "낙양성", &room, "왕대협 정사전환 대화")
+            .expect("completed tendency event");
+        assert_eq!(switched.get_string("성격"), "정파");
+
+        let mut world = crate::world::get_world_state().write().unwrap();
+        world.mob_cache.remove_mob(&mob_key);
+    }
+
+    #[test]
+    fn wang_daehyup_nickname_tendency_branches_match_all_three_source_conditions() {
+        // `$무림별호조건` has three source forms in this event: completed
+        // nickname, righteous qualification, and evil qualification.  Verify
+        // the authored Rhai selects the same terminal branch and preserves
+        // the two-token event name that Python stores verbatim.
+        let script = "83_대화_대.rhai";
+        let threshold = crate::script::get_murim_config_int("무림별호이벤트킬수");
+
+        let mut complete = Body::new();
+        complete.set("이름", "별호완료회귀");
+        complete.set("무림별호", "청룡검객");
+        let (output, _) = run_luoyang_event(&mut complete, script);
+        assert!(output.iter().any(|line| line.contains("명성이 강호에")));
+        assert!(get_user_event(&complete, "무림별호설정").is_empty());
+
+        let mut righteous = Body::new();
+        righteous.set("이름", "별호정파회귀");
+        righteous.set("0 성격플킬", threshold);
+        righteous.set("1 성격플킬", 1_i64);
+        righteous.set("2 성격플킬", 0_i64);
+        let (output, _) = run_luoyang_event(&mut righteous, script);
+        assert!(output.iter().any(|line| line.contains("정의롭고")));
+        assert!(!get_user_event(&righteous, "무림별호 정파").is_empty());
+        assert!(!get_user_event(&righteous, "무림별호설정").is_empty());
+
+        let mut evil = Body::new();
+        evil.set("이름", "별호사파회귀");
+        evil.set("0 성격플킬", threshold);
+        evil.set("1 성격플킬", 0_i64);
+        evil.set("2 성격플킬", 1_i64);
+        let (output, _) = run_luoyang_event(&mut evil, script);
+        assert!(output.iter().any(|line| line.contains("악랄하고")));
+        assert!(!get_user_event(&evil, "무림별호 사파").is_empty());
+        assert!(!get_user_event(&evil, "무림별호설정").is_empty());
+    }
+
+    #[test]
+    fn nickname_change_event_releases_old_name_reserves_new_name_and_requests_return() {
+        static NICKNAME_SEQUENCE: AtomicU64 = AtomicU64::new(1);
+        let sequence = NICKNAME_SEQUENCE.fetch_add(1, Ordering::Relaxed);
+        let suffix = format!("{}-{sequence}", std::process::id());
+        let owner = format!("별호변경회귀-{suffix}");
+        // Python allows at most ten characters.  Keep the registry fixture
+        // unique within the test process without accidentally taking the
+        // source's overlength rejection branch.
+        let old_nickname = format!("이전{:07x}", sequence);
+        let new_nickname = format!("신규{:07x}", sequence);
+        let room = format!("별호변경방-{suffix}");
+        let (mob_key, _) = place_event_mob("호남성", "39", &room);
+
+        // A normal Python player has its current title registered already.
+        // `$별호변경` deletes this exact entry before registering the new one.
+        assert_eq!(
+            crate::world::nickname::nickname_reserve(&old_nickname, &owner),
+            ""
+        );
+        let mut body = Body::new();
+        body.set("이름", owner.as_str());
+        body.set("무림별호", old_nickname.as_str());
+        let CommandResult::MobEvent { output_lines, .. } = super::try_mob_event(
+            &mut body,
+            "호남성",
+            &room,
+            &format!("천의검마 {new_nickname} 별호변경"),
+        )
+        .expect("nickname-change event") else {
+            panic!("nickname-change must remain an event result");
+        };
+        assert!(output_lines.iter().any(|line| line.contains("武林")));
+        assert_eq!(body.get_string("무림별호"), new_nickname);
+        assert!(!crate::world::nickname::nickname_exists(&old_nickname));
+        assert_eq!(crate::world::nickname::nickname_owner(&new_nickname), owner);
+        assert_eq!(
+            crate::script::take_event_command_request(&mut body),
+            Some("귀환".to_string())
+        );
+
+        assert!(crate::world::nickname::nickname_release(
+            &new_nickname,
+            &owner
+        ));
+        let mut world = crate::world::get_world_state().write().unwrap();
+        world.mob_cache.remove_mob(&mob_key);
+    }
+
+    #[test]
+    fn kukhwa_manual_keeps_python_gender_check_and_both_setting_branches() {
+        // Python gender check skips only the immediately following block
+        // when the player is already male. The next bare block then changes
+        // that player to female; a non-male player instead takes the first
+        // male-setting block. Do not simplify this source quirk into a
+        // female-to-male-only conversion.
+        let room = format!("규화성별회귀-{}", std::process::id());
+        let (mob_key, _) = place_event_mob("무림맹", "대학사", &room);
+
+        let mut female = Body::new();
+        female.set("이름", "규화여성회귀");
+        female.set("성별", "여");
+        add_test_items(&mut female, "규화보전", 1);
+        let CommandResult::MobEvent { output_lines, .. } =
+            super::try_mob_event(&mut female, "무림맹", &room, "대학사 규화보전")
+                .expect("female kukhwa event")
+        else {
+            panic!("female kukhwa returned a non-event result");
+        };
+        assert!(output_lines
+            .iter()
+            .any(|line| line.contains("남자가 되었습니다")));
+        assert_eq!(female.get_string("성별"), "남");
+        assert!(female.skill_list.iter().any(|skill| skill == "규화보전"));
+        assert!(!body_has_item_spec(&female, "규화보전"));
+
+        let mut male = Body::new();
+        male.set("이름", "규화남성회귀");
+        male.set("성별", "남");
+        add_test_items(&mut male, "규화보전", 1);
+        let CommandResult::MobEvent { output_lines, .. } =
+            super::try_mob_event(&mut male, "무림맹", &room, "대학사 규화보전")
+                .expect("male kukhwa event")
+        else {
+            panic!("male kukhwa returned a non-event result");
+        };
+        assert!(output_lines
+            .iter()
+            .any(|line| line.contains("여자가 되었습니다")));
+        assert_eq!(male.get_string("성별"), "여");
+        assert!(male.skill_list.iter().any(|skill| skill == "규화보전"));
+        assert!(!body_has_item_spec(&male, "규화보전"));
+
+        let mut world = crate::world::get_world_state().write().unwrap();
+        world.mob_cache.remove_mob(&mob_key);
+    }
+
+    #[test]
+    fn legacy_script_output_keeps_python_self_and_same_room_renderings() {
+        // Python Player.printScript() emits the same legacy $출력 line twice:
+        // [공] becomes 당신 for the actor, while room observers receive the
+        // bold `getNameA()` actor name with the authored particle.  Plain
+        // Rhai output() is actor-only, so converted $출력 lines use
+        // room_broadcast_output().
+        let authored = std::fs::read_to_string("data/script/참회동/산딸기_벗겨_가발.rhai")
+            .expect("worn-wig event source");
+        assert!(
+            authored.contains("output(post_position_once(\"당신(이/가) 가발을 훌러덩 벗깁니다\"))")
+        );
+        assert!(authored.contains("room_broadcast_output(\"[공](이/가) 가발을 훌러덩 벗깁니다\")"));
+        let source = r#"
+fn event() {
+    output(post_position_once("당신(이/가) 가발을 훌러덩 벗깁니다"));
+    room_broadcast_output("[공](이/가) 가발을 훌러덩 벗깁니다");
+    end_event();
+}
+"#;
+        let mut body = Body::new();
+        body.set("이름", "출력회귀");
+        let mut data = RawMobData::new();
+        data.zone = "참회동".to_string();
+        let CommandResult::MobEvent {
+            output_lines,
+            room_broadcast_lines,
+            ..
+        } = super::do_event_rhai_source(
+            &mut body,
+            &data,
+            "산딸기",
+            &[],
+            "벗겨 가발",
+            &source,
+            None,
+        )
+        else {
+            panic!("legacy script output source did not return a mob event");
+        };
+        assert!(output_lines
+            .iter()
+            .any(|line| line == "당신이 가발을 훌러덩 벗깁니다"));
+        assert!(room_broadcast_lines
+            .iter()
+            .any(|line| line == "\x1b[1m출력회귀\x1b[0;37m가 가발을 훌러덩 벗깁니다"));
+    }
+
+    #[test]
+    fn resumed_event_keeps_legacy_script_output_for_self_and_room() {
+        // `$엔터$` resumes in a fresh event evaluation.  Preserve the two
+        // Player.printScript() renderings there as well; otherwise only the
+        // actor would see legacy `$출력` after pressing Enter.
+        let source = r#"
+fn event() {
+    wait_enter("step", "[엔터키를 누르세요]");
+}
+
+fn step() {
+    output(post_position_once("당신(이/가) 재개된 가발을 벗깁니다"));
+    room_broadcast_output("[공](이/가) 재개된 가발을 벗깁니다");
+    end_event();
+}
+"#;
+        let mut body = Body::new();
+        body.set("이름", "재개출력회귀");
+        let mut data = RawMobData::new();
+        data.zone = "참회동".to_string();
+        let CommandResult::MobEventEnter {
+            resume_func: Some(resume_func),
+            ..
+        } = super::do_event_rhai_source(&mut body, &data, "산딸기", &[], "벗겨 가발", source, None)
+        else {
+            panic!("initial wait_enter source did not return an enter event");
+        };
+        let CommandResult::MobEvent {
+            output_lines,
+            room_broadcast_lines,
+            ..
+        } = super::do_event_rhai_source(
+            &mut body,
+            &data,
+            "산딸기",
+            &[],
+            "벗겨 가발",
+            source,
+            Some(resume_func),
+        )
+        else {
+            panic!("resumed wait_enter source did not return a mob event");
+        };
+        assert_eq!(output_lines, vec!["당신이 재개된 가발을 벗깁니다"]);
+        assert_eq!(
+            room_broadcast_lines,
+            vec!["\x1b[1m재개출력회귀\x1b[0;37m가 재개된 가발을 벗깁니다"]
+        );
+    }
+
+    #[test]
+    fn frog_child_enter_sequence_finishes_after_the_legacy_interactive_end_marker() {
+        // `안휘성/40.mob` brackets this dialogue with
+        // `$입력대기출력시작$` and `$입력대기출력끝$`, with three `$엔터$`
+        // pauses in between.  Python returns to normal command parsing only
+        // after the last resumed call has executed `$아이템주기 철사` and the
+        // closing interactive marker.  Exercise the authored Rhai sequence
+        // rather than only counting `wait_enter()` occurrences.
+        let mut body = Body::new();
+        body.set("이름", "입력대기끝회귀");
+        super::set_user_event(&mut body, "황소개구리끝", "1");
+        let mut data = RawMobData::new();
+        data.zone = "안휘성".to_string();
+
+        let first = do_event_rhai(
+            &mut body,
+            &data,
+            "대화",
+            &[],
+            "동네꼬마",
+            "40_대화_대.rhai",
+            None,
+        );
+        let CommandResult::MobEventEnter {
+            resume_func: Some(step1),
+            prompt,
+            ..
+        } = first
+        else {
+            panic!("frog child dialogue must pause at its first Python $엔터$");
+        };
+        assert_eq!(prompt, "[엔터키를 누르세요]");
+
+        let second = do_event_rhai(
+            &mut body,
+            &data,
+            "대화",
+            &[],
+            "동네꼬마",
+            "40_대화_대.rhai",
+            Some(step1),
+        );
+        let CommandResult::MobEventEnter {
+            resume_func: Some(step2),
+            ..
+        } = second
+        else {
+            panic!("frog child dialogue must preserve its second Python $엔터$");
+        };
+
+        let third = do_event_rhai(
+            &mut body,
+            &data,
+            "대화",
+            &[],
+            "동네꼬마",
+            "40_대화_대.rhai",
+            Some(step2),
+        );
+        let CommandResult::MobEventEnter {
+            resume_func: Some(step3),
+            ..
+        } = third
+        else {
+            panic!("frog child dialogue must preserve its third Python $엔터$");
+        };
+
+        let completed = do_event_rhai(
+            &mut body,
+            &data,
+            "대화",
+            &[],
+            "동네꼬마",
+            "40_대화_대.rhai",
+            Some(step3),
+        );
+        assert!(
+            matches!(completed, CommandResult::MobEvent { .. }),
+            "the final $입력대기출력끝$ continuation must not leave another Enter callback"
+        );
+        assert!(body_has_item_spec(&body, "철사"));
+    }
+
+    #[test]
+    fn every_event_move_finishes_before_a_later_same_room_script_output() {
+        // Python doEvent() applies `$위치이동` immediately, whereas the
+        // Rust command result applies the final position after the Rhai
+        // function returns.  A same-room `$출력` after a reachable move would
+        // therefore need a position-tagged delivery rather than the current
+        // pre-move sendRoom() route.  The converted legacy scripts all end
+        // their reached move branch first; keep that source invariant exact.
+        fn collect_rhai_files(directory: &std::path::Path, files: &mut Vec<std::path::PathBuf>) {
+            for entry in std::fs::read_dir(directory).expect("script directory") {
+                let entry = entry.expect("script tree entry");
+                let path = entry.path();
+                if path.is_dir() {
+                    collect_rhai_files(&path, files);
+                } else if path.extension().and_then(|ext| ext.to_str()) == Some("rhai") {
+                    files.push(path);
+                }
+            }
+        }
+
+        let mut files = Vec::new();
+        collect_rhai_files(std::path::Path::new("data/script"), &mut files);
+        let mut move_count = 0usize;
+        for path in files {
+            let source = std::fs::read_to_string(&path).expect("event script source");
+            let mut remaining = source.as_str();
+            while let Some(offset) = remaining.find("set_position(") {
+                move_count += 1;
+                let after_move = &remaining[offset..];
+                let end = after_move
+                    .find(";")
+                    .expect("set_position call must end with a semicolon");
+                let after_call = &after_move[end + 1..];
+                let next_boundary = [
+                    (after_call.find("end_event()"), "end_event"),
+                    (
+                        after_call.find("room_broadcast_output("),
+                        "room_broadcast_output",
+                    ),
+                    (after_call.find("\nfn "), "next function"),
+                ]
+                .into_iter()
+                .filter_map(|(offset, kind)| offset.map(|offset| (offset, kind)))
+                .min_by_key(|(offset, _)| *offset)
+                .expect("move must finish its event branch or reach a boundary");
+                assert_eq!(
+                    next_boundary.1,
+                    "end_event",
+                    "{}: set_position may not reach a later same-room output without ending first",
+                    path.display()
+                );
+                remaining = after_call;
+            }
+        }
+        assert_eq!(move_count, 445, "converted event move inventory changed");
+    }
+
+    #[test]
+    fn martial_arts_spectator_directives_keep_python_noop_state() {
+        // These two legacy directives look stateful, but objs/event.py
+        // deliberately handles both with `pass`.  The authored dialogue and
+        // `$출력` stay observable; no observer/position/body state may be
+        // introduced by the Rhai conversion.
+        let python = std::fs::read_to_string("objs/event.py").expect("Python event source");
+        assert!(python.contains("elif func == '$비무관람시작':\n                pass"));
+        assert!(python.contains("elif func == '$비무관람끝':\n                pass"));
+
+        for (script, expected) in [
+            ("비무대1_관람_관_비무장_비무.rhai", "잠시동안 시력을"),
+            ("비무대1_관람끝_비무장_비무.rhai", "시력을 원래대로"),
+            ("비무대2_관람_관_비무장_비무.rhai", "잠시동안 시력을"),
+            ("비무대2_관람끝_비무장_비무.rhai", "시력을 원래대로"),
+        ] {
+            let mut body = Body::new();
+            body.set("이름", "비무관람회귀");
+            body.set("체력", 777_i64);
+            let before = body.clone();
+            let (output, destination) = run_luoyang_event(&mut body, script);
+            assert!(
+                output.iter().any(|line| line.contains(expected)),
+                "{script}"
+            );
+            assert_eq!(destination, None, "{script}");
+            assert_eq!(body.get_int("체력"), before.get_int("체력"), "{script}");
+            assert_eq!(body.object.objs.len(), before.object.objs.len(), "{script}");
+        }
+    }
+
+    #[test]
+    fn level_upper_checks_keep_python_tower_and_arena_boundary_selection() {
+        // `$레벨상위확인 N` admits level N and above; the inverted form
+        // `$레벨상위확인! N` admits only levels below N.  The arena chains ten
+        // inverted guards, making it a compact check of every boundary.
+        let mut tower_low = Body::new();
+        tower_low.set("이름", "구층탑저레벨회귀");
+        tower_low.set("레벨", 199_i64);
+        let (output, destination) = run_luoyang_event(&mut tower_low, "구층탑_입장_입.rhai");
+        assert!(output.iter().any(|line| line.contains("무형의 기운")));
+        assert_eq!(destination, None);
+
+        let mut tower_edge = Body::new();
+        tower_edge.set("이름", "구층탑경계회귀");
+        tower_edge.set("레벨", 200_i64);
+        let (_, destination) = run_luoyang_event(&mut tower_edge, "구층탑_입장_입.rhai");
+        assert_eq!(destination, Some(("구층탑".into(), "1".into())));
+
+        for (level, room) in [
+            (99_i64, "9001"),
+            (100, "9002"),
+            (199, "9002"),
+            (200, "9003"),
+            (899, "9009"),
+            (900, "9010"),
+            (999, "9010"),
+            (1_000, "9000"),
+        ] {
+            let mut body = Body::new();
+            body.set("이름", format!("비무장경계{level}회귀"));
+            body.set("레벨", level);
+            let (_, destination) = run_luoyang_event(&mut body, "비무장_입장_입.rhai");
+            assert_eq!(
+                destination,
+                Some(("낙양성".to_string(), room.to_string())),
+                "level {level}"
+            );
+        }
+    }
+
+    #[test]
+    fn forced_combat_directive_keeps_python_corpse_and_self_fight_guards_only() {
+        const SOURCE: &str = r#"
+fn event() { output(force_start_selected_mob_combat()); end_event(); }
+"#;
+        let mut body = Body::new();
+        body.set("이름", "강제전투회귀");
+
+        let (output, _) = run_zone_event_source(&mut body, "낙양성", SOURCE, None);
+        assert_eq!(output, vec!["started"]);
+        assert!(body.temp().contains_key("_event_selected_mob_start_combat"));
+
+        body.temp_mut().clear();
+        body.act = crate::player::ActState::Fight;
+        let (output, _) = run_zone_event_source(&mut body, "낙양성", SOURCE, None);
+        assert_eq!(output, vec!["self_busy"]);
+
+        body.temp_mut().insert(
+            "_event_selected_mob_targeted_by_player".into(),
+            Value::Int(1),
+        );
+        let (output, _) = run_zone_event_source(&mut body, "낙양성", SOURCE, None);
+        assert_eq!(output, vec!["already_attacking"]);
+
+        body.act = crate::player::ActState::Stand;
+        body.temp_mut().clear();
+        body.temp_mut()
+            .insert("_event_selected_mob_corpse".into(), Value::Int(1));
+        let (output, _) = run_zone_event_source(&mut body, "낙양성", SOURCE, None);
+        assert_eq!(output, vec!["dead"]);
+    }
+
+    #[test]
+    fn inverted_rank_check_continues_only_when_python_rank_is_zero() {
+        const RANK_TYPE: &str = "미사용순위확인회귀";
+        const SOURCE: &str = r#"
+fn event() {
+    let result = rank_query(10, "미사용순위확인회귀");
+    // Python `$순위확인!` sets searchEnd when rank1 != 0.
+    if result["found"] { output("skip"); end_event(); }
+    output("continue");
+    end_event();
+}
+"#;
+        crate::world::rank::rank_clear(RANK_TYPE);
+        assert_eq!(
+            crate::world::rank::rank_write(RANK_TYPE, "순위보유자", 100, 10),
+            1
+        );
+
+        let mut ranked = Body::new();
+        ranked.set("이름", "순위보유자");
+        let (output, _) = run_zone_event_source_with_words(
+            &mut ranked,
+            "낙양성",
+            SOURCE,
+            &["비석".into(), "순위보유자".into(), "봐".into()],
+            None,
+        );
+        assert_eq!(output, vec!["skip"]);
+
+        let mut unranked = Body::new();
+        unranked.set("이름", "순위미보유자");
+        let (output, _) = run_zone_event_source_with_words(
+            &mut unranked,
+            "낙양성",
+            SOURCE,
+            &["비석".into(), "순위미보유자".into(), "봐".into()],
+            None,
+        );
+        assert_eq!(output, vec!["continue"]);
+        crate::world::rank::rank_clear(RANK_TYPE);
+    }
+
+    #[test]
+    fn legacy_variable_check_uses_python_argument_index_including_the_mob_target() {
+        let mut data = RawMobData::new();
+        data.events.insert(
+            "이벤트 $답".to_string(),
+            EventScript::Legacy(vec![
+                "$변수확인 1 242".to_string(),
+                "{".to_string(),
+                "정답".to_string(),
+                "$종료".to_string(),
+                "}".to_string(),
+                "오답".to_string(),
+                "$종료".to_string(),
+            ]),
+        );
+        let mut body = Body::new();
+        body.set("이름", "변수확인회귀");
+
+        let correct = do_event(
+            &mut body,
+            &data,
+            "이벤트 $답",
+            &["불혼곡주".into(), "242".into(), "답".into()],
+            "46",
+            None,
+            None,
+        );
+        let CommandResult::MobEvent { output_lines, .. } = correct else {
+            panic!("legacy variable check did not produce a mob event");
+        };
+        assert_eq!(output_lines, vec!["정답"]);
+
+        let incorrect = do_event(
+            &mut body,
+            &data,
+            "이벤트 $답",
+            &["불혼곡주".into(), "241".into(), "답".into()],
+            "46",
+            None,
+            None,
+        );
+        let CommandResult::MobEvent { output_lines, .. } = incorrect else {
+            panic!("legacy variable check did not produce a mob event");
+        };
+        assert_eq!(output_lines, vec!["오답"]);
+    }
+
+    #[test]
+    fn legacy_output_keeps_python_print_script_self_and_room_renderings() {
+        // The current data set has no legacy arrays, but do_event() remains a
+        // compatibility path for reloaded data.  Python `$출력` always goes
+        // through Player.printScript(), not ordinary one-recipient output.
+        let mut body = Body::new();
+        body.set("이름", "고전출력회귀");
+        let mut data = RawMobData::new();
+        data.events.insert(
+            "이벤트 $인사".to_string(),
+            EventScript::Legacy(vec![
+                "$출력 [공](이/가) 고개를 숙입니다".to_string(),
+                "$종료".to_string(),
+            ]),
+        );
+        let CommandResult::MobEvent {
+            output_lines,
+            room_broadcast_lines,
+            ..
+        } = super::do_event(
+            &mut body,
+            &data,
+            "이벤트 $인사",
+            &["대상".to_string(), "인사".to_string()],
+            "고전출력몹",
+            None,
+            None,
+        )
+        else {
+            panic!("legacy output must return a mob event");
+        };
+        assert_eq!(output_lines, vec!["당신이 고개를 숙입니다"]);
+        assert_eq!(
+            room_broadcast_lines,
+            vec!["\x1b[1m고전출력회귀\x1b[0;37m가 고개를 숙입니다"]
+        );
+
+        data.events.insert(
+            "이벤트 $대기".to_string(),
+            EventScript::Legacy(vec![
+                "$출력 [공](이/가) 다시 고개를 숙입니다".to_string(),
+                "$엔터$ [엔터키를 누르세요]".to_string(),
+            ]),
+        );
+        let CommandResult::MobEventEnter {
+            output_lines,
+            room_broadcast_lines,
+            prompt,
+            ..
+        } = super::do_event(
+            &mut body,
+            &data,
+            "이벤트 $대기",
+            &["대상".to_string(), "대기".to_string()],
+            "고전출력몹",
+            None,
+            None,
+        )
+        else {
+            panic!("legacy output before enter must preserve both renderings");
+        };
+        assert_eq!(prompt, "[엔터키를 누르세요]");
+        assert_eq!(output_lines, vec!["당신이 다시 고개를 숙입니다"]);
+        assert_eq!(
+            room_broadcast_lines,
+            vec!["\x1b[1m고전출력회귀\x1b[0;37m가 다시 고개를 숙입니다"]
+        );
+    }
+
+    #[test]
+    fn legacy_event_set_keeps_the_complete_whitespace_flag_like_python_set_event() {
+        let mut data = RawMobData::new();
+        data.events.insert(
+            "이벤트 $대화".to_string(),
+            EventScript::Legacy(vec![
+                "$이벤트설정 오소리가죽 이벤트".to_string(),
+                "$이벤트설정 무당산우물 끝".to_string(),
+                "$종료".to_string(),
+            ]),
+        );
+        let mut body = Body::new();
+        body.set("이름", "legacy-event-whitespace-regression");
+
+        let _ = do_event(
+            &mut body,
+            &data,
+            "이벤트 $대화",
+            &["시험몹".into(), "대화".into()],
+            "test",
+            None,
+            None,
+        );
+
+        assert!(!get_user_event(&body, "오소리가죽 이벤트").is_empty());
+        assert!(!get_user_event(&body, "무당산우물 끝").is_empty());
+        assert!(get_user_event(&body, "오소리가죽").is_empty());
+        assert!(get_user_event(&body, "무당산우물").is_empty());
+    }
+
+    #[test]
+    fn legacy_item_directives_share_python_add_and_delete_item_rules_with_rhai() {
+        let mut data = RawMobData::new();
+        data.events.insert(
+            "이벤트 $보상".to_string(),
+            EventScript::Legacy(vec![
+                "$아이템주기 31".to_string(),
+                "$아이템삭제 은전 5".to_string(),
+                "$종료".to_string(),
+            ]),
+        );
+        let mut body = Body::new();
+        body.set("이름", "legacy-item-regression");
+        body.set("레벨", 1);
+        body.set("은전", 3);
+
+        let _ = do_event(
+            &mut body,
+            &data,
+            "이벤트 $보상",
+            &["시험몹".into(), "보상".into()],
+            "test",
+            None,
+            None,
+        );
+        assert_eq!(body.get_int("은전"), -2);
+        assert_eq!(body.object.objs.len(), 1);
+        // `$아이템주기` uses the production random roll.  The deterministic
+        // `event_item_grant_preserves_python_single_count_magic_and_money_subtraction`
+        // test above verifies the one-count magic rule itself; this test
+        // verifies that the legacy directive reaches the shared helper.
     }
 
     fn run_luoyang_event(body: &mut Body, script: &str) -> (Vec<String>, Option<(String, String)>) {
@@ -1413,14 +4502,1084 @@ mod tests {
         }
     }
 
+    fn run_zone_event_source(
+        body: &mut Body,
+        zone: &str,
+        source: &str,
+        resume_func: Option<&str>,
+    ) -> (Vec<String>, Option<(String, String)>) {
+        run_zone_event_source_with_words(body, zone, source, &[], resume_func)
+    }
+
+    fn run_zone_event_source_with_words(
+        body: &mut Body,
+        zone: &str,
+        source: &str,
+        words: &[String],
+        resume_func: Option<&str>,
+    ) -> (Vec<String>, Option<(String, String)>) {
+        let mut data = RawMobData::new();
+        data.zone = zone.to_string();
+        match super::do_event_rhai_source(
+            body,
+            &data,
+            "test",
+            words,
+            "test",
+            source,
+            resume_func.map(str::to_string),
+        ) {
+            CommandResult::MobEvent {
+                output_lines,
+                set_position,
+                ..
+            } => (output_lines, set_position),
+            other => panic!("{source} failed: {other:?}"),
+        }
+    }
+
+    fn event_script_paths(directory: &std::path::Path, paths: &mut Vec<std::path::PathBuf>) {
+        let entries = std::fs::read_dir(directory)
+            .unwrap_or_else(|error| panic!("cannot read {}: {error}", directory.display()));
+        for entry in entries {
+            let entry = entry.expect("event script directory entry");
+            let path = entry.path();
+            if path.is_dir() {
+                event_script_paths(&path, paths);
+            } else if path
+                .extension()
+                .is_some_and(|extension| extension == "rhai")
+            {
+                paths.push(path);
+            }
+        }
+    }
+
+    #[test]
+    fn every_referenced_event_rhai_file_has_valid_rhai_syntax() {
+        let mut paths = Vec::new();
+        for entry in std::fs::read_dir("data/script").expect("event script root") {
+            let path = entry.expect("event script root entry").path();
+            if path.is_dir() {
+                event_script_paths(&path, &mut paths);
+            }
+        }
+        assert_eq!(paths.len(), 1_093, "all JSON event scripts must be audited");
+
+        const PREAMBLE: &str = r#"fn end_event() { throw #{ type: "event_complete" }; }"#;
+        for path in paths {
+            let source = std::fs::read_to_string(&path)
+                .unwrap_or_else(|error| panic!("cannot read {}: {error}", path.display()));
+            rhai::Engine::new()
+                .compile(format!("{PREAMBLE}\n\n{source}"))
+                .unwrap_or_else(|error| panic!("{}: {error}", path.display()));
+        }
+    }
+
+    #[test]
+    fn every_legacy_mob_event_key_maps_to_an_existing_rhai_event_script() {
+        fn normalize_event_key(key: &str) -> String {
+            key.trim()
+                .trim_start_matches("이벤트")
+                .trim_start()
+                .trim_start_matches(':')
+                .split_whitespace()
+                .collect::<Vec<_>>()
+                .join(" ")
+        }
+
+        let mut source_event_count = 0;
+        let mut mob_paths = Vec::new();
+        fn collect_mob_paths(directory: &std::path::Path, paths: &mut Vec<std::path::PathBuf>) {
+            for entry in std::fs::read_dir(directory).expect("legacy mob directory") {
+                let path = entry.expect("legacy mob entry").path();
+                if path.is_dir() {
+                    if path.file_name().is_some_and(|name| name != "backup") {
+                        collect_mob_paths(&path, paths);
+                    }
+                } else if path.extension().is_some_and(|extension| extension == "mob") {
+                    paths.push(path);
+                }
+            }
+        }
+        collect_mob_paths(std::path::Path::new("data/mob"), &mut mob_paths);
+
+        for mob_path in mob_paths {
+            let json_path = mob_path.with_extension("json");
+            if !json_path.exists() {
+                continue;
+            }
+            let source = std::fs::read_to_string(&mob_path)
+                .unwrap_or_else(|error| panic!("cannot read {}: {error}", mob_path.display()));
+            let event_keys = source
+                .lines()
+                .filter_map(|line| line.strip_prefix("#이벤트"))
+                .map(normalize_event_key)
+                .filter(|key| !key.is_empty())
+                .collect::<Vec<_>>();
+            if event_keys.is_empty() {
+                continue;
+            }
+            let root: serde_json::Value = serde_json::from_str(
+                &std::fs::read_to_string(&json_path)
+                    .unwrap_or_else(|error| panic!("cannot read {}: {error}", json_path.display())),
+            )
+            .unwrap_or_else(|error| panic!("invalid {}: {error}", json_path.display()));
+            let info = root
+                .get("몹정보")
+                .and_then(serde_json::Value::as_object)
+                .unwrap_or_else(|| panic!("missing 몹정보 in {}", json_path.display()));
+            let zone = mob_path
+                .parent()
+                .expect("mob zone directory")
+                .file_name()
+                .unwrap();
+            for legacy_key in event_keys {
+                source_event_count += 1;
+                // Source headers use both `#이벤트:` and `#이벤트 `, while
+                // converted JSON preserved their inconsistent whitespace.
+                // Compare command tokens, not spelling noise.
+                let (key, script) = info
+                    .iter()
+                    .find_map(|(key, value)| {
+                        (normalize_event_key(key) == legacy_key)
+                            .then(|| value.as_str().map(|script| (key, script)))
+                            .flatten()
+                    })
+                    .unwrap_or_else(|| {
+                        panic!(
+                            "{} event key {legacy_key:?} is not mapped to Rhai",
+                            mob_path.display()
+                        )
+                    });
+                assert!(
+                    script.ends_with(".rhai"),
+                    "{} event {key:?}: {script:?}",
+                    mob_path.display()
+                );
+                assert!(
+                    std::path::Path::new("data/script")
+                        .join(zone)
+                        .join(script)
+                        .is_file(),
+                    "{} event {key:?}: missing script {script}",
+                    mob_path.display()
+                );
+            }
+        }
+        assert_eq!(
+            source_event_count, 1_097,
+            "legacy source event inventory changed"
+        );
+    }
+
+    #[test]
+    fn every_legacy_enter_pause_and_interactive_boundary_is_preserved_as_a_rhai_wait_enter() {
+        fn normalize_event_key(key: &str) -> String {
+            key.trim()
+                .trim_start_matches("이벤트")
+                .trim_start()
+                .trim_start_matches(':')
+                .split_whitespace()
+                .collect::<Vec<_>>()
+                .join(" ")
+        }
+
+        fn collect_mob_paths(directory: &std::path::Path, paths: &mut Vec<std::path::PathBuf>) {
+            for entry in std::fs::read_dir(directory).expect("legacy mob directory") {
+                let path = entry.expect("legacy mob entry").path();
+                if path.is_dir() {
+                    if path.file_name().is_some_and(|name| name != "backup") {
+                        collect_mob_paths(&path, paths);
+                    }
+                } else if path.extension().is_some_and(|extension| extension == "mob") {
+                    paths.push(path);
+                }
+            }
+        }
+
+        let mut mob_paths = Vec::new();
+        collect_mob_paths(std::path::Path::new("data/mob"), &mut mob_paths);
+        let mut pauses = 0_usize;
+        let mut interactive_boundaries = 0_usize;
+
+        for mob_path in mob_paths {
+            let json_path = mob_path.with_extension("json");
+            if !json_path.exists() {
+                continue;
+            }
+            let source = std::fs::read_to_string(&mob_path)
+                .unwrap_or_else(|error| panic!("cannot read {}: {error}", mob_path.display()));
+            let root: serde_json::Value = serde_json::from_str(
+                &std::fs::read_to_string(&json_path)
+                    .unwrap_or_else(|error| panic!("cannot read {}: {error}", json_path.display())),
+            )
+            .unwrap_or_else(|error| panic!("invalid {}: {error}", json_path.display()));
+            let info = root
+                .get("몹정보")
+                .and_then(serde_json::Value::as_object)
+                .unwrap_or_else(|| panic!("missing 몹정보 in {}", json_path.display()));
+            let zone = mob_path
+                .parent()
+                .expect("mob zone directory")
+                .file_name()
+                .expect("mob zone name");
+
+            let mut current_key: Option<&str> = None;
+            let mut has_enter = false;
+            let mut has_interactive_start = false;
+            let mut has_interactive_end = false;
+            let mut check_block = |key: &str,
+                                   has_enter: bool,
+                                   has_interactive_start: bool,
+                                   has_interactive_end: bool| {
+                if !has_enter && !has_interactive_start && !has_interactive_end {
+                    return;
+                }
+                if has_enter {
+                    pauses += 1;
+                }
+                if has_interactive_start || has_interactive_end {
+                    assert_eq!(
+                        has_interactive_start,
+                        has_interactive_end,
+                        "{} event {key:?} has an unpaired legacy interactive boundary",
+                        mob_path.display()
+                    );
+                    interactive_boundaries += 1;
+                }
+                let normalized = normalize_event_key(key);
+                let script = info
+                    .iter()
+                    .find_map(|(event_key, value)| {
+                        (normalize_event_key(event_key) == normalized)
+                            .then(|| value.as_str())
+                            .flatten()
+                    })
+                    .unwrap_or_else(|| {
+                        panic!("{} event {key:?} is not mapped", mob_path.display())
+                    });
+                let path = std::path::Path::new("data/script").join(zone).join(script);
+                let rhai = std::fs::read_to_string(&path)
+                    .unwrap_or_else(|error| panic!("cannot read {}: {error}", path.display()));
+                assert!(
+                    rhai.contains("wait_enter("),
+                    "{} event {key:?} has legacy $엔터$ but {} lacks wait_enter",
+                    mob_path.display(),
+                    path.display()
+                );
+                assert!(
+                    !rhai.contains("\"누르세요]\""),
+                    "{} event {key:?} truncates the source enter prompt",
+                    path.display()
+                );
+            };
+
+            for line in source.lines() {
+                if let Some(key) = line.strip_prefix("#이벤트") {
+                    if let Some(previous) = current_key.take() {
+                        check_block(
+                            previous,
+                            has_enter,
+                            has_interactive_start,
+                            has_interactive_end,
+                        );
+                    }
+                    let key = key.trim();
+                    if key.is_empty() {
+                        continue;
+                    }
+                    current_key = Some(key);
+                    has_enter = false;
+                    has_interactive_start = false;
+                    has_interactive_end = false;
+                } else if line.trim_start().starts_with(":$엔터$") {
+                    has_enter = true;
+                } else if line.trim_start().starts_with(":$입력대기출력시작") {
+                    has_interactive_start = true;
+                } else if line.trim_start().starts_with(":$입력대기출력끝$") {
+                    has_interactive_end = true;
+                }
+            }
+            if let Some(previous) = current_key {
+                check_block(
+                    previous,
+                    has_enter,
+                    has_interactive_start,
+                    has_interactive_end,
+                );
+            }
+        }
+
+        assert_eq!(pauses, 22, "legacy enter-pause inventory changed");
+        assert_eq!(
+            interactive_boundaries, 22,
+            "legacy interactive-boundary inventory changed"
+        );
+    }
+
+    #[test]
+    fn python_event_handler_and_legacy_directive_inventory_is_not_silently_narrowed() {
+        fn collect_mob_paths(directory: &std::path::Path, paths: &mut Vec<std::path::PathBuf>) {
+            for entry in std::fs::read_dir(directory).expect("legacy mob directory") {
+                let path = entry.expect("legacy mob entry").path();
+                if path.is_dir() {
+                    if path.file_name().is_some_and(|name| name != "backup") {
+                        collect_mob_paths(&path, paths);
+                    }
+                } else if path.extension().is_some_and(|extension| extension == "mob") {
+                    paths.push(path);
+                }
+            }
+        }
+
+        // `objs/event.py` is the authority: retain every `func == '$…'`
+        // handler, including currently-unused legacy branches.  This small
+        // parser deliberately follows the source's stable single-quote form.
+        let python = std::fs::read_to_string("objs/event.py").expect("Python event source");
+        let handlers = python
+            .split("func == '")
+            .skip(1)
+            .filter_map(|tail| tail.split_once('\'').map(|(name, _)| name))
+            .filter(|name| name.starts_with('$'))
+            .collect::<std::collections::BTreeSet<_>>();
+        assert_eq!(handlers.len(), 87, "Python $ handler inventory changed");
+
+        let mut paths = Vec::new();
+        collect_mob_paths(std::path::Path::new("data/mob"), &mut paths);
+        let mut used = std::collections::BTreeSet::new();
+        let mut calls = 0_usize;
+        for path in paths {
+            let source = std::fs::read_to_string(&path)
+                .unwrap_or_else(|error| panic!("cannot read {}: {error}", path.display()));
+            for line in source.lines() {
+                let Some(token) = line
+                    .trim()
+                    .strip_prefix(':')
+                    .filter(|directive| directive.starts_with('$'))
+                    .and_then(|directive| directive.split_whitespace().next())
+                else {
+                    continue;
+                };
+                if handlers.contains(token) {
+                    used.insert(token.to_string());
+                    calls += 1;
+                }
+            }
+        }
+        assert_eq!(used.len(), 74, "actually-used Python $ handlers changed");
+        assert_eq!(calls, 5_355, "legacy $ directive call inventory changed");
+    }
+
+    #[test]
+    fn legacy_literal_move_resource_and_stat_directives_keep_their_rhai_calls() {
+        fn normalize_event_key(key: &str) -> String {
+            key.trim()
+                .trim_start_matches("이벤트")
+                .trim_start()
+                .trim_start_matches(':')
+                .split_whitespace()
+                .collect::<Vec<_>>()
+                .join(" ")
+        }
+
+        fn check_block(
+            zone: &str,
+            info: &serde_json::Map<String, serde_json::Value>,
+            event_key: &str,
+            lines: &[String],
+            moves: &mut usize,
+            hp: &mut usize,
+            stat_changes: &mut usize,
+            stat_sets: &mut usize,
+        ) {
+            let Some(script) = info.iter().find_map(|(key, value)| {
+                (normalize_event_key(key) == event_key)
+                    .then(|| value.as_str())
+                    .flatten()
+            }) else {
+                return;
+            };
+            let source = std::fs::read_to_string(
+                std::path::Path::new("data/script").join(zone).join(script),
+            )
+            .unwrap_or_else(|error| panic!("missing {zone}/{script}: {error}"));
+            for line in lines {
+                let trimmed = line.trim();
+                let directive = trimmed.strip_prefix(':').unwrap_or(trimmed).trim_start();
+                if let Some(spec) = directive.strip_prefix("$위치이동 ") {
+                    let (target_zone, room) = spec
+                        .trim()
+                        .split_once(':')
+                        .unwrap_or_else(|| panic!("invalid room spec {spec:?}"));
+                    *moves += 1;
+                    assert!(
+                        source.contains(&format!("set_position(\"{target_zone}\", \"{room}\")")),
+                        "{zone}/{script}: missing original move {spec}"
+                    );
+                }
+                for directive in ["체력감소", "체력소모"] {
+                    if let Some(amount) = trimmed
+                        .strip_prefix(':')
+                        .unwrap_or(trimmed)
+                        .trim_start()
+                        .strip_prefix(&format!("${directive} "))
+                        .and_then(|value| value.trim().parse::<i64>().ok())
+                    {
+                        *hp += 1;
+                        assert!(
+                            source.contains(&format!("consume_hp({amount})")),
+                            "{zone}/{script}: missing original {directive} {amount}"
+                        );
+                    }
+                }
+                for (directive, rhai_call, count) in [
+                    ("특성치변경", "change_stat", &mut *stat_changes),
+                    ("특성치설정", "set_stat", &mut *stat_sets),
+                ] {
+                    if let Some(spec) = trimmed
+                        .strip_prefix(':')
+                        .unwrap_or(trimmed)
+                        .trim_start()
+                        .strip_prefix(&format!("${directive} "))
+                    {
+                        let mut values = spec.split_whitespace();
+                        let stat = values.next().unwrap_or_else(|| {
+                            panic!("{zone}/{script}: invalid original {directive} {spec:?}")
+                        });
+                        let amount = values.next().unwrap_or_else(|| {
+                            panic!("{zone}/{script}: invalid original {directive} {spec:?}")
+                        });
+                        assert!(
+                            values.next().is_none(),
+                            "{zone}/{script}: invalid original {directive} {spec:?}"
+                        );
+                        *count += 1;
+                        assert!(
+                            source.contains(&format!("{rhai_call}(\"{stat}\", {amount})")),
+                            "{zone}/{script}: missing original {directive} {stat} {amount}"
+                        );
+                    }
+                }
+            }
+        }
+
+        let mut move_count = 0;
+        let mut hp_count = 0;
+        let mut stat_change_count = 0;
+        let mut stat_set_count = 0;
+        fn collect_mob_paths(directory: &std::path::Path, paths: &mut Vec<std::path::PathBuf>) {
+            for entry in std::fs::read_dir(directory).expect("legacy mob directory") {
+                let path = entry.expect("legacy mob entry").path();
+                if path.is_dir() {
+                    if path.file_name().is_some_and(|name| name != "backup") {
+                        collect_mob_paths(&path, paths);
+                    }
+                } else if path.extension().is_some_and(|extension| extension == "mob") {
+                    paths.push(path);
+                }
+            }
+        }
+        let mut mob_paths = Vec::new();
+        collect_mob_paths(std::path::Path::new("data/mob"), &mut mob_paths);
+        for path in mob_paths {
+            let json_path = path.with_extension("json");
+            if !json_path.exists() {
+                continue;
+            }
+            let root: serde_json::Value = serde_json::from_str(
+                &std::fs::read_to_string(&json_path)
+                    .unwrap_or_else(|error| panic!("cannot read {}: {error}", json_path.display())),
+            )
+            .unwrap_or_else(|error| panic!("invalid {}: {error}", json_path.display()));
+            let info = root
+                .get("몹정보")
+                .and_then(serde_json::Value::as_object)
+                .unwrap_or_else(|| panic!("missing 몹정보 in {}", json_path.display()));
+            let zone = path
+                .parent()
+                .unwrap()
+                .file_name()
+                .unwrap()
+                .to_str()
+                .unwrap();
+            let mut event_key: Option<String> = None;
+            let mut lines = Vec::new();
+            for line in std::fs::read_to_string(&path)
+                .unwrap_or_else(|error| panic!("cannot read {}: {error}", path.display()))
+                .lines()
+            {
+                if let Some(header) = line.trim_start().strip_prefix("#이벤트") {
+                    if let Some(key) = event_key.take() {
+                        check_block(
+                            zone,
+                            info,
+                            &key,
+                            &lines,
+                            &mut move_count,
+                            &mut hp_count,
+                            &mut stat_change_count,
+                            &mut stat_set_count,
+                        );
+                    }
+                    event_key = Some(normalize_event_key(header));
+                    lines.clear();
+                } else if event_key.is_some() && line.trim_start().starts_with("#END") {
+                    check_block(
+                        zone,
+                        info,
+                        event_key.take().as_deref().unwrap(),
+                        &lines,
+                        &mut move_count,
+                        &mut hp_count,
+                        &mut stat_change_count,
+                        &mut stat_set_count,
+                    );
+                    lines.clear();
+                } else if event_key.is_some() {
+                    lines.push(line.to_string());
+                }
+            }
+            if let Some(key) = event_key {
+                check_block(
+                    zone,
+                    info,
+                    &key,
+                    &lines,
+                    &mut move_count,
+                    &mut hp_count,
+                    &mut stat_change_count,
+                    &mut stat_set_count,
+                );
+            }
+        }
+        assert_eq!(move_count, 448, "legacy move directive inventory changed");
+        assert_eq!(hp_count, 52, "legacy hp directive inventory changed");
+        assert_eq!(
+            stat_change_count, 58,
+            "legacy stat-change directive inventory changed"
+        );
+        assert_eq!(
+            stat_set_count, 6,
+            "legacy stat-set directive inventory changed"
+        );
+    }
+
+    #[test]
+    fn legacy_literal_item_grants_and_deletes_keep_their_rhai_calls() {
+        fn normalize_event_key(key: &str) -> String {
+            key.trim()
+                .trim_start_matches("이벤트")
+                .trim_start()
+                .trim_start_matches(':')
+                .split_whitespace()
+                .collect::<Vec<_>>()
+                .join(" ")
+        }
+
+        fn check_block(
+            zone: &str,
+            info: &serde_json::Map<String, serde_json::Value>,
+            event_key: &str,
+            lines: &[String],
+            grants: &mut usize,
+            deletes: &mut usize,
+            dynamic: &mut usize,
+        ) {
+            let Some(script) = info.iter().find_map(|(key, value)| {
+                (normalize_event_key(key) == event_key)
+                    .then(|| value.as_str())
+                    .flatten()
+            }) else {
+                return;
+            };
+            let source = std::fs::read_to_string(
+                std::path::Path::new("data/script").join(zone).join(script),
+            )
+            .unwrap_or_else(|error| panic!("missing {zone}/{script}: {error}"));
+            for line in lines {
+                let trimmed = line.trim();
+                let directive = trimmed.strip_prefix(':').unwrap_or(trimmed).trim_start();
+                for (legacy_name, rhai_call, count) in [
+                    ("아이템주기", "give_item", &mut *grants),
+                    ("아이템삭제", "delete_item", &mut *deletes),
+                ] {
+                    let Some(spec) = directive.strip_prefix(&format!("${legacy_name} ")) else {
+                        continue;
+                    };
+                    let spec = spec.split('；').next().unwrap().trim();
+                    let values = spec.split_whitespace().collect::<Vec<_>>();
+                    let item = *values.first().unwrap_or_else(|| {
+                        panic!("{zone}/{script}: invalid original {legacy_name} {spec:?}")
+                    });
+                    if item.starts_with('$') {
+                        *dynamic += 1;
+                        continue;
+                    }
+                    let amount = if values.len() > 1 {
+                        *values.last().unwrap()
+                    } else {
+                        "1"
+                    };
+                    assert!(
+                        amount.parse::<i64>().is_ok(),
+                        "{zone}/{script}: invalid original {legacy_name} {spec:?}"
+                    );
+                    *count += 1;
+                    let item_count = if values.len() > 2 {
+                        values.len() - 1
+                    } else {
+                        1
+                    };
+                    for item in values.iter().take(item_count) {
+                        let exact_call = format!("{rhai_call}(\"{item}\", {amount})");
+                        let conditional_call = source.lines().any(|line| {
+                            line.contains(&format!("{rhai_call}("))
+                                && line.contains(&format!(", {amount})"))
+                        }) && source.contains(&format!("\"{item}\""));
+                        assert!(
+                            source.contains(&exact_call) || conditional_call,
+                            "{zone}/{script}: missing original {legacy_name} {item} {amount}"
+                        );
+                    }
+                }
+            }
+        }
+
+        fn collect_mob_paths(directory: &std::path::Path, paths: &mut Vec<std::path::PathBuf>) {
+            for entry in std::fs::read_dir(directory).expect("legacy mob directory") {
+                let path = entry.expect("legacy mob entry").path();
+                if path.is_dir() {
+                    if path.file_name().is_some_and(|name| name != "backup") {
+                        collect_mob_paths(&path, paths);
+                    }
+                } else if path.extension().is_some_and(|extension| extension == "mob") {
+                    paths.push(path);
+                }
+            }
+        }
+
+        let mut grants = 0;
+        let mut deletes = 0;
+        let mut dynamic = 0;
+        let mut mob_paths = Vec::new();
+        collect_mob_paths(std::path::Path::new("data/mob"), &mut mob_paths);
+        for path in mob_paths {
+            let json_path = path.with_extension("json");
+            if !json_path.exists() {
+                continue;
+            }
+            let root: serde_json::Value = serde_json::from_str(
+                &std::fs::read_to_string(&json_path)
+                    .unwrap_or_else(|error| panic!("cannot read {}: {error}", json_path.display())),
+            )
+            .unwrap_or_else(|error| panic!("invalid {}: {error}", json_path.display()));
+            let info = root
+                .get("몹정보")
+                .and_then(serde_json::Value::as_object)
+                .unwrap_or_else(|| panic!("missing 몹정보 in {}", json_path.display()));
+            let zone = path
+                .parent()
+                .unwrap()
+                .file_name()
+                .unwrap()
+                .to_str()
+                .unwrap();
+            let mut event_key: Option<String> = None;
+            let mut lines = Vec::new();
+            for line in std::fs::read_to_string(&path)
+                .unwrap_or_else(|error| panic!("cannot read {}: {error}", path.display()))
+                .lines()
+            {
+                if let Some(header) = line.trim_start().strip_prefix("#이벤트") {
+                    if let Some(key) = event_key.take() {
+                        check_block(
+                            zone,
+                            info,
+                            &key,
+                            &lines,
+                            &mut grants,
+                            &mut deletes,
+                            &mut dynamic,
+                        );
+                    }
+                    event_key = Some(normalize_event_key(header));
+                    lines.clear();
+                } else if event_key.is_some() && line.trim_start().starts_with("#END") {
+                    check_block(
+                        zone,
+                        info,
+                        event_key.take().as_deref().unwrap(),
+                        &lines,
+                        &mut grants,
+                        &mut deletes,
+                        &mut dynamic,
+                    );
+                    lines.clear();
+                } else if event_key.is_some() {
+                    lines.push(line.to_string());
+                }
+            }
+            if let Some(key) = event_key {
+                check_block(
+                    zone,
+                    info,
+                    &key,
+                    &lines,
+                    &mut grants,
+                    &mut deletes,
+                    &mut dynamic,
+                );
+            }
+        }
+        assert_eq!(grants, 585, "legacy literal item-grant inventory changed");
+        assert_eq!(deletes, 410, "legacy literal item-delete inventory changed");
+        assert_eq!(
+            dynamic, 1,
+            "legacy dynamic item directive inventory changed"
+        );
+    }
+
+    #[test]
+    fn legacy_output_directives_keep_their_rhai_text_or_python_self_rendering() {
+        fn normalize_event_key(key: &str) -> String {
+            key.trim()
+                .trim_start_matches("이벤트")
+                .trim_start()
+                .trim_start_matches(':')
+                .split_whitespace()
+                .collect::<Vec<_>>()
+                .join(" ")
+        }
+
+        fn collect_mob_paths(directory: &std::path::Path, paths: &mut Vec<std::path::PathBuf>) {
+            for entry in std::fs::read_dir(directory).expect("legacy mob directory") {
+                let path = entry.expect("legacy mob entry").path();
+                if path.is_dir() {
+                    if path.file_name().is_some_and(|name| name != "backup") {
+                        collect_mob_paths(&path, paths);
+                    }
+                } else if path.extension().is_some_and(|extension| extension == "mob") {
+                    paths.push(path);
+                }
+            }
+        }
+
+        fn check_block(
+            zone: &str,
+            info: &serde_json::Map<String, serde_json::Value>,
+            event_key: &str,
+            lines: &[String],
+            outputs: &mut usize,
+            rank_updates: &mut usize,
+        ) {
+            let Some(script) = info.iter().find_map(|(key, value)| {
+                (normalize_event_key(key) == event_key)
+                    .then(|| value.as_str())
+                    .flatten()
+            }) else {
+                return;
+            };
+            // The legacy files contain literal ESC bytes, while a converted
+            // Rhai file may retain them or spell them as `\\x1b`.  Compare
+            // the rendered text, not its source-language escape spelling.
+            let source = std::fs::read_to_string(
+                std::path::Path::new("data/script").join(zone).join(script),
+            )
+            .unwrap_or_else(|error| panic!("missing {zone}/{script}: {error}"))
+            .replace("\\x1b", "\x1b")
+            .replace("\\\"", "\"");
+
+            // Python initializes `rank1` and `rank2` to zero for every
+            // doEvent invocation.  A `$순위갱신` can therefore emit only
+            // after an earlier `$순위기록` in this same event block; orphaned
+            // legacy directives (for example `가쇠종 $보`) are no-ops.
+            let mut rank_recorded = false;
+            for line in lines {
+                let directive = line.trim().trim_start_matches(':').trim_start();
+                if directive.starts_with("$순위기록 ") {
+                    rank_recorded = true;
+                    continue;
+                }
+                let (text, is_rank_update) = if let Some(text) = directive.strip_prefix("$출력 ")
+                {
+                    (text, false)
+                } else if let Some(text) = directive.strip_prefix("$순위갱신 ") {
+                    (text, true)
+                } else {
+                    continue;
+                };
+                let text = text.trim();
+                if text.is_empty() {
+                    continue;
+                }
+                if is_rank_update {
+                    *rank_updates += 1;
+                } else {
+                    *outputs += 1;
+                }
+                if is_rank_update && !rank_recorded {
+                    continue;
+                }
+                // `$순위갱신` has already rendered `[공]` for the caller in
+                // Python before it reaches `sendLine`; converted Rhai keeps
+                // those self-facing strings as `당신…`.  All other source
+                // text remains literal in Rhai.
+                let self_rendered = text
+                    .replace("[공](이/가)", "당신이")
+                    .replace("[공]", "당신")
+                    .replace("[사용자이름]", "당신");
+                assert!(
+                    source.contains(text) || source.contains(&self_rendered),
+                    "{zone}/{script}: missing original {} {text:?}",
+                    if is_rank_update {
+                        "$순위갱신"
+                    } else {
+                        "$출력"
+                    }
+                );
+                if is_rank_update {
+                    assert!(
+                        source.contains("broadcast_output("),
+                        "{zone}/{script}: original $순위갱신 must retain broadcast_output"
+                    );
+                    if text.contains("[공]") {
+                        let self_rendered =
+                            crate::hangul::post_position1(&text.replace("[공]", "당신"));
+                        assert!(
+                            source
+                                .lines()
+                                .any(|line| {
+                                    (line.contains("self_output(") && line.contains(text))
+                                        || line.contains(&self_rendered)
+                                }),
+                            "{zone}/{script}: original $순위갱신 self output must render [공] as 당신"
+                        );
+                    }
+                } else {
+                    // Python $출력 is Player.printScript(): one rendered
+                    // line for the caller and the source line for every
+                    // other player in the same room. Converted Rhai keeps
+                    // the caller text in output() and owns the room text
+                    // explicitly instead of widening it into a global
+                    // rank-style broadcast.
+                    let room_output = format!("room_broadcast_output(\"{text}\")");
+                    assert!(
+                        source.contains(&room_output),
+                        "{zone}/{script}: original $출력 must retain same-room output {text:?}"
+                    );
+                    let self_text = text.replace("[공]", "당신");
+                    let self_output = format!("output(post_position_once(\"{self_text}\"))");
+                    assert!(
+                        source.contains(&self_output),
+                        "{zone}/{script}: original $출력 must retain Python caller rendering {text:?}"
+                    );
+                }
+            }
+        }
+
+        let mut outputs = 0_usize;
+        let mut rank_updates = 0_usize;
+        let mut mob_paths = Vec::new();
+        collect_mob_paths(std::path::Path::new("data/mob"), &mut mob_paths);
+        for path in mob_paths {
+            let json_path = path.with_extension("json");
+            if !json_path.exists() {
+                continue;
+            }
+            let root: serde_json::Value = serde_json::from_str(
+                &std::fs::read_to_string(&json_path)
+                    .unwrap_or_else(|error| panic!("cannot read {}: {error}", json_path.display())),
+            )
+            .unwrap_or_else(|error| panic!("invalid {}: {error}", json_path.display()));
+            let info = root
+                .get("몹정보")
+                .and_then(serde_json::Value::as_object)
+                .unwrap_or_else(|| panic!("missing 몹정보 in {}", json_path.display()));
+            let zone = path
+                .parent()
+                .unwrap()
+                .file_name()
+                .unwrap()
+                .to_str()
+                .unwrap();
+            let mut event_key: Option<String> = None;
+            let mut lines = Vec::new();
+            for line in std::fs::read_to_string(&path)
+                .unwrap_or_else(|error| panic!("cannot read {}: {error}", path.display()))
+                .lines()
+            {
+                if let Some(header) = line.trim_start().strip_prefix("#이벤트") {
+                    if let Some(key) = event_key.take() {
+                        check_block(zone, info, &key, &lines, &mut outputs, &mut rank_updates);
+                    }
+                    event_key = Some(normalize_event_key(header));
+                    lines.clear();
+                } else if event_key.is_some() && line.trim_start().starts_with("#END") {
+                    check_block(
+                        zone,
+                        info,
+                        event_key.take().as_deref().unwrap(),
+                        &lines,
+                        &mut outputs,
+                        &mut rank_updates,
+                    );
+                    lines.clear();
+                } else if event_key.is_some() {
+                    lines.push(line.to_string());
+                }
+            }
+            if let Some(key) = event_key {
+                check_block(zone, info, &key, &lines, &mut outputs, &mut rank_updates);
+            }
+        }
+        assert_eq!(outputs, 570, "legacy $출력 directive inventory changed");
+        assert_eq!(
+            rank_updates, 94,
+            "legacy $순위갱신 directive inventory changed"
+        );
+    }
+
+    #[test]
+    fn legacy_event_checks_keep_their_rhai_predicates_and_negation() {
+        fn normalize_event_key(key: &str) -> String {
+            key.trim()
+                .trim_start_matches("이벤트")
+                .trim_start()
+                .trim_start_matches(':')
+                .split_whitespace()
+                .collect::<Vec<_>>()
+                .join(" ")
+        }
+
+        fn collect_mob_paths(directory: &std::path::Path, paths: &mut Vec<std::path::PathBuf>) {
+            for entry in std::fs::read_dir(directory).expect("legacy mob directory") {
+                let path = entry.expect("legacy mob entry").path();
+                if path.is_dir() {
+                    if path.file_name().is_some_and(|name| name != "backup") {
+                        collect_mob_paths(&path, paths);
+                    }
+                } else if path.extension().is_some_and(|extension| extension == "mob") {
+                    paths.push(path);
+                }
+            }
+        }
+
+        fn check_block(
+            zone: &str,
+            info: &serde_json::Map<String, serde_json::Value>,
+            event_key: &str,
+            lines: &[String],
+            checks: &mut usize,
+        ) {
+            let Some(script) = info.iter().find_map(|(key, value)| {
+                (normalize_event_key(key) == event_key)
+                    .then(|| value.as_str())
+                    .flatten()
+            }) else {
+                return;
+            };
+            let source = std::fs::read_to_string(
+                std::path::Path::new("data/script").join(zone).join(script),
+            )
+            .unwrap_or_else(|error| panic!("missing {zone}/{script}: {error}"));
+            for line in lines {
+                let directive = line.trim().trim_start_matches(':').trim_start();
+                let (key, predicate) = if let Some(key) = directive.strip_prefix("$이벤트확인! ")
+                {
+                    (key, "!check_event")
+                } else if let Some(key) = directive.strip_prefix("$이벤트확인 ") {
+                    (key, "check_event")
+                } else {
+                    continue;
+                };
+                let key = key.split('；').next().unwrap().trim();
+                assert!(!key.is_empty(), "{zone}/{script}: empty original event key");
+                *checks += 1;
+                assert!(
+                    source.contains(&format!("{predicate}(\"{key}\")")),
+                    "{zone}/{script}: missing original ${} {key}",
+                    if predicate.starts_with('!') {
+                        "이벤트확인!"
+                    } else {
+                        "이벤트확인"
+                    }
+                );
+            }
+        }
+
+        let mut checks = 0_usize;
+        let mut mob_paths = Vec::new();
+        collect_mob_paths(std::path::Path::new("data/mob"), &mut mob_paths);
+        for path in mob_paths {
+            let json_path = path.with_extension("json");
+            if !json_path.exists() {
+                continue;
+            }
+            let root: serde_json::Value = serde_json::from_str(
+                &std::fs::read_to_string(&json_path)
+                    .unwrap_or_else(|error| panic!("cannot read {}: {error}", json_path.display())),
+            )
+            .unwrap_or_else(|error| panic!("invalid {}: {error}", json_path.display()));
+            let info = root
+                .get("몹정보")
+                .and_then(serde_json::Value::as_object)
+                .unwrap_or_else(|| panic!("missing 몹정보 in {}", json_path.display()));
+            let zone = path
+                .parent()
+                .unwrap()
+                .file_name()
+                .unwrap()
+                .to_str()
+                .unwrap();
+            let mut event_key: Option<String> = None;
+            let mut lines = Vec::new();
+            for line in std::fs::read_to_string(&path)
+                .unwrap_or_else(|error| panic!("cannot read {}: {error}", path.display()))
+                .lines()
+            {
+                if let Some(header) = line.trim_start().strip_prefix("#이벤트") {
+                    if let Some(key) = event_key.take() {
+                        check_block(zone, info, &key, &lines, &mut checks);
+                    }
+                    event_key = Some(normalize_event_key(header));
+                    lines.clear();
+                } else if event_key.is_some() && line.trim_start().starts_with("#END") {
+                    check_block(
+                        zone,
+                        info,
+                        event_key.take().as_deref().unwrap(),
+                        &lines,
+                        &mut checks,
+                    );
+                    lines.clear();
+                } else if event_key.is_some() {
+                    lines.push(line.to_string());
+                }
+            }
+            if let Some(key) = event_key {
+                check_block(zone, info, &key, &lines, &mut checks);
+            }
+        }
+        assert_eq!(
+            checks, 1_012,
+            "legacy $이벤트확인 directive inventory changed"
+        );
+    }
+
     fn place_event_mob(zone: &str, source_key: &str, room: &str) -> (String, u64) {
+        static FIXTURE_SEQUENCE: AtomicU64 = AtomicU64::new(1);
         let mut world = crate::world::get_world_state().write().unwrap();
         let data = world
             .mob_cache
             .load_mob(zone, source_key)
             .unwrap_or_else(|_| panic!("missing event mob fixture {zone}:{source_key}"))
             .clone();
-        let key = format!("{zone}:{source_key}-회귀-{}", std::process::id());
+        let fixture_id = FIXTURE_SEQUENCE.fetch_add(1, Ordering::Relaxed);
+        let key = format!(
+            "{zone}:{source_key}-회귀-{}-{fixture_id}",
+            std::process::id()
+        );
         world.mob_cache.insert_mob_data(key.clone(), data.clone());
         let mob = MobInstance::new(key.clone(), zone.to_string(), room.to_string(), &data);
         let instance_id = mob.instance_id;
@@ -1439,6 +5598,1956 @@ mod tests {
             .unwrap();
         mob.alive = false;
         mob.act = 2;
+    }
+
+    #[test]
+    fn legacy_combat_start_keeps_python_failure_order_and_only_starts_once() {
+        let room = format!("전투시작회귀-{}", std::process::id());
+        let (mob_key, instance_id) = place_event_mob("백두산", "3400", &room);
+        let mut body = Body::new();
+        body.set("이름", "전투시작회귀");
+
+        let CommandResult::MobEvent { output_lines, .. } =
+            super::try_mob_event(&mut body, "백두산", &room, "음양소요 비무")
+                .expect("combat event")
+        else {
+            panic!("combat start was not an event");
+        };
+        assert!(output_lines.iter().any(|line| line.contains("감히")));
+        assert_eq!(body.act, crate::player::ActState::Fight);
+        assert_eq!(
+            crate::script::combat_commands::combat_target_instance_ids(&body),
+            vec![instance_id]
+        );
+
+        let CommandResult::MobEvent { output_lines, .. } =
+            super::try_mob_event(&mut body, "백두산", &room, "음양소요 비무")
+                .expect("repeat combat event")
+        else {
+            panic!("repeat combat start was not an event");
+        };
+        assert!(output_lines
+            .iter()
+            .any(|line| line.contains("이미 공격중이에요")));
+
+        crate::script::combat_commands::remove_combat_target_instance_id(&mut body, instance_id);
+        body.act = crate::player::ActState::Stand;
+        {
+            let mut world = crate::world::get_world_state().write().unwrap();
+            let mob = world
+                .mob_cache
+                .get_all_mobs_in_room_mut("백두산", &room)
+                .unwrap()
+                .iter_mut()
+                .find(|mob| mob.instance_id == instance_id)
+                .unwrap();
+            mob.act = 1;
+            mob.targets = vec!["다른무림인".into()];
+        }
+        let CommandResult::MobEvent { output_lines, .. } =
+            super::try_mob_event(&mut body, "백두산", &room, "음양소요 비무")
+                .expect("busy combat event")
+        else {
+            panic!("busy combat start was not an event");
+        };
+        assert!(output_lines
+            .iter()
+            .any(|line| line.contains("다른 사람과 전투중")));
+
+        {
+            let mut world = crate::world::get_world_state().write().unwrap();
+            let mob = world
+                .mob_cache
+                .get_all_mobs_in_room_mut("백두산", &room)
+                .unwrap()
+                .iter_mut()
+                .find(|mob| mob.instance_id == instance_id)
+                .unwrap();
+            mob.act = 0;
+            mob.targets.clear();
+        }
+        body.act = crate::player::ActState::Fight;
+        let CommandResult::MobEvent { output_lines, .. } =
+            super::try_mob_event(&mut body, "백두산", &room, "음양소요 비무")
+                .expect("self busy combat event")
+        else {
+            panic!("self busy combat start was not an event");
+        };
+        assert!(output_lines
+            .iter()
+            .any(|line| line.contains("현재의 비무에 신경을 집중")));
+
+        mark_event_mob_corpse("백두산", &room, instance_id);
+        body.act = crate::player::ActState::Stand;
+        let CommandResult::MobEvent { output_lines, .. } =
+            super::try_mob_event(&mut body, "백두산", &room, "음양소요 비무")
+                .expect("corpse combat event")
+        else {
+            panic!("corpse combat start was not an event");
+        };
+        assert!(output_lines
+            .iter()
+            .any(|line| line.contains("무슨 말인지 모르겠어요")));
+
+        let mut world = crate::world::get_world_state().write().unwrap();
+        world.mob_cache.remove_mob(&mob_key);
+    }
+
+    #[test]
+    fn legacy_combat_start_directives_keep_a_rhai_combat_transition() {
+        fn normalize_event_key(key: &str) -> String {
+            key.trim()
+                .trim_start_matches("이벤트")
+                .trim_start()
+                .trim_start_matches(':')
+                .split_whitespace()
+                .collect::<Vec<_>>()
+                .join(" ")
+        }
+
+        fn collect_mob_paths(directory: &std::path::Path, paths: &mut Vec<std::path::PathBuf>) {
+            for entry in std::fs::read_dir(directory).expect("legacy mob directory") {
+                let path = entry.expect("legacy mob entry").path();
+                if path.is_dir() {
+                    if path.file_name().is_some_and(|name| name != "backup") {
+                        collect_mob_paths(&path, paths);
+                    }
+                } else if path.extension().is_some_and(|extension| extension == "mob") {
+                    paths.push(path);
+                }
+            }
+        }
+
+        let mut paths = Vec::new();
+        collect_mob_paths(std::path::Path::new("data/mob"), &mut paths);
+        let mut calls = 0_usize;
+        for path in paths {
+            let json_path = path.with_extension("json");
+            if !json_path.exists() {
+                continue;
+            }
+            let root: serde_json::Value = serde_json::from_str(
+                &std::fs::read_to_string(&json_path)
+                    .unwrap_or_else(|error| panic!("cannot read {}: {error}", json_path.display())),
+            )
+            .unwrap_or_else(|error| panic!("invalid {}: {error}", json_path.display()));
+            let info = root
+                .get("몹정보")
+                .and_then(serde_json::Value::as_object)
+                .unwrap_or_else(|| panic!("missing 몹정보 in {}", json_path.display()));
+            let zone = path
+                .parent()
+                .unwrap()
+                .file_name()
+                .unwrap()
+                .to_str()
+                .unwrap();
+            let source = std::fs::read_to_string(&path)
+                .unwrap_or_else(|error| panic!("cannot read {}: {error}", path.display()));
+            let mut event_key: Option<String> = None;
+            let mut lines = Vec::new();
+            let mut check_block = |event_key: &str, lines: &[String]| {
+                if !lines.iter().any(|line| line.trim() == ":$전투시작") {
+                    return;
+                }
+                let script = info
+                    .iter()
+                    .find_map(|(key, value)| {
+                        (normalize_event_key(key) == event_key)
+                            .then(|| value.as_str())
+                            .flatten()
+                    })
+                    .unwrap_or_else(|| {
+                        panic!(
+                            "{zone}/{}: missing Rhai mapping for {event_key}",
+                            path.display()
+                        )
+                    });
+                let rhai_path = std::path::Path::new("data/script").join(zone).join(script);
+                let rhai = std::fs::read_to_string(&rhai_path)
+                    .unwrap_or_else(|error| panic!("cannot read {}: {error}", rhai_path.display()));
+                assert!(
+                    ["try_start_selected_mob_combat()", "start_event_combat()"][..]
+                        .iter()
+                        .any(|call| rhai.contains(call)),
+                    "{zone}/{script}: missing Rhai combat transition for original $전투시작"
+                );
+                calls += lines
+                    .iter()
+                    .filter(|line| line.trim() == ":$전투시작")
+                    .count();
+            };
+            for line in source.lines() {
+                if let Some(header) = line.trim_start().strip_prefix("#이벤트") {
+                    if let Some(key) = event_key.take() {
+                        check_block(&key, &lines);
+                    }
+                    event_key = Some(normalize_event_key(header));
+                    lines.clear();
+                } else if event_key.is_some() && line.trim_start().starts_with("#END") {
+                    check_block(event_key.take().as_deref().unwrap(), &lines);
+                    lines.clear();
+                } else if event_key.is_some() {
+                    lines.push(line.to_string());
+                }
+            }
+            if let Some(key) = event_key {
+                check_block(&key, &lines);
+            }
+        }
+        assert_eq!(calls, 82, "legacy $전투시작 directive inventory changed");
+    }
+
+    #[test]
+    fn direct_legacy_combat_start_scripts_keep_python_refusal_messages() {
+        // These source scripts originally used a fire-and-forget helper.  A
+        // real `$전투시작` must still reject an already-fighting caller and a
+        // corpse, just as the Python dispatcher does.
+        let room = format!("직접전투거절회귀-{}", std::process::id());
+        let (mob_key, instance_id) = place_event_mob("감숙성", "1위", &room);
+
+        let mut fighting = Body::new();
+        fighting.set("이름", "직접전투자기전투회귀");
+        fighting.act = crate::player::ActState::Fight;
+        add_test_items(&mut fighting, "도전장9", 1);
+        let CommandResult::MobEvent { output_lines, .. } =
+            super::try_mob_event(&mut fighting, "감숙성", &room, "천마혈검 도전")
+                .expect("source challenge event")
+        else {
+            panic!("source challenge event must finish immediately");
+        };
+        assert!(
+            output_lines
+                .iter()
+                .any(|line| line.contains("현재의 비무에 신경")),
+            "{output_lines:?}"
+        );
+        assert!(
+            !crate::script::combat_commands::combat_target_instance_ids(&fighting)
+                .contains(&instance_id)
+        );
+
+        mark_event_mob_corpse("감숙성", &room, instance_id);
+        let mut corpse = Body::new();
+        corpse.set("이름", "직접전투시체회귀");
+        add_test_items(&mut corpse, "도전장9", 1);
+        let CommandResult::MobEvent { output_lines, .. } =
+            super::try_mob_event(&mut corpse, "감숙성", &room, "천마혈검 도전")
+                .expect("corpse challenge event")
+        else {
+            panic!("corpse challenge event must finish immediately");
+        };
+        assert!(
+            output_lines
+                .iter()
+                .any(|line| line.contains("무슨 말인지 모르겠어요")),
+            "{output_lines:?}"
+        );
+        assert!(
+            !crate::script::combat_commands::combat_target_instance_ids(&corpse)
+                .contains(&instance_id)
+        );
+
+        crate::world::get_world_state()
+            .write()
+            .unwrap()
+            .mob_cache
+            .remove_mob(&mob_key);
+        let _ = std::fs::remove_file("data/user/직접전투자기전투회귀.json");
+        let _ = std::fs::remove_file("data/user/직접전투시체회귀.json");
+    }
+
+    #[test]
+    fn legacy_stat_change_updates_the_python_named_attribute() {
+        let room = format!("특성치변경회귀-{}", std::process::id());
+        let (mob_key, _) = place_event_mob("사천성", "무면옹", &room);
+        let mut body = Body::new();
+        body.set("이름", "특성치변경회귀");
+        body.set("힘", 99_i64);
+        add_test_items(&mut body, "합성6-2", 1);
+
+        super::try_mob_event(&mut body, "사천성", &room, "거지 대화").expect("stat-change event");
+        assert_eq!(body.get_int("힘"), 100);
+        assert!(!body_has_item_spec(&body, "합성6-2"));
+
+        let mut world = crate::world::get_world_state().write().unwrap();
+        world.mob_cache.remove_mob(&mob_key);
+    }
+
+    #[test]
+    fn legacy_item_option_and_gender_directives_change_only_the_selected_state() {
+        let room = format!("아이템성별동작회귀-{}", std::process::id());
+        let (smith_key, _) = place_event_mob("낙양성", "합체맨", &room);
+        // Python `$아이템옵션삭제 $변수:1` rejects only a missing item.  An
+        // existing item whose `옵션` is already the empty string still runs
+        // `Item.delOption()` (because `'' != None`) and follows the success
+        // prose.  Keep both sides of that slightly surprising rule tied to
+        // the authored NPC event.
+        let mut missing_item = Body::new();
+        missing_item.set("이름", "속성삭제없음회귀");
+        let CommandResult::MobEvent { output_lines, .. } = super::try_mob_event(
+            &mut missing_item,
+            "낙양성",
+            &room,
+            "대장장이 없는검 속성삭제",
+        )
+        .expect("missing option-delete event") else {
+            panic!("missing option-delete event returned a non-event result");
+        };
+        assert!(output_lines.iter().any(|line| line.contains("뭘 말인가")));
+
+        let mut empty_option = Body::new();
+        empty_option.set("이름", "속성삭제빈옵션회귀");
+        let mut empty_item = Object::new();
+        empty_item.set("이름", "빈옵션검");
+        empty_item.set("인덱스", "빈옵션검");
+        empty_option
+            .object
+            .objs
+            .push(Arc::new(Mutex::new(empty_item)));
+        let CommandResult::MobEvent { output_lines, .. } = super::try_mob_event(
+            &mut empty_option,
+            "낙양성",
+            &room,
+            "대장장이 빈옵션검 속성삭제",
+        )
+        .expect("empty option-delete event") else {
+            panic!("empty option-delete event returned a non-event result");
+        };
+        assert!(output_lines.iter().any(|line| line.contains("좋아!!")));
+
+        let mut body = Body::new();
+        body.set("이름", "아이템성별동작회귀");
+        let mut item = Object::new();
+        item.set("이름", "시험검");
+        item.set("인덱스", "시험검");
+        item.set("옵션", "힘 10");
+        item.set("아이템속성", "버리지못함");
+        body.object.objs.push(Arc::new(Mutex::new(item)));
+
+        let CommandResult::MobEvent { output_lines, .. } =
+            super::try_mob_event(&mut body, "낙양성", &room, "대장장이 시험검 속성삭제")
+                .expect("option-delete event")
+        else {
+            panic!("option-delete event returned a non-event result");
+        };
+        assert!(output_lines.iter().any(|line| line.contains("좋아!!")));
+        let item = body.object.objs[0].lock().unwrap();
+        assert!(!item.attr.contains_key("옵션"));
+        assert!(!item.attr.contains_key("아이템속성"));
+        drop(item);
+
+        let (scholar_key, _) = place_event_mob("무림맹", "대학사", &room);
+        for (initial_sex, expected_sex, marker) in [
+            ("여", "남", "남자가 되었습니다"),
+            ("남", "여", "여자가 되었습니다"),
+        ] {
+            let mut sex_body = Body::new();
+            sex_body.set("이름", format!("규화성별{initial_sex}회귀"));
+            sex_body.set("성별", initial_sex);
+            sex_body.set("힘", 100_i64);
+            sex_body.set("최고내공", 50_i64);
+            add_test_items(&mut sex_body, "규화보전", 1);
+            let CommandResult::MobEvent { output_lines, .. } =
+                super::try_mob_event(&mut sex_body, "무림맹", &room, "대학사 규화보전")
+                    .expect("sunflower-manual event")
+            else {
+                panic!("sunflower-manual event returned a non-event result");
+            };
+
+            // Python `$성별확인` skips its first block only for 남.  Thus
+            // the following `$남자설정` / `$여자설정` alternates the sex,
+            // after the preceding skill, item, stat, and event directives.
+            assert_eq!(sex_body.get_string("성별"), expected_sex);
+            assert!(output_lines.iter().any(|line| line.contains(marker)));
+            assert!(sex_body.skill_list.iter().any(|skill| skill == "규화보전"));
+            assert!(!body_has_item_spec(&sex_body, "규화보전"));
+            assert_eq!(sex_body.get_int("힘"), 400);
+            assert_eq!(sex_body.get_int("최고내공"), 350);
+            assert_eq!(get_user_event(&sex_body, "규화보전이벤트"), "1");
+        }
+
+        let mut world = crate::world::get_world_state().write().unwrap();
+        world.mob_cache.remove_mob(&smith_key);
+        world.mob_cache.remove_mob(&scholar_key);
+    }
+
+    #[test]
+    fn legacy_stat_set_replaces_the_python_named_attribute() {
+        let mut body = Body::new();
+        body.set("이름", "특성치설정회귀");
+        body.set("레벨", 99_i64);
+        body.set("나이", 100_i64);
+        run_zone_event(&mut body, "낙양성", "요월_대화_대_백세.rhai", None);
+        assert_eq!(body.get_int("레벨"), 1_000);
+
+        let mut too_young = Body::new();
+        too_young.set("이름", "특성치설정미달회귀");
+        too_young.set("레벨", 99_i64);
+        too_young.set("나이", 99_i64);
+        let (output, _) = run_zone_event(&mut too_young, "낙양성", "요월_대화_대_백세.rhai", None);
+        assert_eq!(too_young.get_int("레벨"), 99);
+        assert!(output.iter().any(|line| line.contains("100살 안된 어린이")));
+    }
+
+    #[test]
+    fn legacy_stat_copy_changes_selected_mob_combat_attributes() {
+        let room = format!("특성치복사회귀-{}", std::process::id());
+        let (mob_key, instance_id) = place_event_mob("혈탑", "무림인00", &room);
+        let mut body = Body::new();
+        body.set("이름", "특성치복사회귀");
+        body.set("최고체력", 1_000_i64);
+        body.set("힘", 200_i64);
+        body.set("레벨", 50_i64);
+        body.set("맷집", 70_i64);
+        body.set("민첩성", 80_i64);
+
+        super::try_mob_event(&mut body, "혈탑", &room, "혈탑살수 공격")
+            .expect("stat-copy combat event");
+        let world = crate::world::get_world_state().read().unwrap();
+        let mob = world
+            .mob_cache
+            .get_all_mobs_in_room("혈탑", &room)
+            .into_iter()
+            .find(|mob| mob.instance_id == instance_id)
+            .unwrap();
+        assert_eq!(mob.hp, 20_000);
+        assert_eq!(mob.max_hp, 20_000);
+        assert_eq!(mob.strength, 600);
+        assert_eq!(mob.level, 200);
+        assert_eq!(mob.arm, 70);
+        assert_eq!(mob.agility, 80);
+        assert_eq!(
+            (mob.miss, mob.hit, mob.luck, mob.critical),
+            (0, 400, 100, 100)
+        );
+        drop(world);
+
+        let mut world = crate::world::get_world_state().write().unwrap();
+        world.mob_cache.remove_mob(&mob_key);
+    }
+
+    #[test]
+    fn low_and_high_stat_copy_variants_match_python_multipliers() {
+        let mut body = Body::new();
+        body.set("이름", "특성치복사저고회귀");
+        body.set("최고체력", 1_000_i64);
+        body.set("힘", 200_i64);
+        body.set("레벨", 50_i64);
+        body.set("맷집", 70_i64);
+        body.set("민첩성", 80_i64);
+
+        let low_room = format!("특성치복사저회귀-{}", std::process::id());
+        let (low_key, low_instance) = place_event_mob("동정호", "적송", &low_room);
+        super::try_mob_event(&mut body, "동정호", &low_room, "적송 약속 대화")
+            .expect("low stat-copy event");
+        let world = crate::world::get_world_state().read().unwrap();
+        let low = world
+            .mob_cache
+            .get_all_mobs_in_room("동정호", &low_room)
+            .into_iter()
+            .find(|mob| mob.instance_id == low_instance)
+            .unwrap();
+        assert_eq!((low.hp, low.max_hp), (1_000, 1_000));
+        assert_eq!(
+            (low.strength, low.level, low.arm, low.agility),
+            (200, 200, 70, 80)
+        );
+        assert_eq!(
+            (low.miss, low.hit, low.luck, low.critical),
+            (0, 400, 100, 100)
+        );
+        drop(world);
+
+        // A fresh target is necessary because the first event placed the
+        // player in combat with 적송.
+        body.clear_target(None);
+        body.act = crate::player::ActState::Stand;
+        let high_room = format!("특성치복사고회귀-{}", std::process::id());
+        let (high_key, high_instance) = place_event_mob("수정동굴", "반영", &high_room);
+        super::try_mob_event(&mut body, "수정동굴", &high_room, "반영 공격")
+            .expect("high stat-copy event");
+        let world = crate::world::get_world_state().read().unwrap();
+        let high = world
+            .mob_cache
+            .get_all_mobs_in_room("수정동굴", &high_room)
+            .into_iter()
+            .find(|mob| mob.instance_id == high_instance)
+            .unwrap();
+        assert_eq!((high.hp, high.max_hp), (30_000, 30_000));
+        assert_eq!(
+            (high.strength, high.level, high.arm, high.agility),
+            (1_600, 200, 210, 80)
+        );
+        assert_eq!(
+            (high.miss, high.hit, high.luck, high.critical),
+            (0, 400, 100, 100)
+        );
+        drop(world);
+
+        let mut world = crate::world::get_world_state().write().unwrap();
+        world.mob_cache.remove_mob(&low_key);
+        world.mob_cache.remove_mob(&high_key);
+    }
+
+    #[test]
+    fn intermediate_training_applies_only_python_training_stats_after_combat_starts() {
+        let room = format!("중급수련회귀-{}", std::process::id());
+        let (mob_key, instance_id) = place_event_mob("중급수련장", "교관", &room);
+        let mut body = Body::new();
+        body.set("이름", "중급수련회귀");
+        body.set("힘", 25_099_i64);
+        body.set("레벨", 77_i64);
+
+        super::try_mob_event(&mut body, "중급수련장", &room, "교관 수련")
+            .expect("intermediate training event");
+        assert_eq!(body.act, crate::player::ActState::Fight);
+        let world = crate::world::get_world_state().read().unwrap();
+        let mob = world
+            .mob_cache
+            .get_all_mobs_in_room("중급수련장", &room)
+            .into_iter()
+            .find(|mob| mob.instance_id == instance_id)
+            .unwrap();
+        assert_eq!(mob.strength, 251);
+        assert_eq!(mob.level, 227);
+        assert_eq!(mob.miss, 0);
+        assert_eq!(mob.act, 1);
+        drop(world);
+
+        let mut world = crate::world::get_world_state().write().unwrap();
+        world.mob_cache.remove_mob(&mob_key);
+    }
+
+    #[test]
+    fn eundun_event_keeps_python_reset_and_transfer_state_before_moving() {
+        let room = format!("은둔칩거회귀-{}", std::process::id());
+        let (mob_key, _) = place_event_mob("백두산", "4100", &room);
+        let mut body = Body::new();
+        body.set("이름", "은둔칩거회귀");
+        body.set("성격", "선인");
+        body.set("힘", 2_100_i64);
+        body.set("레벨", 999_i64);
+        body.set("현재경험치", 100_i64);
+        body.set("힘경험치", 100_i64);
+        body.set("맷집경험치", 100_i64);
+        body.set("전직", 3_i64);
+        super::set_user_event(&mut body, "선인끝", "1");
+
+        let CommandResult::MobEvent { set_position, .. } =
+            super::try_mob_event(&mut body, "백두산", &room, "연남천 은둔칩거")
+                .expect("eundun event")
+        else {
+            panic!("eundun returned a non-event result");
+        };
+        assert_eq!(set_position, Some(("전직".into(), "1".into())));
+        assert_eq!(body.get_int("힘"), 100);
+        assert_eq!(body.get_int("레벨"), 1);
+        assert_eq!(body.get_int("현재경험치"), 0);
+        assert_eq!(body.get_int("힘경험치"), 0);
+        assert_eq!(body.get_int("맷집경험치"), 0);
+        assert_eq!(body.get_int("전직"), 4);
+        assert_eq!(body.get_string("기존성격"), "선인");
+        assert_eq!(body.get_string("성격"), "은둔칩거");
+        assert_eq!(body.get_string("이벤트설정리스트"), "은둔칩거끝");
+        assert_eq!(body.get_string("위치각인"), "낙양성:1");
+
+        let mut world = crate::world::get_world_state().write().unwrap();
+        world.mob_cache.remove_mob(&mob_key);
+        let _ = std::fs::remove_file("data/user/은둔칩거회귀.json");
+    }
+
+    #[test]
+    fn lottery_event_uses_full_legacy_pool_and_marks_the_single_reward_untradeable() {
+        let pool = super::lottery_attribute_item_index;
+        let source = std::fs::read_to_string("data/mob/낙양성/복권맨.mob").unwrap();
+        let line = source
+            .lines()
+            .find(|line| line.starts_with(":$속성템주기 "))
+            .unwrap();
+        let candidates = line
+            .trim_start_matches(":$속성템주기 ")
+            .split_whitespace()
+            .collect::<Vec<_>>();
+        for index in &candidates[..candidates.len() - 1] {
+            assert!(
+                super::object_from_item_json(index).is_some(),
+                "Python getStrCnt may select every authored lottery candidate: {index}"
+            );
+        }
+        let selected = pool().expect("legacy lottery candidate");
+        assert!(candidates[..candidates.len() - 1].contains(&selected.as_str()));
+
+        let room = format!("복권속성회귀-{}", std::process::id());
+        let (mob_key, _) = place_event_mob("낙양성", "복권맨", &room);
+        let mut body = Body::new();
+        body.set("이름", "복권속성회귀");
+        body.set("레벨", 100_i64);
+        add_test_items(&mut body, "강철판", 1);
+        super::try_mob_event(&mut body, "낙양성", &room, "복권맨 겜블").expect("lottery event");
+        assert!(!body_has_item_spec(&body, "강철판"));
+        let reward = body.object.objs.first().unwrap().lock().unwrap();
+        assert!(reward.checkAttr("아이템속성", "버리지못함"));
+        assert!(reward.checkAttr("아이템속성", "줄수없음"));
+        drop(reward);
+        let mut world = crate::world::get_world_state().write().unwrap();
+        world.mob_cache.remove_mob(&mob_key);
+    }
+
+    #[test]
+    fn lottery_herb_reward_keeps_python_get_str_cnt_candidate_pool() {
+        let source = std::fs::read_to_string("data/mob/낙양성/복권맨.mob").unwrap();
+        let line = source
+            .lines()
+            .find(|line| line.contains("$아이템주기 합성1 합성2"))
+            .expect("legacy herb lottery directive");
+        let words = line
+            .split("$아이템주기")
+            .nth(1)
+            .unwrap()
+            .split_whitespace()
+            .collect::<Vec<_>>();
+        let candidates = &words[..words.len() - 1];
+        let mut body = Body::new();
+        body.set("이름", "복권약초회귀");
+        add_test_items(&mut body, "복권3", 1);
+
+        run_zone_event(&mut body, "낙양성", "복권맨_긁어_긁_복권.rhai", None);
+
+        assert!(!body_has_item_spec(&body, "복권3"));
+        let items = body
+            .object
+            .objs
+            .iter()
+            .map(|item| item.lock().unwrap().getString("인덱스"))
+            .collect::<Vec<_>>();
+        assert_eq!(items.len(), 1);
+        assert!(
+            candidates.contains(&items[0].as_str()),
+            "unexpected lottery herb index {:?}",
+            items[0]
+        );
+    }
+
+    #[test]
+    fn legacy_hp_loss_uses_python_minus_hp_zero_floor() {
+        let room = format!("체력감소회귀-{}", std::process::id());
+        let (mob_key, _) = place_event_mob("사천성", "무면옹", &room);
+        let mut body = Body::new();
+        body.set("이름", "체력감소회귀");
+        body.set("체력", 100_i64);
+
+        super::try_mob_event(&mut body, "사천성", &room, "거지 대화").expect("hp-loss event");
+        assert_eq!(body.get_int("체력"), 0);
+        assert_eq!(body.act, crate::player::ActState::Death);
+        assert!(body.targets.is_empty());
+        assert!(body.active_skills.is_empty());
+        let death_events =
+            crate::script::combat_commands::take_combat_presentation_events(&mut body);
+        assert!(death_events.iter().any(|event| {
+            event
+                .clone()
+                .try_cast::<rhai::Map>()
+                .and_then(|event| event.get("kind").cloned())
+                .is_some_and(|kind| kind.to_string() == "player_death")
+        }));
+
+        let mut world = crate::world::get_world_state().write().unwrap();
+        world.mob_cache.remove_mob(&mob_key);
+    }
+
+    #[test]
+    fn migrated_hp_loss_directives_keep_the_python_fallback_branches() {
+        let _rank_guard = RANK_TEST_LOCK.lock().unwrap();
+        let mut body = Body::new();
+        body.set("이름", "체력분기회귀");
+
+        let lake_room = format!("천지호체력회귀-{}", std::process::id());
+        let (lake_key, _) = place_event_mob("백두산", "천지호", &lake_room);
+        body.set("체력", 500_i64);
+        let CommandResult::MobEvent { output_lines, .. } =
+            super::try_mob_event(&mut body, "백두산", &lake_room, "천지 허공답보")
+                .expect("lake fallback event")
+        else {
+            panic!("lake fallback returned a non-event result");
+        };
+        assert!(
+            output_lines
+                .iter()
+                .any(|line| line.contains("호수에 떨어져")),
+            "{output_lines:?}"
+        );
+        assert_eq!(body.get_int("체력"), 0);
+
+        let paper_room = format!("창호지체력회귀-{}", std::process::id());
+        let (paper_key, _) = place_event_mob("낙양성", "1-2", &paper_room);
+        body.set("체력", 500_i64);
+        body.set("최고내공", 0_i64);
+        crate::world::rank::rank_clear("최고내공");
+        // Python `$순위기록 200 최고내공` accepts rank 2 as well.  Fill the
+        // complete 200-slot board so this body really takes the rank-0
+        // fallback branch rather than merely missing first place.
+        for rank in 0..200 {
+            crate::world::rank::rank_write(
+                "최고내공",
+                &format!("창호지기존순위자{rank}"),
+                10_000 - rank,
+                200,
+            );
+        }
+        let CommandResult::MobEvent { output_lines, .. } =
+            super::try_mob_event(&mut body, "낙양성", &paper_room, "창호지 건너")
+                .expect("paper fallback event")
+        else {
+            panic!("paper fallback returned a non-event result");
+        };
+        assert!(output_lines.iter().any(|line| line.contains("철푸덕")));
+        assert_eq!(body.get_int("체력"), 400);
+
+        let master_room = format!("광무체력회귀-{}", std::process::id());
+        let (master_key, _) = place_event_mob("낙양성", "기타맨", &master_room);
+        body.set("체력", 500_i64);
+        body.set("이벤트설정리스트", "무공삭제");
+        let CommandResult::MobEvent { output_lines, .. } =
+            super::try_mob_event(&mut body, "낙양성", &master_room, "광무 없는무공 무공삭제")
+                .expect("master missing-skill event")
+        else {
+            panic!("master missing-skill returned a non-event result");
+        };
+        assert!(output_lines.iter().any(|line| line.contains("우롱")));
+        assert_eq!(body.get_int("체력"), 0);
+        assert!(get_user_event(&body, "무공삭제").is_empty());
+
+        let mut world = crate::world::get_world_state().write().unwrap();
+        for key in [lake_key, paper_key, master_key] {
+            world.mob_cache.remove_mob(&key);
+        }
+        crate::world::rank::rank_clear("최고내공");
+    }
+
+    #[test]
+    fn legacy_corpse_unique_rewards_keep_their_live_target_branches() {
+        clear_test_oneitems(&["73", "66", "71"]);
+        let mut body = Body::new();
+        body.set("이름", "시체기연회귀");
+
+        let sword_room = format!("패마검회귀-{}", std::process::id());
+        let (sword_key, sword_instance) = place_event_mob("산서성", "8", &sword_room);
+        super::try_mob_event(&mut body, "산서성", &sword_room, "수라혈마존 부셔")
+            .expect("demon sword event");
+        assert!(body_has_item_spec(&body, "73"));
+        assert_eq!(get_user_event(&body, "패마검"), "1");
+        {
+            let world = crate::world::get_world_state().read().unwrap();
+            let mob = world
+                .mob_cache
+                .get_all_mobs_in_room("산서성", &sword_room)
+                .into_iter()
+                .find(|mob| mob.instance_id == sword_instance)
+                .unwrap();
+            assert!(!mob.alive && mob.act == 2);
+        }
+
+        clear_test_oneitems(&["66"]);
+        let devil_room = format!("천마신검회귀-{}", std::process::id());
+        let (devil_key, _) = place_event_mob("낙양성", "88", &devil_room);
+        super::try_mob_event(&mut body, "낙양성", &devil_room, "백골 부셔")
+            .expect("heavenly demon sword event");
+        assert!(body_has_item_spec(&body, "66"));
+        assert_eq!(get_user_event(&body, "아수라혈천마왕"), "1");
+
+        clear_test_oneitems(&["71"]);
+        let elder_room = format!("태상노군회귀-{}", std::process::id());
+        let (elder_key, _) = place_event_mob("호북성", "36", &elder_room);
+        super::try_mob_event(&mut body, "호북성", &elder_room, "태상노군 절")
+            .expect("taesang elder event");
+        assert!(body_has_item_spec(&body, "71"));
+        assert!(body_has_item_spec(&body, "492"));
+        assert_eq!(get_user_event(&body, "태상노군"), "1");
+
+        let child_room = format!("개구리가죽회귀-{}", std::process::id());
+        let (child_key, _) = place_event_mob("안휘성", "40", &child_room);
+        body.set("이벤트설정리스트", "황소개구리");
+        add_test_items(&mut body, "개구리가죽", 1);
+        let CommandResult::MobEvent { output_lines, .. } =
+            super::try_mob_event(&mut body, "안휘성", &child_room, "꼬마 대화")
+                .expect("frog skin delivery event")
+        else {
+            panic!("frog skin delivery returned a non-event result");
+        };
+        assert!(output_lines.iter().any(|line| line.contains("선물로")));
+        assert!(!body_has_item_spec(&body, "개구리가죽"));
+        assert!(get_user_event(&body, "황소개구리").is_empty());
+        assert_eq!(get_user_event(&body, "황소개구리끝"), "1");
+
+        let mut world = crate::world::get_world_state().write().unwrap();
+        for key in [sword_key, devil_key, elder_key, child_key] {
+            world.mob_cache.remove_mob(&key);
+        }
+        clear_test_oneitems(&["73", "66", "71"]);
+    }
+
+    #[test]
+    fn migrated_event_state_transitions_keep_the_python_followup_paths() {
+        clear_test_oneitems(&["황룡마조"]);
+        let mut body = Body::new();
+        body.set("이름", "이벤트전이회귀");
+
+        let guard_room = format!("문지기전이회귀-{}", std::process::id());
+        let (guard_key, _) = place_event_mob("하북성", "24", &guard_room);
+        add_test_items(&mut body, "649", 1);
+        super::try_mob_event(&mut body, "하북성", &guard_room, "문지기 대화")
+            .expect("guard pass event");
+        assert_eq!(get_user_event(&body, "문지기"), "1");
+
+        let elder_room = format!("육자홍전이회귀-{}", std::process::id());
+        let (elder_key, _) = place_event_mob("강소성", "육자홍", &elder_room);
+        super::try_mob_event(&mut body, "강소성", &elder_room, "육자홍 절")
+            .expect("yuk jahong first bow event");
+        assert_eq!(get_user_event(&body, "황룡마조1"), "1");
+        assert!(get_user_event(&body, "황룡마조2").is_empty());
+
+        let gate_room = format!("철문전이회귀-{}", std::process::id());
+        let (gate_key, _) = place_event_mob("동정호", "23", &gate_room);
+        body.set("이벤트설정리스트", "철비묵념");
+        let CommandResult::MobEvent { set_position, .. } =
+            super::try_mob_event(&mut body, "동정호", &gate_room, "철문 열어")
+                .expect("iron gate event")
+        else {
+            panic!("iron gate returned a non-event result");
+        };
+        assert_eq!(
+            set_position,
+            Some(("동정호".to_string(), "227".to_string()))
+        );
+        assert!(get_user_event(&body, "철비묵념").is_empty());
+
+        let cave_room = format!("오지산전이회귀-{}", std::process::id());
+        let (cave_key, _) = place_event_mob("귀주성", "7", &cave_room);
+        body.set("레벨", 800_i64);
+        body.set("이벤트설정리스트", "오지산초동끝");
+        let CommandResult::MobEvent { set_position, .. } =
+            super::try_mob_event(&mut body, "귀주성", &cave_room, "초동 오지산 대화")
+                .expect("cave guide event")
+        else {
+            panic!("cave guide returned a non-event result");
+        };
+        assert_eq!(
+            set_position,
+            Some(("귀주성".to_string(), "179".to_string()))
+        );
+        assert!(get_user_event(&body, "오지산초동끝").is_empty());
+
+        let warrior_room = format!("무성호법전이회귀-{}", std::process::id());
+        let (warrior_key, warrior_instance) = place_event_mob("하북성", "25", &warrior_room);
+        super::set_user_event(&mut body, "전투", "1");
+        super::set_user_event(&mut body, "문지기", "1");
+        mark_event_mob_corpse("하북성", &warrior_room, warrior_instance);
+        super::try_mob_event(&mut body, "하북성", &warrior_room, "무성호법 영대혈 눌러")
+            .expect("warrior acupoint event");
+        {
+            let world = crate::world::get_world_state().read().unwrap();
+            let mob = world
+                .mob_cache
+                .get_all_mobs_in_room("하북성", &warrior_room)
+                .into_iter()
+                .find(|mob| mob.instance_id == warrior_instance)
+                .unwrap();
+            assert!(!mob.alive && mob.act == 3);
+        }
+        assert_eq!(get_user_event(&body, "무성호법"), "1");
+        assert!(get_user_event(&body, "전투").is_empty());
+        assert!(get_user_event(&body, "문지기").is_empty());
+
+        let child_room = format!("꼬마전이회귀-{}", std::process::id());
+        let (child_key, _) = place_event_mob("안휘성", "40", &child_room);
+        body.set("이벤트설정리스트", "");
+        let CommandResult::MobEvent { output_lines, .. } =
+            super::try_mob_event(&mut body, "안휘성", &child_room, "꼬마 대화")
+                .expect("child initial dialogue")
+        else {
+            panic!("child initial dialogue returned a non-event result");
+        };
+        assert!(output_lines.iter().any(|line| line.contains("개구리가죽")));
+        assert_eq!(get_user_event(&body, "황소개구리"), "1");
+
+        let mut world = crate::world::get_world_state().write().unwrap();
+        for key in [
+            guard_key,
+            elder_key,
+            gate_key,
+            cave_key,
+            warrior_key,
+            child_key,
+        ] {
+            world.mob_cache.remove_mob(&key);
+        }
+        clear_test_oneitems(&["황룡마조"]);
+    }
+
+    #[test]
+    fn cheong_ubi_keeps_the_python_maetaegyeol_successor_chain() {
+        let room = format!("진매타결회귀-{}", std::process::id());
+        let (mob_key, _) = place_event_mob("귀주성", "청우비", &room);
+        let mut body = Body::new();
+        body.set("이름", "진매타결회귀");
+        body.skill_list.push("매타결".to_string());
+
+        super::try_mob_event(&mut body, "귀주성", &room, "청우비 대화")
+            .expect("maetaegyeol initial event");
+        assert_eq!(get_user_event(&body, "진매타결"), "1");
+        for (before, after) in [
+            ("진매타결", "진매타결1"),
+            ("진매타결1", "진매타결2"),
+            ("진매타결2", "진매타결3"),
+        ] {
+            super::try_mob_event(&mut body, "귀주성", &room, "청우비 대화")
+                .expect("maetaegyeol followup event");
+            assert!(get_user_event(&body, before).is_empty());
+            assert_eq!(get_user_event(&body, after), "1");
+        }
+        super::try_mob_event(&mut body, "귀주성", &room, "청우비 대화")
+            .expect("maetaegyeol teaching event");
+        assert!(get_user_event(&body, "진매타결3").is_empty());
+        assert!(!body.skill_list.iter().any(|skill| skill == "매타결"));
+        assert!(body.skill_list.iter().any(|skill| skill == "진매타결"));
+
+        let mut world = crate::world::get_world_state().write().unwrap();
+        world.mob_cache.remove_mob(&mob_key);
+    }
+
+    #[test]
+    fn legacy_stone_skill_rewards_teach_only_to_players_missing_the_skill() {
+        let mut body = Body::new();
+        body.set("이름", "비석전수회귀");
+
+        let tower_room = format!("토룡십구장회귀-{}", std::process::id());
+        let (tower_key, _) = place_event_mob("백층탑", "비석90", &tower_room);
+        super::try_mob_event(&mut body, "백층탑", &tower_room, "비석 눌러")
+            .expect("tower stone teaching event");
+        assert!(body.skill_list.iter().any(|skill| skill == "토룡십구장"));
+        let CommandResult::MobEvent { set_position, .. } =
+            super::try_mob_event(&mut body, "백층탑", &tower_room, "비석 눌러")
+                .expect("tower stone followup event")
+        else {
+            panic!("tower stone followup returned a non-event result");
+        };
+        assert_eq!(
+            set_position,
+            Some(("백층탑".to_string(), "290".to_string()))
+        );
+
+        let hero_room = format!("사폭풍흑핵열회귀-{}", std::process::id());
+        let (hero_key, _) = place_event_mob("영웅문", "돌비석", &hero_room);
+        super::try_mob_event(&mut body, "영웅문", &hero_room, "돌비석 무공 파해")
+            .expect("hero stone teaching event");
+        assert!(body.skill_list.iter().any(|skill| skill == "사폭풍흑핵열"));
+        let CommandResult::MobEvent { output_lines, .. } =
+            super::try_mob_event(&mut body, "영웅문", &hero_room, "돌비석 무공 파해")
+                .expect("hero stone followup event")
+        else {
+            panic!("hero stone followup returned a non-event result");
+        };
+        assert!(output_lines
+            .iter()
+            .any(|line| line.contains("다시 읽어봐도")));
+
+        let mut world = crate::world::get_world_state().write().unwrap();
+        for key in [tower_key, hero_key] {
+            world.mob_cache.remove_mob(&key);
+        }
+    }
+
+    #[test]
+    fn mirror_and_turtle_keep_python_inner_power_and_skill_count_messages() {
+        let mut body = Body::new();
+        body.set("이름", "거울거북회귀");
+
+        let mirror_room = format!("거울회귀-{}", std::process::id());
+        let (mirror_key, _) = place_event_mob("영웅문", "거울", &mirror_room);
+        body.set("최고내공", 33_999_i64);
+        let CommandResult::MobEvent { output_lines, .. } =
+            super::try_mob_event(&mut body, "영웅문", &mirror_room, "거울 들")
+                .expect("mirror power gate")
+        else {
+            panic!("mirror power gate returned a non-event result");
+        };
+        assert!(output_lines.iter().any(|line| line.contains("내공 34000")));
+        body.set("최고내공", 34_000_i64);
+        let CommandResult::MobEvent { output_lines, .. } =
+            super::try_mob_event(&mut body, "영웅문", &mirror_room, "거울 들")
+                .expect("mirror skill gate")
+        else {
+            panic!("mirror skill gate returned a non-event result");
+        };
+        assert!(output_lines.iter().any(|line| line.contains("무공 142개")));
+        body.skill_list = (0..142).map(|n| format!("회귀무공{n}")).collect();
+        let CommandResult::MobEvent { set_position, .. } =
+            super::try_mob_event(&mut body, "영웅문", &mirror_room, "거울 들")
+                .expect("mirror success")
+        else {
+            panic!("mirror success returned a non-event result");
+        };
+        assert_eq!(
+            set_position,
+            Some(("영웅문".to_string(), "0101".to_string()))
+        );
+
+        let turtle_room = format!("거북회귀-{}", std::process::id());
+        let (turtle_key, _) = place_event_mob("용궁", "4700a", &turtle_room);
+        body.set("최고내공", 33_999_i64);
+        let CommandResult::MobEvent { output_lines, .. } =
+            super::try_mob_event(&mut body, "용궁", &turtle_room, "대왕거북 타")
+                .expect("turtle power gate")
+        else {
+            panic!("turtle power gate returned a non-event result");
+        };
+        assert!(output_lines.iter().any(|line| line.contains("내공 34000")));
+
+        let mut world = crate::world::get_world_state().write().unwrap();
+        for key in [mirror_key, turtle_key] {
+            world.mob_cache.remove_mob(&key);
+        }
+    }
+
+    #[test]
+    fn milestone_dialogues_keep_python_threshold_failure_messages() {
+        let cases = [
+            ("지아_대화_대_힘백.rhai", "힘", 99, "힘 100 되면"),
+            ("지아_대화_대_힘오백.rhai", "힘", 499, "힘 500 되면"),
+            ("지아_대화_대_힘천.rhai", "힘", 999, "힘 1000 되면"),
+            ("요월_대화_대_백세.rhai", "나이", 99, "100살 안된"),
+            ("요월_대화_대_백오십세.rhai", "나이", 149, "150살 안된"),
+            ("요월_대화_대_이백세.rhai", "나이", 199, "200살 안된"),
+            ("요월_대화_대_힘백.rhai", "힘", 99, "힘 100 되면"),
+            ("요월_대화_대_힘오백.rhai", "힘", 499, "힘 500 되면"),
+            ("요월_대화_대_힘천.rhai", "힘", 999, "힘 1000 되면"),
+            ("밍밍_대화_대_백세.rhai", "나이", 99, "100살 안된"),
+            ("밍밍_대화_대_백오십세.rhai", "나이", 149, "150살 안된"),
+            ("밍밍_대화_대_이백세.rhai", "나이", 199, "200살 안된"),
+        ];
+        for (script, stat, value, expected) in cases {
+            let mut body = Body::new();
+            body.set("이름", format!("기념일회귀{script}"));
+            body.set(stat, value);
+            let (output, _) = run_zone_event(&mut body, "낙양성", script, None);
+            assert!(
+                output.iter().any(|line| line.contains(expected)),
+                "{script}: {output:?}"
+            );
+        }
+
+        let mut strength_success = Body::new();
+        strength_success.set("이름", "힘기념일성공회귀");
+        strength_success.set("힘", 100_i64);
+        strength_success.set("최고체력", 10_i64);
+        run_zone_event(
+            &mut strength_success,
+            "낙양성",
+            "지아_대화_대_힘백.rhai",
+            None,
+        );
+        assert_eq!(strength_success.get_int("최고체력"), 1_010);
+        assert_eq!(get_user_event(&strength_success, "힘백이벤트"), "1");
+
+        let mut age_success = Body::new();
+        age_success.set("이름", "나이기념일성공회귀");
+        age_success.set("나이", 100_i64);
+        run_zone_event(&mut age_success, "낙양성", "밍밍_대화_대_백세.rhai", None);
+        assert_eq!(age_success.get_int("레벨"), 1_000);
+        assert_eq!(get_user_event(&age_success, "백세축하이벤트"), "1");
+    }
+
+    #[test]
+    fn level_and_inner_power_gates_keep_their_python_failure_output() {
+        for zone in ["감숙성", "운남성", "섬서성", "귀주성", "산서성", "사천성"] {
+            let mut body = Body::new();
+            body.set("이름", format!("방파미달회귀{zone}"));
+            body.set("레벨", 549_i64);
+            let (output, destination) =
+                run_zone_event(&mut body, zone, "방파관리인_입장.rhai", None);
+            assert_eq!(destination, None);
+            assert!(output.iter().any(|line| line.contains("능력도 안되면서")));
+        }
+
+        let mut cave = Body::new();
+        cave.set("이름", "오지산미달회귀");
+        cave.set("레벨", 799_i64);
+        let (output, destination) =
+            run_zone_event(&mut cave, "귀주성", "7_대화_대_오지산_오지.rhai", None);
+        assert_eq!(destination, None);
+        assert!(output.iter().any(|line| line.contains("능력은 아직 부족")));
+
+        let mut tower = Body::new();
+        tower.set("이름", "구층탑미달회귀");
+        tower.set("레벨", 199_i64);
+        let (output, destination) =
+            run_zone_event(&mut tower, "낙양성", "구층탑_입장_입.rhai", None);
+        assert_eq!(destination, None);
+        assert!(output.iter().any(|line| line.contains("무형의 기운")));
+
+        let mut celestial = Body::new();
+        celestial.set("이름", "옥황상제미달회귀");
+        celestial.set("최고내공", 29_999_i64);
+        add_test_items(&mut celestial, "금강멸류관", 1);
+        let (output, destination) = run_zone_event(
+            &mut celestial,
+            "낙양성",
+            "곤륜선인_대화_대_옥황상제.rhai",
+            None,
+        );
+        assert_eq!(destination, None);
+        assert!(output.iter().any(|line| line.contains("내공 3만")));
+    }
+
+    #[test]
+    fn skill_gated_events_keep_their_python_failure_output() {
+        let cases = [
+            (
+                "곤륜산",
+                "고대유적_조사.rhai",
+                "아무 일도 일어나지 않습니다",
+            ),
+            (
+                "대설산",
+                "고대유적_조사.rhai",
+                "아무 일도 일어나지 않습니다",
+            ),
+            ("백두산", "3500_대화_대.rhai", "규화보전을 탐하여"),
+            ("백두산", "3400_대_대화.rhai", "무공을 겨루고 싶다면"),
+        ];
+        for (zone, script, expected) in cases {
+            let mut body = Body::new();
+            body.set("이름", format!("무공관문회귀{zone}{script}"));
+            let (output, destination) = run_zone_event(&mut body, zone, script, None);
+            assert_eq!(destination, None);
+            assert!(
+                output.iter().any(|line| line.contains(expected)),
+                "{zone}/{script}: {output:?}"
+            );
+        }
+    }
+
+    #[test]
+    fn corpse_gate_keeps_live_combat_and_corpse_reward_paths_separate() {
+        let room = format!("시체분기회귀-{}", std::process::id());
+        let (mob_key, instance_id) = place_event_mob("낙양성", "23", &room);
+        let mut body = Body::new();
+        body.set("이름", "시체분기회귀");
+
+        super::try_mob_event(&mut body, "낙양성", &room, "황소 꼬리 잘라")
+            .expect("live tail event");
+        assert_eq!(body.act, crate::player::ActState::Fight);
+        assert!(!body_has_item_spec(&body, "소털"));
+
+        crate::script::combat_commands::remove_combat_target_instance_id(&mut body, instance_id);
+        body.act = crate::player::ActState::Stand;
+        mark_event_mob_corpse("낙양성", &room, instance_id);
+        let CommandResult::MobEvent { output_lines, .. } =
+            super::try_mob_event(&mut body, "낙양성", &room, "황소 꼬리 잘라")
+                .expect("corpse tail event")
+        else {
+            panic!("corpse tail was not an event");
+        };
+        assert!(output_lines
+            .iter()
+            .any(|line| line.contains("꼬리를 자릅니다")));
+        assert!(body_has_item_spec(&body, "소털"));
+        let world = crate::world::get_world_state().read().unwrap();
+        let mob = world
+            .mob_cache
+            .get_all_mobs_in_room("낙양성", &room)
+            .into_iter()
+            .find(|mob| mob.instance_id == instance_id)
+            .unwrap();
+        assert_eq!(mob.act, 3);
+        drop(world);
+
+        let mut world = crate::world::get_world_state().write().unwrap();
+        world.mob_cache.remove_mob(&mob_key);
+    }
+
+    #[test]
+    fn legacy_level_gate_blocks_only_below_the_python_threshold() {
+        let mut low = Body::new();
+        low.set("이름", "레벨관문미달회귀");
+        low.set("레벨", 199_i64);
+        let (output, destination) = run_zone_event(&mut low, "낙양성", "구층탑_입장_입.rhai", None);
+        assert!(output.iter().any(|line| line.contains("무형의 기운")));
+        assert_eq!(destination, None);
+
+        let mut accepted = Body::new();
+        accepted.set("이름", "레벨관문통과회귀");
+        accepted.set("레벨", 200_i64);
+        let (_, destination) = run_zone_event(&mut accepted, "낙양성", "구층탑_입장_입.rhai", None);
+        assert_eq!(destination, Some(("구층탑".into(), "1".into())));
+    }
+
+    #[test]
+    fn legacy_skill_directives_keep_all_skill_gates_teaching_and_removal() {
+        let mut qualified = Body::new();
+        qualified.set("이름", "무공동작회귀");
+        qualified.skill_list = vec!["육맥신법".into(), "육맥신공".into()];
+        run_zone_event(&mut qualified, "무림맹", "대학사_육맥신검.rhai", None);
+        assert!(qualified.skill_list.iter().any(|skill| skill == "육맥신검"));
+
+        let mut missing = Body::new();
+        missing.set("이름", "무공동작미달회귀");
+        missing.skill_list = vec!["육맥신법".into()];
+        run_zone_event(&mut missing, "무림맹", "대학사_육맥신검.rhai", None);
+        assert!(!missing.skill_list.iter().any(|skill| skill == "육맥신검"));
+
+        let mut removable = Body::new();
+        removable.set("이름", "무공회수회귀");
+        removable.skill_list.push("가상무공".into());
+        let mut data = RawMobData::new();
+        data.zone = "낙양성".into();
+        let words = vec!["광무".into(), "가상무공".into(), "무공삭제".into()];
+        let _ = do_event_rhai(
+            &mut removable,
+            &data,
+            "test",
+            &words,
+            "test",
+            "기타맨_무공삭제_무공제거_무공지움.rhai",
+            None,
+        );
+        assert!(!get_user_event(&removable, "무공삭제").is_empty());
+        let _ = do_event_rhai(
+            &mut removable,
+            &data,
+            "test",
+            &words,
+            "test",
+            "기타맨_무공삭제_무공제거_무공지움.rhai",
+            None,
+        );
+        assert!(!removable.skill_list.iter().any(|skill| skill == "가상무공"));
+    }
+
+    #[test]
+    fn event_skill_removal_keeps_python_first_occurrence_and_training_record() {
+        let mut body = Body::new();
+        body.skill_list = vec!["시험무공".into(), "시험무공".into(), "다른무공".into()];
+        body.skill_map
+            .insert("시험무공".into(), crate::player::SkillTraining::new(7, 321));
+        run_zone_event_source(
+            &mut body,
+            "낙양성",
+            r#"
+fn event() {
+    remove_skill("시험무공");
+    end_event();
+}
+"#,
+            None,
+        );
+        assert_eq!(body.skill_list, vec!["시험무공", "다른무공"]);
+        assert_eq!(
+            body.skill_map.get("시험무공"),
+            Some(&crate::player::SkillTraining::new(7, 321))
+        );
+        run_zone_event_source(
+            &mut body,
+            "낙양성",
+            r#"
+fn event() {
+    remove_skill("시험무공");
+    teach_skill("시험무공");
+    end_event();
+}
+"#,
+            None,
+        );
+        assert_eq!(body.skill_list, vec!["다른무공", "시험무공"]);
+        assert_eq!(
+            body.skill_map.get("시험무공"),
+            Some(&crate::player::SkillTraining::new(7, 321))
+        );
+    }
+
+    #[test]
+    fn vision_training_event_restores_python_allowlist_prerequisites_and_skill_consumption() {
+        let room = format!("비전수련회귀-{}", std::process::id());
+        let (mob_key, _) = place_event_mob("낙양성", "무공맨", &room);
+
+        let mut unsupported = Body::new();
+        let CommandResult::MobEvent { output_lines, .. } =
+            super::try_mob_event(&mut unsupported, "낙양성", &room, "비전노인 없는비전 수련")
+                .expect("vision trainer selection")
+        else {
+            panic!("unsupported vision must remain in event output");
+        };
+        assert!(output_lines.iter().any(|line| line.contains("그러한 비전")));
+
+        let mut missing = Body::new();
+        let CommandResult::MobEvent { output_lines, .. } = super::try_mob_event(
+            &mut missing,
+            "낙양성",
+            &room,
+            "비전노인 강룡십팔장비전 수련",
+        )
+        .expect("missing prerequisite event") else {
+            panic!("missing prerequisites must remain in event output");
+        };
+        assert!(output_lines.iter().any(|line| line.contains("장안기공")));
+        assert!(missing.get_string("비전수련").is_empty());
+
+        // `$비전종류확인` is evaluated after the active-training guard and
+        // rejects an already learned exact entry without consuming its
+        // prerequisite ordinary skills.
+        let mut learned = Body::new();
+        learned.add_secret_skill("강룡십팔장비전");
+        learned.skill_list = vec![
+            "분근착골수".into(),
+            "장안기공".into(),
+            "사량발천근".into(),
+            "금나수".into(),
+        ];
+        let CommandResult::MobEvent { output_lines, .. } = super::try_mob_event(
+            &mut learned,
+            "낙양성",
+            &room,
+            "비전노인 강룡십팔장비전 수련",
+        )
+        .expect("learned vision event") else {
+            panic!("learned vision must remain in event output");
+        };
+        assert!(output_lines
+            .iter()
+            .any(|line| line.contains("벌써 그 비전을 수련")));
+        assert!(learned.get_string("비전수련").is_empty());
+        assert_eq!(learned.skill_list.len(), 4);
+
+        let mut qualified = Body::new();
+        qualified.skill_list = vec![
+            "분근착골수".into(),
+            "장안기공".into(),
+            "사량발천근".into(),
+            "금나수".into(),
+        ];
+        super::try_mob_event(
+            &mut qualified,
+            "낙양성",
+            &room,
+            "비전노인 강룡십팔장비전 수련",
+        )
+        .expect("qualified vision event");
+        assert_eq!(qualified.get_string("비전수련"), "강룡십팔장비전");
+        assert!(qualified.skill_list.is_empty());
+
+        let CommandResult::MobEvent { output_lines, .. } =
+            super::try_mob_event(&mut qualified, "낙양성", &room, "비전노인 무극검비전 수련")
+                .expect("existing training event")
+        else {
+            panic!("existing vision training must remain in event output");
+        };
+        assert!(output_lines
+            .iter()
+            .any(|line| line.contains("이미 수련중인 비전")));
+
+        let mut world = crate::world::get_world_state().write().unwrap();
+        world.mob_cache.remove_mob(&mob_key);
+    }
+
+    #[test]
+    fn every_vision_trainer_prerequisite_list_is_consumed_on_its_success_path() {
+        // Execute all eight authored `$무공리스트확인!`/`$무공리스트삭제`
+        // pairs, not only the 강룡십팔장 example.  Python consumes each
+        // prerequisite exactly when its corresponding vision is accepted.
+        let room = format!("비전전수전체회귀-{}", std::process::id());
+        let (mob_key, _) = place_event_mob("낙양성", "무공맨", &room);
+        let cases: [(&str, &[&str]); 8] = [
+            (
+                "강룡십팔장비전",
+                &["분근착골수", "장안기공", "사량발천근", "금나수"],
+            ),
+            ("무극검비전", &["대력금나수"]),
+            ("천마검비전", &["투골타혈법", "전암전회"]),
+            ("뇌음자흑강비전", &["이화접목", "차기미기"]),
+            ("대비단혼강비전", &["전이대법", "격체전공"]),
+            ("천마무격신장비전", &["건곤대나이", "흡성대법"]),
+            ("혈세천하비전", &["공수탈백인"]),
+            ("멸천혈폭비전", &["음양귀혼"]),
+        ];
+        for (vision, prerequisites) in cases {
+            let mut body = Body::new();
+            body.set("이름", format!("비전전수{vision}회귀"));
+            body.skill_list = prerequisites
+                .iter()
+                .map(|skill| (*skill).to_string())
+                .collect();
+            let command = format!("비전노인 {vision} 수련");
+            let result = super::try_mob_event(&mut body, "낙양성", &room, &command)
+                .expect("vision trainer event");
+            assert!(
+                matches!(result, CommandResult::MobEvent { .. }),
+                "{vision}: expected immediate authored completion, got {result:?}"
+            );
+            assert_eq!(body.get_string("비전수련"), vision, "{vision}");
+            assert!(
+                body.skill_list.is_empty(),
+                "{vision}: {:#?}",
+                body.skill_list
+            );
+        }
+        let mut world = crate::world::get_world_state().write().unwrap();
+        world.mob_cache.remove_mob(&mob_key);
+    }
+
+    #[test]
+    fn jade_emperor_vision_prerequisites_skip_only_already_learned_blocks() {
+        // Python `$비전종류확인!` skips the following block when its vision
+        // is already learned.  The Jade Emperor's eight checks therefore
+        // report the first *missing* vision, not the first learned one.
+        let scripts = [
+            "옥황상제_대화_대_고영신공.rhai",
+            "옥황상제_대화_대_역근경.rhai",
+            "옥황상제_대화_대_태극강기.rhai",
+            "옥황상제_대화_대_북명신공.rhai",
+            "옥황상제_대화_대_천외비선.rhai",
+            "옥황상제_대화_대_가의신공.rhai",
+            "옥황상제_대화_대_명옥공.rhai",
+        ];
+        for script in scripts {
+            let source = std::fs::read_to_string(format!("data/script/선인/{script}"))
+                .expect("Jade Emperor vision script");
+            assert!(source.contains("if !has_vision(vision)"), "{script}");
+        }
+
+        let mut no_visions = Body::new();
+        let (first_missing, _) = run_zone_event(
+            &mut no_visions,
+            "선인",
+            "옥황상제_대화_대_역근경.rhai",
+            None,
+        );
+        assert!(first_missing
+            .iter()
+            .any(|line| line.contains("멸천혈폭비전 먼저 배우시게")));
+
+        let mut first_vision_learned = Body::new();
+        first_vision_learned.add_secret_skill("멸천혈폭비전");
+        let (next_missing, _) = run_zone_event(
+            &mut first_vision_learned,
+            "선인",
+            "옥황상제_대화_대_역근경.rhai",
+            None,
+        );
+        assert!(!next_missing
+            .iter()
+            .any(|line| line.contains("멸천혈폭비전 먼저 배우시게")));
+        assert!(next_missing
+            .iter()
+            .any(|line| line.contains("혈세천하비전 먼저 배우시게")));
+    }
+
+    #[test]
+    fn police_congratulations_keep_python_level_gate_buff_and_one_time_rewards() {
+        let room = format!("포졸축하회귀-{}", std::process::id());
+        let (mob_key, _) = place_event_mob("낙양성", "포졸", &room);
+
+        let mut high_level = Body::new();
+        high_level.set("이름", "포졸고레벨회귀");
+        high_level.set("레벨", 300_i64);
+        let CommandResult::MobEvent {
+            output_lines: high_output,
+            ..
+        } = super::try_mob_event(&mut high_level, "낙양성", &room, "포졸 축하")
+            .expect("police congratulations event")
+        else {
+            panic!("police congratulations returned a non-event result");
+        };
+        assert!(high_output.iter().any(|line| line.contains("300레벨 이상")));
+        assert!(high_level.active_skills.is_empty());
+        assert!(get_user_event(&high_level, "리뉴얼").is_empty());
+        for item in ["진열장", "합성11", "무림지도1", "무림지도2"] {
+            assert!(
+                !body_has_item_spec(&high_level, item),
+                "high level received {item}"
+            );
+        }
+
+        let mut low_level = Body::new();
+        low_level.set("이름", "포졸저레벨회귀");
+        low_level.set("레벨", 299_i64);
+        let CommandResult::MobEvent {
+            output_lines: low_output,
+            ..
+        } = super::try_mob_event(&mut low_level, "낙양성", &room, "포졸 축하")
+            .expect("police congratulations event")
+        else {
+            panic!("police congratulations returned a non-event result");
+        };
+        assert!(low_output
+            .iter()
+            .any(|line| line.contains("포졸") && line.contains("당신에게 힘을")));
+        assert!(low_output.iter().any(|line| line.contains("여러가지 선물")));
+        assert!(!get_user_event(&low_level, "리뉴얼").is_empty());
+        assert_eq!(low_level._str, 100);
+        assert_eq!(low_level._dex, 100);
+        assert_eq!(low_level._arm, 100);
+        assert_eq!(low_level.active_skills.len(), 1);
+        assert_eq!(low_level.active_skills[0].name, "이벤트");
+        assert_eq!(low_level.active_skills[0].start_time, 999);
+        for item in ["진열장", "합성11", "무림지도1", "무림지도2"] {
+            assert!(
+                body_has_item_spec(&low_level, item),
+                "low level missed {item}"
+            );
+        }
+
+        let CommandResult::MobEvent {
+            output_lines: retry_output,
+            ..
+        } = super::try_mob_event(&mut low_level, "낙양성", &room, "포졸 축하")
+            .expect("repeat police congratulations event")
+        else {
+            panic!("repeat police congratulations returned a non-event result");
+        };
+        assert!(!retry_output
+            .iter()
+            .any(|line| line.contains("여러가지 선물")));
+        assert_eq!(low_level.active_skills.len(), 1);
+
+        let mut world = crate::world::get_world_state().write().unwrap();
+        world.mob_cache.remove_mob(&mob_key);
+        drop(world);
+        for name in ["포졸고레벨회귀", "포졸저레벨회귀"] {
+            let _ = std::fs::remove_file(format!("data/user/{name}.json"));
+        }
+    }
+
+    #[test]
+    fn blacksmith_legacy_event_arrays_are_rhai_with_python_olsuk_and_script_handoff() {
+        let json: serde_json::Value =
+            serde_json::from_str(&std::fs::read_to_string("data/mob/낙양성/합체맨.json").unwrap())
+                .unwrap();
+        let info = &json["몹정보"];
+        for key in [
+            "이벤트: $대화 $대 무기강화",
+            "이벤트: $대화 $대 올숙",
+            "이벤트: $대화 $대 올숙이천",
+        ] {
+            assert!(
+                info[key].is_string(),
+                "{key} must no longer use legacy array events"
+            );
+        }
+
+        let room = format!("합체맨올숙회귀-{}", std::process::id());
+        let (mob_key, _) = place_event_mob("낙양성", "합체맨", &room);
+        let mut body = Body::new();
+        body.set("이름", "합체맨올숙회귀");
+        let CommandResult::MobEvent { output_lines, .. } =
+            super::try_mob_event(&mut body, "낙양성", &room, "대장장이 무기강화 대화")
+                .expect("blacksmith weapon upgrade event")
+        else {
+            panic!("incomplete olsuk weapon must stay in event output");
+        };
+        assert!(output_lines
+            .iter()
+            .any(|line| line.contains("올숙무기가 없지")));
+
+        body.set("올숙완료", 1_i64);
+        let mut weapon = crate::object::Object::new();
+        weapon.set("인덱스", "합체맨올숙회귀_올숙무기");
+        weapon.set("공격력", 1_999_i64);
+        let weapon = std::sync::Arc::new(std::sync::Mutex::new(weapon));
+        body.object.objs.push(weapon.clone());
+        let CommandResult::StartScript {
+            script_name,
+            use_rhai,
+            ..
+        } = super::try_mob_event(&mut body, "낙양성", &room, "대장장이 무기강화 대화")
+            .expect("sub-2000 weapon must skip the material guard")
+        else {
+            panic!("sub-2000 weapon must hand off without 강철판");
+        };
+        assert_eq!(script_name, "무기강화");
+        assert!(use_rhai);
+
+        weapon.lock().unwrap().set("공격력", 2_000_i64);
+        let CommandResult::MobEvent { output_lines, .. } =
+            super::try_mob_event(&mut body, "낙양성", &room, "대장장이 무기강화 대화")
+                .expect("high attack weapon must enter the material branch")
+        else {
+            panic!("high attack weapon without plates must stay in event output");
+        };
+        assert!(output_lines
+            .iter()
+            .any(|line| line.contains("강화재료가 부족하지")));
+
+        add_test_items(&mut body, "강철판", 5);
+        let CommandResult::StartScript {
+            script_name,
+            use_rhai,
+            ..
+        } = super::try_mob_event(&mut body, "낙양성", &room, "대장장이 무기강화 대화")
+            .expect("qualified blacksmith upgrade event")
+        else {
+            panic!("qualified olsuk weapon must hand off to the upgrade script");
+        };
+        assert_eq!(script_name, "무기강화");
+        assert!(use_rhai);
+
+        let CommandResult::MobEvent { output_lines, .. } =
+            super::try_mob_event(&mut body, "낙양성", &room, "대장장이 올숙 대화")
+                .expect("blacksmith olsuk event")
+        else {
+            panic!("missing pills must stay in event output");
+        };
+        assert!(output_lines
+            .iter()
+            .any(|line| line.contains("고농축 주과 10개")));
+
+        let mut candidate = Body::new();
+        candidate.set("이름", "합체맨올숙자격회귀");
+        add_test_items(&mut candidate, "합성6-2", 10);
+        for weapon_type in 1..=5 {
+            candidate.set(&format!("{weapon_type} 숙련도"), 1_000_i64);
+        }
+        let CommandResult::StartScript { script_name, .. } =
+            super::try_mob_event(&mut candidate, "낙양성", &room, "대장장이 올숙 대화")
+                .expect("qualified olsuk event")
+        else {
+            panic!("qualified candidate must enter the original question script");
+        };
+        assert_eq!(script_name, "올숙천");
+        candidate.set("올숙완료", 1_i64);
+        let CommandResult::MobEvent { output_lines, .. } =
+            super::try_mob_event(&mut candidate, "낙양성", &room, "대장장이 올숙 대화")
+                .expect("completed olsuk event")
+        else {
+            panic!("completed candidate must remain in dialogue output");
+        };
+        assert!(output_lines
+            .iter()
+            .any(|line| line.contains("이미 올숙무기를 지급")));
+
+        let mut world = crate::world::get_world_state().write().unwrap();
+        world.mob_cache.remove_mob(&mob_key);
+        let _ = std::fs::remove_file("data/user/합체맨올숙회귀.json");
+    }
+
+    #[test]
+    fn blood_tower_cremation_requires_a_corpse_and_immediately_respawns_it() {
+        let room = format!("혈탑삼매진화회귀-{}", std::process::id());
+        let (mob_key, instance_id) = place_event_mob("혈탑", "무림인07", &room);
+        let mut body = Body::new();
+        body.set("이름", "혈탑삼매진화회귀");
+
+        // Python `$몹상태확인 시체` suppresses the event for a living mob.
+        let CommandResult::MobEvent { output_lines, .. } =
+            super::try_mob_event(&mut body, "혈탑", &room, "혈탑살수 태워")
+                .expect("blood tower cremation event")
+        else {
+            panic!("living blood tower killer returned a non-event result");
+        };
+        assert!(output_lines.is_empty());
+
+        mark_event_mob_corpse("혈탑", &room, instance_id);
+        let CommandResult::MobEvent { output_lines, .. } =
+            super::try_mob_event(&mut body, "혈탑", &room, "시체 태워")
+                .expect("corpse cremation event")
+        else {
+            panic!("corpse cremation returned a non-event result");
+        };
+        assert!(output_lines
+            .iter()
+            .any(|line| line.contains("삼매진화의 진기로 태웁니다")));
+        {
+            let world = crate::world::get_world_state().read().unwrap();
+            let mob = world
+                .mob_cache
+                .get_all_mobs_in_room("혈탑", &room)
+                .into_iter()
+                .find(|mob| mob.instance_id == instance_id)
+                .unwrap();
+            assert!(mob.alive);
+            assert_eq!(mob.act, 0);
+            assert_eq!(mob.hp, mob.max_hp);
+        }
+
+        let mut world = crate::world::get_world_state().write().unwrap();
+        world.mob_cache.remove_mob(&mob_key);
+    }
+
+    #[test]
+    fn iron_bell_rank_view_resolves_python_rank_placeholders_in_rhai() {
+        let _rank_guard = RANK_TEST_LOCK.lock().unwrap();
+        crate::world::rank::rank_clear("힘");
+        let room = format!("쇠종순위회귀-{}", std::process::id());
+        let (mob_key, _) = place_event_mob("낙양성", "1-1", &room);
+        let mut body = Body::new();
+        body.set("이름", "쇠종순위회귀");
+        assert_eq!(
+            crate::world::rank::rank_write("힘", "쇠종순위회귀", 999_999, 1),
+            1
+        );
+
+        let CommandResult::MobEvent { output_lines, .. } =
+            super::try_mob_event(&mut body, "낙양성", &room, "쇠종 봐")
+                .expect("iron bell rank view event")
+        else {
+            panic!("iron bell rank view returned a non-event result");
+        };
+        let output = output_lines.join("\n");
+        assert!(output.contains("쇠종순위회귀"));
+        assert!(output.contains("순위ː\x1b[1m1"));
+        assert!(!output.contains("[순위자]"));
+        assert!(!output.contains("[순위]"));
+
+        let CommandResult::MobEvent { output_lines, .. } =
+            super::try_mob_event(&mut body, "낙양성", &room, "쇠종 1 봐")
+                .expect("numbered iron bell rank view event")
+        else {
+            panic!("numbered iron bell view returned a non-event result");
+        };
+        assert!(output_lines.join("\n").contains("쇠종순위회귀"));
+
+        // Python getInt("1번") returns 1.  `$순위확인` must therefore use
+        // the numeric rank branch rather than look for a player named 1번.
+        let CommandResult::MobEvent { output_lines, .. } =
+            super::try_mob_event(&mut body, "낙양성", &room, "쇠종 1번 봐")
+                .expect("prefixed-number iron bell rank view event")
+        else {
+            panic!("prefixed-number iron bell view returned a non-event result");
+        };
+        assert!(output_lines.join("\n").contains("쇠종순위회귀"));
+
+        let mut world = crate::world::get_world_state().write().unwrap();
+        world.mob_cache.remove_mob(&mob_key);
+        crate::world::rank::rank_clear("힘");
+    }
+
+    #[test]
+    fn rank_event_integer_parser_keeps_python_prefix_digits_for_handwritten_rhai() {
+        let _rank_guard = RANK_TEST_LOCK.lock().unwrap();
+        crate::world::rank::rank_clear("소오강호");
+        assert_eq!(
+            crate::world::rank::rank_write("소오강호", "접두순위회귀", 999_999, 300),
+            1
+        );
+        let mut body = Body::new();
+        body.set("이름", "순위정수회귀");
+        let source = std::fs::read_to_string("data/script/구층탑/비석_보_봐_보아_보다_본다.rhai")
+            .expect("source rank-stone script");
+        let (output, _) = run_zone_event_source_with_words(
+            &mut body,
+            "구층탑",
+            &source,
+            &["비석".into(), "1번".into(), "봐".into()],
+            None,
+        );
+        assert!(output.join("\n").contains("접두순위회귀"));
+
+        // Python getInt("0번") is zero, so it remains a literal target name.
+        crate::world::rank::rank_write("소오강호", "0번", 1, 300);
+        let (output, _) = run_zone_event_source_with_words(
+            &mut body,
+            "구층탑",
+            &source,
+            &["비석".into(), "0번".into(), "봐".into()],
+            None,
+        );
+        assert!(output.join("\n").contains("0번"));
+        crate::world::rank::rank_clear("소오강호");
+    }
+
+    #[test]
+    fn wedding_bell_rank_view_resolves_python_rank_placeholders_in_rhai() {
+        crate::world::rank::rank_clear("결혼");
+        let room = format!("결혼쇠종순위회귀-{}", std::process::id());
+        // The marriage-ranking bell shown to players is named/referred to as
+        // `쇠종`; `폭폭` is a separate malformed fixture named `폭축`.
+        let (mob_key, _) = place_event_mob("낙양성", "가짜쇠종", &room);
+        let mut body = Body::new();
+        body.set("이름", "결혼쇠종순위회귀");
+        body.set("결혼", 999_999_i64);
+        assert_eq!(
+            crate::world::rank::rank_write("결혼", "결혼쇠종순위회귀", 999_999, 1),
+            1
+        );
+
+        super::try_mob_event(&mut body, "낙양성", &room, "쇠종 쳐")
+            .expect("wedding bell rank record event");
+        let CommandResult::MobEvent { output_lines, .. } =
+            super::try_mob_event(&mut body, "낙양성", &room, "쇠종 봐")
+                .expect("wedding bell rank view event")
+        else {
+            panic!("wedding bell rank view returned a non-event result");
+        };
+        let output = output_lines.join("\n");
+        assert!(output.contains("결혼쇠종순위회귀"));
+        assert!(output.contains("순위ː\x1b[1m1"), "{output:?}");
+        assert!(!output.contains("[순위자]"));
+        assert!(!output.contains("[순위]"));
+
+        let mut world = crate::world::get_world_state().write().unwrap();
+        world.mob_cache.remove_mob(&mob_key);
+        crate::world::rank::rank_clear("결혼");
+    }
+
+    #[test]
+    fn legacy_rank_record_broadcasts_only_when_the_player_becomes_first() {
+        let _rank_guard = RANK_TEST_LOCK.lock().unwrap();
+        crate::world::rank::rank_clear("힘");
+        let room = format!("쇠종기록회귀-{}", std::process::id());
+        let (mob_key, _) = place_event_mob("낙양성", "1-1", &room);
+        let mut body = Body::new();
+        body.set("이름", "쇠종기록회귀");
+        body.set("힘", 1_234_i64);
+
+        let CommandResult::MobEvent {
+            output_lines,
+            broadcast_lines,
+            ..
+        } = super::try_mob_event(&mut body, "낙양성", &room, "쇠종 쳐")
+            .expect("iron bell rank record event")
+        else {
+            panic!("iron bell rank record was not an event");
+        };
+        assert!(output_lines
+            .iter()
+            .any(|line| line.contains("울려퍼집니다")));
+        assert!(broadcast_lines
+            .iter()
+            .any(|line| line.contains("쇠종기록회귀") && line.contains("울려퍼집니다")));
+
+        let CommandResult::MobEvent {
+            broadcast_lines, ..
+        } = super::try_mob_event(&mut body, "낙양성", &room, "쇠종 쳐")
+            .expect("repeat iron bell rank record event")
+        else {
+            panic!("repeat iron bell rank record was not an event");
+        };
+        assert!(broadcast_lines.is_empty());
+
+        // `$순위기록` admits every placement inside its limit.  Only a
+        // placement outside that limit skips the braced success text and
+        // reaches the source's fallback line.
+        crate::world::rank::rank_clear("힘");
+        for rank in 0..200 {
+            crate::world::rank::rank_write("힘", &format!("쇠종상위{rank}"), 10_000 - rank, 200);
+        }
+        let mut outside = Body::new();
+        outside.set("이름", "쇠종순위밖회귀");
+        outside.set("힘", 1_i64);
+        let CommandResult::MobEvent { output_lines, .. } =
+            super::try_mob_event(&mut outside, "낙양성", &room, "쇠종 쳐")
+                .expect("outside-limit iron bell event")
+        else {
+            panic!("outside-limit iron bell was not an event");
+        };
+        assert!(output_lines.iter().any(|line| line.contains("듣기싫은")));
+        assert!(!output_lines.iter().any(|line| line.contains("웅장한")));
+        assert_eq!(crate::world::rank::rank_read("힘", "쇠종순위밖회귀"), 0);
+
+        crate::world::rank::rank_clear("힘");
+        crate::world::rank::rank_write("힘", "쇠종상위한명", 10_000, 200);
+        let mut admitted = Body::new();
+        admitted.set("이름", "쇠종순위권회귀");
+        admitted.set("힘", 1_i64);
+        let CommandResult::MobEvent { output_lines, .. } =
+            super::try_mob_event(&mut admitted, "낙양성", &room, "쇠종 쳐")
+                .expect("admitted non-first iron bell event")
+        else {
+            panic!("admitted non-first iron bell was not an event");
+        };
+        assert!(output_lines.iter().any(|line| line.contains("웅장한")));
+        assert!(!output_lines.iter().any(|line| line.contains("듣기싫은")));
+        assert_eq!(crate::world::rank::rank_read("힘", "쇠종순위권회귀"), 2);
+
+        crate::world::rank::rank_clear("최고내공");
+        for rank in 0..200 {
+            crate::world::rank::rank_write(
+                "최고내공",
+                &format!("창호지상위{rank}"),
+                10_000 - rank,
+                200,
+            );
+        }
+        let mut paper = Body::new();
+        paper.set("이름", "창호지순위밖회귀");
+        paper.set("최고내공", 1_i64);
+        paper.set("체력", 200_i64);
+        let (output, _) = run_luoyang_event(&mut paper, "1-2_건너_건_걸어_걸.rhai");
+        assert!(output.iter().any(|line| line.contains("창호지가 찢어지며")));
+        assert!(!output.iter().any(|line| line.contains("가벼운 몸놀림")));
+        assert_eq!(paper.get_int("체력"), 100);
+
+        let mut world = crate::world::get_world_state().write().unwrap();
+        world.mob_cache.remove_mob(&mob_key);
+        crate::world::rank::rank_clear("힘");
+        crate::world::rank::rank_clear("최고내공");
+    }
+
+    #[test]
+    fn every_remaining_rank_board_uses_rhai_templates_for_success_missing_and_all() {
+        let rank_scripts = [
+            "data/script/낙양성/1-2_보_봐_보아_보다_본다.rhai",
+            "data/script/낙양성/가쇠종_보_봐_보아_보다_본다.rhai",
+            "data/script/낙양성/가짜쇠종_보_봐_보아_보다_본다.rhai",
+            "data/script/낙양성/금강동인_보_봐_보아_보다_본다.rhai",
+            "data/script/낙양성/무황성전_보_봐_보아_보다_본다.rhai",
+            "data/script/낙양성/민첩_보_봐_보아_보다_본다.rhai",
+            "data/script/낙양성/볏짚_보_봐_보아_보다_본다.rhai",
+            "data/script/낙양성/석판_보_봐_보아_보다_본다.rhai",
+            "data/script/낙양성/전직비석_보_봐_보아_보다_본다.rhai",
+            "data/script/낙양성/청강석_보_봐_보아_보다_본다.rhai",
+            "data/script/낙양성/통나무_보_봐_보아_보다_본다.rhai",
+            "data/script/낙양성/폭폭_보_봐_보아_보다_본다.rhai",
+            "data/script/백층탑/비석50-1_보_봐_보아_보다_본다.rhai",
+            "data/script/백층탑/비석50_보_봐_보아_보다_본다.rhai",
+            "data/script/백층탑/비석70-1_보_봐_보아_보다_본다.rhai",
+            "data/script/백층탑/비석70_보_봐_보아_보다_본다.rhai",
+            "data/script/백층탑/비석90-1_보_봐_보아_보다_본다.rhai",
+            "data/script/백층탑/비석90_보_봐_보아_보다_본다.rhai",
+            "data/script/백층탑/비석백-1_보_봐_보아_보다_본다.rhai",
+            "data/script/백층탑/비석백_보_봐_보아_보다_본다.rhai",
+            "data/script/전직/비석_보_봐_보아_보다_본다.rhai",
+        ];
+        for path in rank_scripts {
+            let source = std::fs::read_to_string(path).unwrap();
+            assert!(source.contains("rank_render("), "{path}");
+            assert!(!source.contains("legacy: $순위확인"), "{path}");
+        }
+
+        crate::world::rank::rank_clear("2 숙련도");
+        let room = format!("통나무순위회귀-{}", std::process::id());
+        let (mob_key, _) = place_event_mob("낙양성", "통나무", &room);
+        let mut body = Body::new();
+        body.set("이름", "통나무순위회귀");
+        crate::world::rank::rank_write("2 숙련도", "통나무순위회귀", 999_999, 1);
+
+        let CommandResult::MobEvent { output_lines, .. } =
+            super::try_mob_event(&mut body, "낙양성", &room, "통나무 봐")
+                .expect("wooden target rank view")
+        else {
+            panic!("wooden target rank view returned a non-event result");
+        };
+        assert!(output_lines.join("\n").contains("통나무순위회귀"));
+
+        let CommandResult::MobEvent { output_lines, .. } =
+            super::try_mob_event(&mut body, "낙양성", &room, "통나무 없는사람 봐")
+                .expect("missing wooden target rank view")
+        else {
+            panic!("missing wooden target returned a non-event result");
+        };
+        assert!(output_lines.join("\n").contains("흔적이 보이지 않네요"));
+
+        let CommandResult::MobEvent { output_lines, .. } =
+            super::try_mob_event(&mut body, "낙양성", &room, "통나무 모두 봐")
+                .expect("all wooden target rank view")
+        else {
+            panic!("all wooden target returned a non-event result");
+        };
+        assert!(output_lines.join("\n").contains("통나무순위회귀"));
+
+        let mut world = crate::world::get_world_state().write().unwrap();
+        world.mob_cache.remove_mob(&mob_key);
+        crate::world::rank::rank_clear("2 숙련도");
     }
 
     #[test]
@@ -1657,6 +7766,49 @@ mod tests {
             (key, id)
         };
         mob_keys.push(zombie_key.clone());
+
+        // `$몹상태확인 시체` fails while 석융빈 is alive, so Python falls
+        // through to `$전투시작`.  Keep that non-corpse branch distinct from
+        // the later corpse/reward path below.
+        let mut alive_insert = Body::new();
+        alive_insert.set("이름", "백우선생존삽입회귀");
+        super::set_user_event(&mut alive_insert, "가백우", "1");
+        let CommandResult::MobEvent { output_lines, .. } =
+            super::try_mob_event(&mut alive_insert, "하북성", &room, "석융빈 백우선 꽂아")
+                .expect("living zombie insert event must be selected")
+        else {
+            panic!("living zombie insert returned non-event result");
+        };
+        assert!(output_lines.iter().any(|line| line.contains("멍하니")));
+        assert_eq!(alive_insert.act, crate::player::ActState::Fight);
+        assert_eq!(
+            crate::script::combat_commands::combat_target_instance_ids(&alive_insert),
+            vec![zombie_id]
+        );
+
+        // The prior live-target branch is a separate player.  End that
+        // simulated fight before asking the main fixture to challenge the
+        // same mob, just as an actual combat death/escape would.
+        crate::script::combat_commands::remove_combat_target_instance_id(
+            &mut alive_insert,
+            zombie_id,
+        );
+        alive_insert.act = crate::player::ActState::Stand;
+        crate::script::combat_commands::remove_combat_target_instance_id(&mut body, museong_id);
+        body.act = crate::player::ActState::Stand;
+        {
+            let mut world = crate::world::get_world_state().write().unwrap();
+            let mob = world
+                .mob_cache
+                .get_all_mobs_in_room_mut("하북성", &room)
+                .unwrap()
+                .iter_mut()
+                .find(|mob| mob.instance_id == zombie_id)
+                .unwrap();
+            mob.act = 0;
+            mob.targets.clear();
+        }
+
         super::set_user_event(&mut body, "혈유비", "1");
         add_test_items(&mut body, "340", 1);
         super::try_mob_event(&mut body, "하북성", &room, "석융빈 쳐")
@@ -1664,7 +7816,7 @@ mod tests {
         assert_eq!(body.act, crate::player::ActState::Fight);
         assert_eq!(
             crate::script::combat_commands::combat_target_instance_ids(&body),
-            vec![museong_id, zombie_id]
+            vec![zombie_id]
         );
         {
             let mut world = crate::world::get_world_state().write().unwrap();
@@ -1692,6 +7844,8 @@ mod tests {
                 .unwrap();
             assert_eq!(zombie.act, 3);
         }
+        crate::script::combat_commands::remove_combat_target_instance_id(&mut body, zombie_id);
+        body.act = crate::player::ActState::Stand;
 
         let old_man_key = {
             let mut world = crate::world::get_world_state().write().unwrap();
@@ -1764,6 +7918,12 @@ mod tests {
                 .find(|mob| mob.instance_id == instance_id)
                 .unwrap();
             assert_eq!(mob.act, 3);
+            drop(world);
+            crate::script::combat_commands::remove_combat_target_instance_id(
+                &mut body,
+                instance_id,
+            );
+            body.act = crate::player::ActState::Stand;
         }
 
         super::set_user_event(&mut body, "명교비동", "1");
@@ -1784,6 +7944,8 @@ mod tests {
         super::try_mob_event(&mut body, "사천성", &room, "멸절사태 잘라")
             .expect("abbess corpse event must be selected");
         assert!(body_has_item_spec(&body, "멸절머리"));
+        crate::script::combat_commands::remove_combat_target_instance_id(&mut body, abbess_id);
+        body.act = crate::player::ActState::Stand;
         run_zone_event(&mut body, "사천성", "12_대화_대.rhai", None);
         assert!(body_has_item_spec(&body, "구황신단"));
         assert!(!get_user_event(&body, "구황신단").is_empty());
@@ -1870,6 +8032,11 @@ mod tests {
                     .unwrap();
                 assert_eq!(mob.act, 3);
             }
+            crate::script::combat_commands::remove_combat_target_instance_id(
+                &mut body,
+                instance_id,
+            );
+            body.act = crate::player::ActState::Stand;
 
             add_test_items(&mut body, key_item, 1);
             run_zone_event(&mut body, "감숙성", map_script, None);
@@ -1906,7 +8073,8 @@ mod tests {
         let mut body = Body::new();
         body.set("이름", "소오강호회귀");
         body.set("힘", 700_i64);
-        body.set("맷집", 90_i64);
+        body.set("맷집", 91_i64);
+        body.set("전직", 1_i64);
         body.set("성격", "정파");
         super::set_user_event(&mut body, "동정호진짜끝", "1");
 
@@ -1949,9 +8117,26 @@ mod tests {
         super::set_user_event(&mut body, "소오강호끝", "1");
         run_luoyang_event(&mut body, "83_대화_대_소오강호.rhai");
         assert!(!body_has_item_spec(&body, "강우혁머리"));
+        assert!(!get_user_event(&body, "소오강호끝").is_empty());
         assert!(!get_user_event(&body, "소오강호진짜끝").is_empty());
+        for retired in [
+            "동정호진짜끝",
+            "제일신룡단",
+            "과거",
+            "과거1",
+            "과거2",
+            "과거끝",
+        ] {
+            assert!(
+                get_user_event(&body, retired).is_empty(),
+                "$소오강호설정 must replace stale event {retired}"
+            );
+        }
         assert_eq!(body.get_int("힘"), 100);
-        assert_eq!(body.get_int("맷집"), 15);
+        assert_eq!(body.get_int("맷집"), 60);
+        assert!(
+            matches!(body.get("맷집"), Value::Float(value) if (value - (182.0 / 3.0)).abs() < f64::EPSILON)
+        );
         assert_eq!(body.get_string("성격"), "기인");
 
         crate::world::get_world_state()
@@ -2167,6 +8352,49 @@ mod tests {
     }
 
     #[test]
+    fn yuk_jahong_unique_gate_uses_the_python_item_index_not_its_display_name() {
+        // `objs/event.py:$기연확인!` calls checkOneItemIndex().  황룡마조
+        // currently happens to have the same display name and index, but the
+        // Rhai conversion must retain the index contract rather than relying
+        // on that data coincidence.
+        let oneitem_path = std::path::Path::new("data/config/oneitem.json");
+        let saved_oneitem_file = std::fs::read(oneitem_path).ok();
+        crate::oneitem::oneitem_clear();
+
+        let source = std::fs::read_to_string("data/script/강소성/육자홍_절.rhai")
+            .expect("Yuk Jahong event script");
+        assert!(source.contains("!one_item_exists(\"황룡마조\")"));
+        assert!(!source.contains("one_item_exists_name(\"황룡마조\")"));
+
+        let prepare = |name: &str| {
+            let mut body = Body::new();
+            body.set("이름", name);
+            super::set_user_event(&mut body, "진마혁끝", "1");
+            super::set_user_event(&mut body, "황룡마조1", "1");
+            body
+        };
+
+        let mut unclaimed = prepare("육자홍원본인덱스미소유회귀");
+        run_zone_event(&mut unclaimed, "강소성", "육자홍_절.rhai", None);
+        assert!(body_has_item_spec(&unclaimed, "황룡마조"));
+        assert!(!body_has_item_spec(&unclaimed, "황룡마조-5"));
+
+        crate::oneitem::oneitem_clear();
+        assert!(crate::oneitem::oneitem_have("황룡마조", "이미소유한사람"));
+        let mut claimed = prepare("육자홍원본인덱스소유회귀");
+        run_zone_event(&mut claimed, "강소성", "육자홍_절.rhai", None);
+        assert!(!body_has_item_spec(&claimed, "황룡마조"));
+        assert!(body_has_item_spec(&claimed, "황룡마조-5"));
+
+        crate::oneitem::oneitem_clear();
+        if let Some(contents) = saved_oneitem_file {
+            std::fs::write(oneitem_path, contents).expect("restore unique-item registry");
+        } else {
+            let _ = std::fs::remove_file(oneitem_path);
+        }
+    }
+
+    #[test]
     fn ma_ryeong_valley_loads_original_final_room_exits_and_guard_stats() {
         let mut rooms = RoomCache::new();
         let final_room = rooms.get_room("호남성", "272").unwrap();
@@ -2200,7 +8428,7 @@ mod tests {
     }
 
     #[test]
-    fn blood_mist_valley_guard_starts_masked_fight_or_escorts_to_final_room() {
+    fn blood_mist_valley_guard_starts_unmasked_fight_or_escorts_masked_to_final_room() {
         let mut rooms = RoomCache::new();
         let final_gate = rooms.get_room("산서성", "1189").unwrap();
         let final_gate = final_gate.read().unwrap();
@@ -2211,21 +8439,21 @@ mod tests {
 
         let room = format!("혈무곡회귀-{}", std::process::id());
         let (mob_key, instance_id) = place_event_mob("산서성", "66", &room);
-        let mut masked = Body::new();
-        masked.set("이름", "혈무곡가면회귀");
-        add_test_items(&mut masked, "인피면구", 1);
-        super::try_mob_event(&mut masked, "산서성", &room, "혈광호위 대화")
-            .expect("masked guard dialogue must be selected");
+        let mut unmasked = Body::new();
+        unmasked.set("이름", "혈무곡무가면회귀");
+        super::try_mob_event(&mut unmasked, "산서성", &room, "혈광호위 대화")
+            .expect("unmasked guard dialogue must be selected");
         assert!(
-            crate::script::combat_commands::combat_target_instance_ids(&masked)
+            crate::script::combat_commands::combat_target_instance_ids(&unmasked)
                 .contains(&instance_id)
         );
 
-        let mut unmasked = Body::new();
-        unmasked.set("이름", "혈무곡안내회귀");
+        let mut masked = Body::new();
+        masked.set("이름", "혈무곡가면회귀");
+        add_test_items(&mut masked, "인피면구", 1);
         let CommandResult::MobEvent { set_position, .. } =
-            super::try_mob_event(&mut unmasked, "산서성", &room, "혈광호위 대화")
-                .expect("unmasked guard dialogue must be selected")
+            super::try_mob_event(&mut masked, "산서성", &room, "혈광호위 대화")
+                .expect("masked guard dialogue must be selected")
         else {
             panic!("guard dialogue must complete immediately");
         };
@@ -2236,8 +8464,8 @@ mod tests {
             .unwrap()
             .mob_cache
             .remove_mob(&mob_key);
+        let _ = std::fs::remove_file("data/user/혈무곡무가면회귀.json");
         let _ = std::fs::remove_file("data/user/혈무곡가면회귀.json");
-        let _ = std::fs::remove_file("data/user/혈무곡안내회귀.json");
     }
 
     #[test]
@@ -2269,6 +8497,183 @@ mod tests {
         for key in keys {
             world.mob_cache.remove_mob(&key);
         }
+    }
+
+    #[test]
+    fn unique_owner_placeholder_uses_python_bare_owner_token() {
+        let oneitem_path = std::path::Path::new("data/config/oneitem.json");
+        let saved_oneitem_file = std::fs::read(oneitem_path).ok();
+        crate::oneitem::oneitem_clear();
+        assert!(crate::oneitem::oneitem_have("163", "먼저온사람"));
+
+        let mut body = Body::new();
+        body.set("이름", "기연소지자회귀");
+        let (output, _) = run_zone_event(&mut body, "동정호", "요마_절_구배_삼배.rhai", None);
+        assert!(
+            output.iter().any(|line| line.contains("먼저온사람 보다")),
+            "$기연확인! must substitute Python's bare [기연소지자] token: {output:?}"
+        );
+        assert!(
+            output
+                .iter()
+                .all(|line| !line.contains("[기연소지자]") && !line.contains("먼저온사람이 보다")),
+            "$기연확인! must not add a particle to the owner token: {output:?}"
+        );
+
+        for (path, index) in [
+            ("data/script/동정호/요마_절_구배_삼배.rhai", "163"),
+            ("data/script/동정호/무황_절_구배_삼배.rhai", "348"),
+            ("data/script/호북성/36_절_구배_삼배.rhai", "71"),
+            ("data/script/낙양성/88_부셔_부.rhai", "66"),
+        ] {
+            let source = std::fs::read_to_string(path).unwrap();
+            assert!(
+                !source.contains("[기연소지자]"),
+                "unconverted owner token: {path}"
+            );
+            assert!(
+                source.contains(&format!("one_item_owner_raw(\"{index}\")")),
+                "Python bare-owner helper missing from {path}"
+            );
+        }
+
+        let _ = std::fs::remove_file("data/user/기연소지자회귀.json");
+        if let Some(contents) = saved_oneitem_file {
+            std::fs::write(oneitem_path, contents).unwrap();
+        } else {
+            let _ = std::fs::remove_file(oneitem_path);
+        }
+        assert!(crate::oneitem::oneitem_reload());
+    }
+
+    #[test]
+    fn bulhong_valley_unique_owner_before_cheoreom_stays_bare() {
+        let oneitem_path = std::path::Path::new("data/config/oneitem.json");
+        let saved_oneitem_file = std::fs::read(oneitem_path).ok();
+        crate::oneitem::oneitem_clear();
+        assert!(crate::oneitem::oneitem_have("해왕조", "먼저온사람"));
+
+        let mut body = Body::new();
+        body.set("이름", "불혼곡소유자회귀");
+        let source = std::fs::read_to_string("data/script/산서성/46_대화_대.rhai").unwrap();
+        let (output, _) = run_zone_event_source(&mut body, "산서성", &source, None);
+        assert!(
+            output.iter().any(|line| line.contains("먼저온사람처럼")),
+            "Python's `[기연소지자]처럼` must keep the owner bare: {output:?}"
+        );
+        assert!(
+            output.iter().all(|line| !line.contains("먼저온사람이처럼")),
+            "the owner must not gain an extra subject particle: {output:?}"
+        );
+
+        let _ = std::fs::remove_file("data/user/불혼곡소유자회귀.json");
+        if let Some(contents) = saved_oneitem_file {
+            std::fs::write(oneitem_path, contents).unwrap();
+        } else {
+            let _ = std::fs::remove_file(oneitem_path);
+        }
+        assert!(crate::oneitem::oneitem_reload());
+    }
+
+    #[test]
+    fn bulhong_valley_answer_applies_the_python_owner_subject_particle() {
+        let oneitem_path = std::path::Path::new("data/config/oneitem.json");
+        let saved_oneitem_file = std::fs::read(oneitem_path).ok();
+        crate::oneitem::oneitem_clear();
+        assert!(crate::oneitem::oneitem_have("해왕조", "먼저온사람"));
+
+        let mut body = Body::new();
+        body.set("이름", "불혼곡정답회귀");
+        super::set_user_event(&mut body, "불혼곡", "1");
+        let source = std::fs::read_to_string("data/script/산서성/46_답.rhai").unwrap();
+        let (output, _) = run_zone_event_source_with_words(
+            &mut body,
+            "산서성",
+            &source,
+            &["불혼곡주".into(), "242".into(), "답".into()],
+            None,
+        );
+        assert!(
+            output
+                .iter()
+                .any(|line| line.contains("먼저온사람이 먼저 왔었다네")),
+            "Python postPosition1 must resolve `[기연소지자](이/가)`: {output:?}"
+        );
+        assert!(
+            output.iter().all(|line| !line.contains("(이/가)")),
+            "Rhai output must not leave Python's particle marker literal: {output:?}"
+        );
+        assert!(body_has_item_spec(&body, "해왕조-5"));
+        assert!(get_user_event(&body, "불혼곡").is_empty());
+        assert!(!get_user_event(&body, "불혼곡끝").is_empty());
+
+        let _ = std::fs::remove_file("data/user/불혼곡정답회귀.json");
+        if let Some(contents) = saved_oneitem_file {
+            std::fs::write(oneitem_path, contents).unwrap();
+        } else {
+            let _ = std::fs::remove_file(oneitem_path);
+        }
+        assert!(crate::oneitem::oneitem_reload());
+    }
+
+    #[test]
+    fn unique_owner_name_lookup_keeps_python_bare_owner_before_ege() {
+        let oneitem_path = std::path::Path::new("data/config/oneitem.json");
+        let saved_oneitem_file = std::fs::read(oneitem_path).ok();
+        crate::oneitem::oneitem_clear();
+        assert!(crate::oneitem::oneitem_have("77", "먼저온사람"));
+
+        let mut body = Body::new();
+        body.set("이름", "기연이름소지자회귀");
+        body.set("은전", 30_000_000_i64);
+        let source =
+            std::fs::read_to_string("data/script/낙양성/기연맨_위치확인_위치_확인.rhai").unwrap();
+        let (output, _) = run_zone_event_source_with_words(
+            &mut body,
+            "낙양성",
+            &source,
+            &["기연맨".into(), "간장검".into(), "위치확인".into()],
+            None,
+        );
+        assert!(
+            output.iter().any(|line| line.contains("먼저온사람에게")),
+            "$기연존재확인 must substitute the bare owner before `에게`: {output:?}"
+        );
+        assert!(
+            output.iter().all(|line| !line.contains("먼저온사람이에게")),
+            "$기연존재확인 must not add an extra subject particle: {output:?}"
+        );
+        assert_eq!(body.get_int("은전"), 0);
+
+        crate::oneitem::oneitem_clear();
+        let mut missing = Body::new();
+        missing.set("이름", "기연이름미소지회귀");
+        missing.set("은전", 30_000_000_i64);
+        let (output, _) = run_zone_event_source_with_words(
+            &mut missing,
+            "낙양성",
+            &source,
+            &["기연맨".into(), "간장검".into(), "위치확인".into()],
+            None,
+        );
+        assert!(
+            output.iter().any(|line| line.contains("강호에 없다네")),
+            "missing unique must keep the Python fallback message: {output:?}"
+        );
+        assert_eq!(
+            missing.get_int("은전"),
+            30_000_000,
+            "Python only charges when `$기연존재확인` finds an owner"
+        );
+
+        let _ = std::fs::remove_file("data/user/기연이름소지자회귀.json");
+        let _ = std::fs::remove_file("data/user/기연이름미소지회귀.json");
+        if let Some(contents) = saved_oneitem_file {
+            std::fs::write(oneitem_path, contents).unwrap();
+        } else {
+            let _ = std::fs::remove_file(oneitem_path);
+        }
+        assert!(crate::oneitem::oneitem_reload());
     }
 
     #[test]
@@ -2318,6 +8723,10 @@ mod tests {
         body.set("2 성격플킬", threshold);
         assert!(!get_tendency(&body, "정파"));
         assert!(get_tendency(&body, "사파"));
+        assert!(
+            !get_tendency(&body, "알수없는성향"),
+            "Python getTendency() returns None/false for an unknown condition"
+        );
     }
 
     #[test]
@@ -2482,6 +8891,31 @@ mod tests {
         assert!(!body_has_item_spec(&body, "오소리가죽"));
         assert!(body_has_item_spec(&body, "합성10 2"));
 
+        // `$몹상태확인! 시체` skips the reward block for a corpse.  Its
+        // remaining source path must therefore attack a living badger rather
+        // than granting hide or silently terminating the event.
+        let living_room = format!("오소리생존회귀-{}", std::process::id());
+        let (living_key, living_id) = place_event_mob("낙양성", "25", &living_room);
+        let mut living_body = Body::new();
+        living_body.set("이름", "오소리생존회귀");
+        super::try_mob_event(&mut living_body, "낙양성", &living_room, "오소리 가죽 벗겨")
+            .expect("living badger event must select the source mob");
+        assert_eq!(living_body.act, crate::player::ActState::Fight);
+        assert!(
+            crate::script::combat_commands::combat_target_instance_ids(&living_body)
+                .contains(&living_id)
+        );
+        assert!(!body_has_item_spec(&living_body, "오소리가죽"));
+        crate::script::combat_commands::remove_combat_target_instance_id(
+            &mut living_body,
+            living_id,
+        );
+        crate::world::get_world_state()
+            .write()
+            .unwrap()
+            .mob_cache
+            .remove_mob(&living_key);
+
         let storage = crate::script::ScriptStorage::default();
         storage
             .execute("먹어", &mut body, "음양속고구환단", None, None, None)
@@ -2493,6 +8927,7 @@ mod tests {
         world.mob_cache.remove_instance("낙양성", &room, &mob_key);
         world.mob_cache.remove_mob(&mob_key);
         let _ = std::fs::remove_file("data/user/오소리가죽회귀.json");
+        let _ = std::fs::remove_file("data/user/오소리생존회귀.json");
     }
 
     #[test]
@@ -3026,6 +9461,7 @@ mod tests {
 
     #[test]
     fn huashan_swordsman_chain_gives_the_unique_reward_and_marks_completion() {
+        clear_test_oneitems(&["158"]);
         let mut body = Body::new();
         body.set("이름", "화산검객회귀");
 
@@ -3047,11 +9483,13 @@ mod tests {
 
         let mut world = crate::world::get_world_state().write().unwrap();
         world.mob_cache.remove_mob(&mob_key);
+        clear_test_oneitems(&["158"]);
         let _ = std::fs::remove_file("data/user/화산검객회귀.json");
     }
 
     #[test]
     fn dharma_cave_corpse_search_gives_unique_sword_and_feather_pants() {
+        clear_test_oneitems(&["161"]);
         let mut body = Body::new();
         body.set("이름", "달마동회귀");
         let room = format!("달마동회귀-{}", std::process::id());
@@ -3070,6 +9508,7 @@ mod tests {
 
         let mut world = crate::world::get_world_state().write().unwrap();
         world.mob_cache.remove_mob(&mob_key);
+        clear_test_oneitems(&["161"]);
         let _ = std::fs::remove_file("data/user/달마동회귀.json");
     }
 
@@ -3102,6 +9541,7 @@ mod tests {
 
     #[test]
     fn jeseok_chamber_statue_requires_a_live_target_and_marks_the_unique_reward() {
+        clear_test_oneitems(&["918"]);
         let mut body = Body::new();
         body.set("이름", "제석천실회귀");
         let room = format!("제석천실회귀-{}", std::process::id());
@@ -3129,12 +9569,14 @@ mod tests {
 
         let mut world = crate::world::get_world_state().write().unwrap();
         world.mob_cache.remove_mob(&mob_key);
+        clear_test_oneitems(&["918"]);
         let _ = std::fs::remove_file("data/user/제석천실회귀.json");
         let _ = std::fs::remove_file("data/user/제석천실시체회귀.json");
     }
 
     #[test]
     fn blood_spirit_cave_altar_awards_its_unique_sword_once_per_player_event() {
+        clear_test_oneitems(&["151"]);
         let mut body = Body::new();
         body.set("이름", "혈령동회귀");
         let room = format!("혈령동회귀-{}", std::process::id());
@@ -3153,6 +9595,7 @@ mod tests {
 
         let mut world = crate::world::get_world_state().write().unwrap();
         world.mob_cache.remove_mob(&mob_key);
+        clear_test_oneitems(&["151"]);
         let _ = std::fs::remove_file("data/user/혈령동회귀.json");
     }
 
@@ -3231,7 +9674,7 @@ mod tests {
     }
 
     #[test]
-    fn peach_blossom_forest_tree_corpse_and_bird_chain_match_source_transitions() {
+    fn peach_blossom_forest_tree_live_python_and_bird_chain_match_source_transitions() {
         let mut body = Body::new();
         body.set("이름", "도화림회귀");
         let room = format!("도화림회귀-{}", std::process::id());
@@ -3244,10 +9687,11 @@ mod tests {
         assert!(body_has_item_spec(&body, "yak10"));
         assert!(!get_user_event(&body, "음양선도신과").is_empty());
 
-        mark_event_mob_corpse("호북성", &room, python_id);
-        let corpse = super::try_mob_event(&mut body, "호북성", &room, "시체 배째")
-            .expect("great python corpse event must be selected");
-        let CommandResult::MobEvent { output_lines, .. } = corpse else {
+        // Python `$몹상태확인! 시체` skips the reward block for a corpse;
+        // the live python is eviscerated and then changed to a corpse.
+        let opened = super::try_mob_event(&mut body, "호북성", &room, "대망 배째")
+            .expect("live great python event must be selected");
+        let CommandResult::MobEvent { output_lines, .. } = opened else {
             panic!("unexpected event result");
         };
         assert!(output_lines.iter().any(|line| line.contains("음양과")));
@@ -3260,7 +9704,9 @@ mod tests {
                 .into_iter()
                 .find(|mob| mob.instance_id == python_id)
                 .unwrap();
-            assert_eq!(python.act, 3);
+            // Python `Mob.setAct("시체")` sets ACT_DEATH (2); ACT_REGEN (3)
+            // is entered later by the corpse-expiry update.
+            assert_eq!(python.act, 2);
         }
 
         let bird = super::try_mob_event(&mut body, "호북성", &room, "붕조 음양과 줘")
@@ -3540,6 +9986,21 @@ mod tests {
         assert!(get_user_event(&body, "오행문").is_empty());
         assert!(get_user_event(&body, "오행관끝").is_empty());
         assert!(!get_user_event(&body, "혼원1").is_empty());
+
+        // 원본은 여기서 일반 진행 키가 아니라 ANSI가 포함된 별도 legacy
+        // 키를 삭제한다. 둘을 합치면 윤대인3 재방문 경로가 사라진다.
+        super::del_user_event(&mut body, "혼원1");
+        super::set_user_event(&mut body, "토령관", "1");
+        super::set_user_event(&mut body, "\x1b[33m윤대인\x1b[37;40m3", "1");
+        super::set_user_event(&mut body, "윤대인3", "1");
+        add_test_items(&mut body, "수령시", 1);
+        let (_, destination) = run_zone_event(&mut body, "산동성", "58_대_대화.rhai", None);
+        assert_eq!(destination, Some(("산동성".to_string(), "401".to_string())));
+        assert!(get_user_event(&body, "\x1b[33m윤대인\x1b[37;40m3").is_empty());
+        assert!(
+            !get_user_event(&body, "윤대인3").is_empty(),
+            "source must not delete the ordinary 윤대인3 dialogue state"
+        );
 
         super::set_user_event(&mut body, "혼원2", "1");
         let (book_lines, _) = run_zone_event(&mut body, "산동성", "58-1_대_대화.rhai", None);
@@ -3849,7 +10310,7 @@ mod tests {
     }
 
     #[test]
-    fn hundred_floor_tower_cremation_restores_source_regen_after_corpse_reward() {
+    fn hundred_floor_tower_cremation_restores_source_immediate_respawn_after_corpse_reward() {
         let cremation_scripts = std::fs::read_dir("data/script/백층탑")
             .unwrap()
             .filter_map(Result::ok)
@@ -3866,6 +10327,11 @@ mod tests {
             assert!(
                 source.contains("if !selected_mob_is_corpse() { end_event(); }"),
                 "{} must retain the source corpse gate",
+                path.display()
+            );
+            assert!(
+                source.contains("respawn_selected_mob();"),
+                "{} must retain the source immediate `리젠후생성` transition",
                 path.display()
             );
         }
@@ -3889,7 +10355,12 @@ mod tests {
             .iter()
             .find(|mob| mob.instance_id == instance_id)
             .unwrap();
-        assert_eq!(mob.act, 3, "source cremation must move corpse to regen");
+        assert!(
+            mob.alive,
+            "Python `리젠후생성` must immediately regenerate the corpse"
+        );
+        assert_eq!(mob.act, 0, "source cremation must restore stand state");
+        assert_eq!(mob.hp, mob.max_hp, "source cremation must restore full hp");
         drop(world);
         let mut world = crate::world::get_world_state().write().unwrap();
         world.mob_cache.remove_mob(&mob_key);
@@ -4337,10 +10808,16 @@ mod tests {
             "검후_대_대화.rhai",
             None,
         );
-        let CommandResult::MobEventEnter { resume_func, .. } = started else {
+        let CommandResult::MobEventEnter {
+            resume_func,
+            prompt,
+            ..
+        } = started
+        else {
             panic!("source gatekeeper dialogue must wait for enter");
         };
         assert_eq!(resume_func.as_deref(), Some("step1"));
+        assert_eq!(prompt, "[엔터키를 누르세요]");
         let resumed = do_event_rhai(
             &mut dialogue,
             &data,
@@ -4350,10 +10827,16 @@ mod tests {
             "검후_대_대화.rhai",
             Some("step1".to_string()),
         );
-        let CommandResult::MobEventEnter { resume_func, .. } = resumed else {
+        let CommandResult::MobEventEnter {
+            resume_func,
+            prompt,
+            ..
+        } = resumed
+        else {
             panic!("source gatekeeper dialogue must continue waiting at step1");
         };
         assert_eq!(resume_func.as_deref(), Some("step2"));
+        assert_eq!(prompt, "[엔터키를 누르세요]");
 
         let mut unrelated = Body::new();
         unrelated.set("이름", "검후무관회귀");
@@ -4496,6 +10979,28 @@ mod tests {
 
         let _ = std::fs::remove_file("data/user/검후조건부족회귀.json");
         let _ = std::fs::remove_file("data/user/검후혈세승리회귀.json");
+    }
+
+    #[test]
+    fn sword_empress_terminal_states_keep_the_source_dialogue_before_other_branches() {
+        for state in ["혈살루끝", "검후가짜눈물"] {
+            let mut body = Body::new();
+            body.set("이름", format!("검후종료상태{state}"));
+            super::set_user_event(&mut body, state, "1");
+
+            let (output, _) = run_zone_event(&mut body, "절강성", "검후_대_대화.rhai", None);
+            assert!(
+                output
+                    .iter()
+                    .any(|line| line.contains("더 이상 볼일이 없습니다")),
+                "{state}: {output:?}"
+            );
+            assert!(
+                !get_user_event(&body, state).is_empty(),
+                "{state} must only gate dialogue, not be consumed"
+            );
+            let _ = std::fs::remove_file(format!("data/user/검후종료상태{state}.json"));
+        }
     }
 
     #[test]
@@ -5378,6 +11883,20 @@ mod tests {
     fn celestial_emperor_teachings_restore_vision_mp_and_skill_count_gates() {
         let room = format!("옥황상제수련회귀-{}", std::process::id());
         let (mob_key, _) = place_event_mob("선인", "옥황상제", &room);
+        let add_required_visions = |body: &mut Body| {
+            for vision in [
+                "멸천혈폭비전",
+                "혈세천하비전",
+                "천마검비전",
+                "천마무격신장비전",
+                "대비단혼강비전",
+                "무극검비전",
+                "뇌음자흑강비전",
+                "강룡십팔장비전",
+            ] {
+                body.add_secret_skill(vision);
+            }
+        };
 
         let mut blocked_by_vision = Body::new();
         blocked_by_vision.set("이름", "옥황상제비전회귀");
@@ -5393,23 +11912,24 @@ mod tests {
         };
         assert!(output_lines
             .iter()
-            .any(|line| line.contains("멸천혈폭비전 먼저")));
+            .any(|line| line.contains("혈세천하비전 먼저")));
         assert!(!blocked_by_vision
             .skill_list
             .iter()
             .any(|skill| skill == "역근경"));
 
-        for (skill, threshold) in [
-            ("태극강기", 60_usize),
-            ("고영신공", 70),
-            ("가의신공", 80),
-            ("명옥공", 85),
-            ("북명신공", 90),
-            ("천외비선", 108),
+        for (skill, threshold, inner_power) in [
+            ("태극강기", 60_usize, 3_200_i64),
+            ("고영신공", 70, 3_200),
+            ("가의신공", 80, 3_200),
+            ("명옥공", 85, 3_200),
+            ("북명신공", 90, 4_200),
+            ("천외비선", 108, 5_200),
         ] {
             let mut body = Body::new();
             body.set("이름", format!("옥황상제{skill}회귀"));
-            body.set("최고내공", 3200_i64);
+            body.set("최고내공", inner_power);
+            add_required_visions(&mut body);
             for index in 0..threshold {
                 body.skill_list.push(format!("기초무공{index}"));
             }
@@ -5419,9 +11939,33 @@ mod tests {
             let _ = std::fs::remove_file(format!("data/user/옥황상제{skill}회귀.json"));
         }
 
+        for (skill, threshold, required_power) in
+            [("북명신공", 90_usize, 4_200_i64), ("천외비선", 108, 5_200)]
+        {
+            let mut body = Body::new();
+            body.set("이름", format!("옥황상제{skill}내공부족회귀"));
+            body.set("최고내공", required_power - 1);
+            add_required_visions(&mut body);
+            for index in 0..threshold {
+                body.skill_list.push(format!("기초무공{index}"));
+            }
+            let CommandResult::MobEvent { output_lines, .. } =
+                super::try_mob_event(&mut body, "선인", &room, &format!("옥황상제 {skill} 대화"))
+                    .expect("inner-power-gated teaching must select the emperor")
+            else {
+                panic!("inner-power-gated teaching returned a non-event result");
+            };
+            assert!(output_lines
+                .iter()
+                .any(|line| line.contains(&format!("내공 {required_power}"))));
+            assert!(!body.skill_list.iter().any(|name| name == skill));
+            let _ = std::fs::remove_file(format!("data/user/옥황상제{skill}내공부족회귀.json"));
+        }
+
         let mut insufficient_count = Body::new();
         insufficient_count.set("이름", "옥황상제수련부족회귀");
         insufficient_count.set("최고내공", 3200_i64);
+        add_required_visions(&mut insufficient_count);
         for index in 0..49 {
             insufficient_count
                 .skill_list
@@ -5442,6 +11986,7 @@ mod tests {
         root.set("이름", "옥황상제역근회귀");
         root.set("최고내공", 3200_i64);
         root.set("최고체력", 100_i64);
+        add_required_visions(&mut root);
         for index in 0..50 {
             root.skill_list.push(format!("기초무공{index}"));
         }
@@ -5691,6 +12236,7 @@ mod tests {
 
     #[test]
     fn ascension_duel_deaths_and_pangu_complete_the_source_route() {
+        let _rank_guard = RANK_TEST_LOCK.lock().unwrap();
         for (script, destination) in [
             ("아랑__소멸이벤트_.rhai", "420"),
             ("전설왕__소멸이벤트_.rhai", "421"),
@@ -5749,6 +12295,36 @@ mod tests {
         assert!(!get_user_event(&body, "선인탑끝").is_empty());
         assert_eq!(crate::world::rank::rank_read("무적선인", "반고완료회귀"), 1);
 
+        // Python Rank.write_rank keeps 200 entries regardless of the
+        // directive's display limit.  Once full, `$순위기록` skips the
+        // bracket that consumes the tower-completion events.
+        crate::world::rank::rank_clear("무적선인");
+        for rank in 0..200 {
+            crate::world::rank::rank_write(
+                "무적선인",
+                &format!("반고상위순위자{rank}"),
+                10_000 - rank,
+                100,
+            );
+        }
+        let mut outside = Body::new();
+        outside.set("이름", "반고순위밖회귀");
+        outside.set("무적선인", 1_i64);
+        super::set_user_event(&mut outside, "반고선택", "1");
+        let CommandResult::MobEvent { output_lines, .. } =
+            super::try_mob_event(&mut outside, "선인", &room, "반고 대화")
+                .expect("outside-rank Pangu dialogue")
+        else {
+            panic!("outside-rank Pangu dialogue was not an event");
+        };
+        assert!(output_lines.iter().any(|line| line.contains("모든 시련")));
+        assert!(!get_user_event(&outside, "반고선택").is_empty());
+        assert!(get_user_event(&outside, "선인탑끝").is_empty());
+        assert_eq!(
+            crate::world::rank::rank_read("무적선인", "반고순위밖회귀"),
+            0
+        );
+
         let path = "data/map/선인/423.json";
         let json: serde_json::Value =
             serde_json::from_str(&std::fs::read_to_string(path).unwrap()).unwrap();
@@ -5767,6 +12343,7 @@ mod tests {
             let _ = std::fs::remove_file(rank_path);
         }
         let _ = std::fs::remove_file("data/user/반고완료회귀.json");
+        let _ = std::fs::remove_file("data/user/반고순위밖회귀.json");
     }
 
     #[test]

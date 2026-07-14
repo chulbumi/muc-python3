@@ -8,9 +8,13 @@ use std::collections::HashMap;
 use std::path::{Path, PathBuf};
 use std::sync::RwLock;
 
+use super::event_binding::EventBindings;
+
 /// Raw item data from JSON
 #[derive(Debug, Clone)]
 pub struct RawItemData {
+    /// Optional item-level scripts such as use, examine, equip, or custom triggers.
+    pub events: EventBindings,
     /// Item name (이름)
     pub name: String,
     /// Item type (종류)
@@ -65,6 +69,7 @@ impl RawItemData {
     /// Create empty item data
     pub fn new() -> Self {
         Self {
+            events: EventBindings::default(),
             name: String::new(),
             item_type: "기타".to_string(),
             subtype: String::new(),
@@ -120,6 +125,8 @@ pub struct ItemInstance {
     pub flags: Vec<String>,
     /// Usage count
     pub usage_count: i32,
+    /// Event bindings copied from the item definition for future dispatch.
+    pub events: EventBindings,
 }
 
 impl ItemInstance {
@@ -135,6 +142,7 @@ impl ItemInstance {
             enchant: 0,
             flags: Vec::new(),
             usage_count: 0,
+            events: EventBindings::default(),
         }
     }
 
@@ -150,6 +158,7 @@ impl ItemInstance {
             enchant: 0,
             flags: data.flags.clone(),
             usage_count: 0,
+            events: data.events.clone(),
         }
     }
 
@@ -422,6 +431,8 @@ impl ItemCache {
             .and_then(|v| v.as_str())
             .map(|s| s.to_string());
 
+        data.events = EventBindings::from_json_map(item_info);
+
         Ok(data)
     }
 
@@ -614,6 +625,28 @@ mod tests {
 
         instance.enchant = 5;
         assert_eq!(instance.get_display_name(), "+5 검");
+    }
+
+    #[test]
+    fn item_definition_and_instance_keep_event_bindings() {
+        let json = serde_json::json!({
+            "이름": "수상한 열쇠",
+            "종류": "기타",
+            "events": {
+                "use": "key_use.rhai",
+                "examine": ["$출력 희미한 문양이 있다."]
+            }
+        });
+        let data = ItemCache::new()
+            .parse_item_data(json.as_object().unwrap())
+            .unwrap();
+        let instance = ItemInstance::from_data(&data);
+
+        assert_eq!(
+            data.events.get("use"),
+            Some(&crate::world::EventScript::Rhai("key_use.rhai".into()))
+        );
+        assert_eq!(instance.events, data.events);
     }
 
     #[test]

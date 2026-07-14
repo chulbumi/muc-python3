@@ -63,15 +63,17 @@ async fn rank_network_snapshot_includes_inactive_and_transparent_channel_players
     let hidden = format!("순위망투명-{suffix}");
     let ordinary = format!("순위망일반-{suffix}");
     let viewer_addr: SocketAddr = "127.0.0.1:18141".parse().unwrap();
-    let (viewer_client, mut viewer_rx) =
-        ranked_client(18141, &viewer, 0, true, false, 100_000);
-    let (inactive_client, _inactive_rx) =
-        ranked_client(18142, &inactive, 40, false, false, 0);
+    let (viewer_client, mut viewer_rx) = ranked_client(18141, &viewer, 0, true, false, 100_000);
+    let (inactive_client, _inactive_rx) = ranked_client(18142, &inactive, 40, false, false, 0);
     let (hidden_client, _hidden_rx) = ranked_client(18143, &hidden, 30, true, true, 0);
-    let (ordinary_client, _ordinary_rx) =
-        ranked_client(18144, &ordinary, 20, true, false, 0);
+    let (ordinary_client, _ordinary_rx) = ranked_client(18144, &ordinary, 20, true, false, 0);
     let broadcaster = Arc::new(Broadcaster::new());
-    for client in [viewer_client, inactive_client, hidden_client, ordinary_client] {
+    for client in [
+        viewer_client,
+        inactive_client,
+        hidden_client,
+        ordinary_client,
+    ] {
         broadcaster.add_client(client);
     }
 

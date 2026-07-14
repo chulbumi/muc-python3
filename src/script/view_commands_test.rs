@@ -1,4 +1,54 @@
 use super::*;
+
+#[test]
+fn numeric_look_and_attack_resolve_the_same_first_room_mob() {
+    use crate::world::{get_world_state, MobInstance, PlayerPosition, RawMobData, RoomObjectRef};
+
+    let suffix = std::process::id();
+    let player = format!("숫자대상일관성-{suffix}");
+    let zone = format!("숫자대상일관성존-{suffix}");
+    let room = "1";
+    let mut ids = Vec::new();
+    for label in ["먼저등록몹", "나중등록몹"] {
+        let key = format!("{zone}:{label}");
+        let mut data = RawMobData::new();
+        data.name = label.into();
+        data.mob_type = 1;
+        data.max_hp = 100;
+        let instance = MobInstance::new(key.clone(), zone.clone(), room, &data);
+        ids.push((instance.instance_id, key));
+        let mut world = get_world_state().write().unwrap();
+        world
+            .mob_cache
+            .insert_mob_data(ids.last().unwrap().1.clone(), data);
+        world.mob_cache.add_mob_instance(instance);
+        world.record_test_room_object(&zone, room, RoomObjectRef::Mob(ids.last().unwrap().0));
+    }
+    get_world_state()
+        .write()
+        .unwrap()
+        .set_player_position(&player, PlayerPosition::new(zone.clone(), room.into()));
+
+    let mut body = Body::new();
+    body.set("이름", player.as_str());
+    let attack_target = super::cast::find_cast_target(&body, "1").cast::<rhai::Map>();
+    let attack_name = attack_target["name"].clone().into_string().unwrap();
+    let looked = ScriptStorage::default()
+        .execute("봐", &mut body, "1", None, None, None)
+        .unwrap()
+        .0;
+    assert!(
+        looked.iter().any(|line| line.contains(&attack_name)),
+        "봐={looked:?}, 쳐 대상={attack_name}"
+    );
+
+    let mut world = get_world_state().write().unwrap();
+    world.remove_player_position(&player);
+    if let Some(mobs) = world.mob_cache.get_all_mobs_in_room_mut(&zone, room) {
+        mobs.clear();
+    }
+}
+
 #[test]
 fn room_look_does_not_turn_terminal_delimiter_into_extra_blank_output() {
     use crate::world::{get_world_state, PlayerPosition};

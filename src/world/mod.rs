@@ -5,6 +5,8 @@
 
 pub mod difficulty;
 pub mod event;
+pub mod event_binding;
+pub mod fixture;
 pub mod guild;
 pub mod item;
 pub mod mob;
@@ -15,17 +17,20 @@ pub mod skill;
 pub mod tracking;
 pub mod user_home;
 
+#[cfg(test)]
+mod event_directive_test;
+
 // Re-export commonly used types
 pub use difficulty::{base_zone_name, difficulty_from_zone, DifficultyConfig, DifficultyLevel};
+pub use event_binding::{EventBindings, EventScript};
+pub use fixture::{Fixture, FixtureKind};
 
 pub use room::{
     format_exits_long, format_room_header, get_room, handle_player_enter, handle_player_exit,
     Direction, EnterMode, Exit, ExitMode, Room, RoomCache, RoomError,
 };
 
-pub use mob::{
-    get_mob_cache, EventScript, MobCache, MobError, MobInstance, MobSkillEffect, RawMobData,
-};
+pub use mob::{get_mob_cache, MobCache, MobError, MobInstance, MobSkillEffect, RawMobData};
 
 pub use skill::{
     calculate_normal_attacks, get_skill, get_skill_cache, get_skill_defense_head, PatternAction,
@@ -73,6 +78,8 @@ pub enum RoomObjectRef {
     /// Stable ordinal into the lazily loaded Python `설치리스트` Box vector.
     InstalledBox(usize),
     Box(usize),
+    /// Stable runtime identity of a room-bound interactive fixture.
+    Fixture(u64),
 }
 
 impl PlayerPosition {
@@ -131,6 +138,11 @@ pub struct WorldState {
     /// Socket-less Player objects created by Python `사용자몹소환`.
     summoned_users: Vec<SummonedUser>,
     next_summoned_user_id: u64,
+    /// Runtime fixtures keyed by stable identity.
+    fixtures: HashMap<u64, Fixture>,
+    /// Per-room fixture identity index. Values preserve placement order.
+    room_fixtures: HashMap<String, Vec<u64>>,
+    next_fixture_id: u64,
     /// Room cache
     pub room_cache: RoomCache,
     /// Mob cache
@@ -264,6 +276,9 @@ impl WorldState {
             room_players: HashMap::new(),
             summoned_users: Vec::new(),
             next_summoned_user_id: 1,
+            fixtures: HashMap::new(),
+            room_fixtures: HashMap::new(),
+            next_fixture_id: 1,
             room_cache: RoomCache::new(),
             mob_cache: MobCache::new(),
             item_cache: ItemCache::new(),
@@ -431,6 +446,90 @@ impl WorldState {
             .iter()
             .find(|user| user.id == id)
             .map(|user| user.body.get_name())
+    }
+
+    /// Place a new fixture at the front of Python-compatible `Room.objs`.
+    pub fn create_fixture(
+        &mut self,
+        zone: &str,
+        room: &str,
+        kind: FixtureKind,
+        attributes: HashMap<String, serde_json::Value>,
+    ) -> u64 {
+        let id = self.next_fixture_id;
+        self.next_fixture_id = self.next_fixture_id.saturating_add(1);
+        self.fixtures
+            .insert(id, Fixture::new(id, kind, zone, room, attributes));
+        self.room_fixtures
+            .entry(format!("{zone}:{room}"))
+            .or_default()
+            .insert(0, id);
+        self.record_room_object(zone, room, RoomObjectRef::Fixture(id));
+        id
+    }
+
+    pub fn get_fixture(&self, id: u64) -> Option<&Fixture> {
+        self.fixtures.get(&id)
+    }
+
+    pub fn get_fixture_mut(&mut self, id: u64) -> Option<&mut Fixture> {
+        self.fixtures.get_mut(&id)
+    }
+
+    /// Return room fixtures newest-first, matching object insertion order.
+    pub fn get_room_fixtures(&self, zone: &str, room: &str) -> Vec<&Fixture> {
+        self.room_fixtures
+            .get(&format!("{zone}:{room}"))
+            .into_iter()
+            .flatten()
+            .filter_map(|id| self.fixtures.get(id))
+            .collect()
+    }
+
+    pub fn move_fixture(&mut self, id: u64, zone: &str, room: &str) -> bool {
+        let Some(previous) = self
+            .fixtures
+            .get(&id)
+            .map(|fixture| (fixture.zone.clone(), fixture.room.clone()))
+        else {
+            return false;
+        };
+        if previous.0 == zone && previous.1 == room {
+            return true;
+        }
+        self.remove_fixture_from_room_index(&previous.0, &previous.1, id);
+        self.remove_room_object(&previous.0, &previous.1, &RoomObjectRef::Fixture(id));
+        let Some(fixture) = self.fixtures.get_mut(&id) else {
+            return false;
+        };
+        fixture.zone = zone.to_string();
+        fixture.room = room.to_string();
+        self.room_fixtures
+            .entry(format!("{zone}:{room}"))
+            .or_default()
+            .insert(0, id);
+        self.record_room_object(zone, room, RoomObjectRef::Fixture(id));
+        true
+    }
+
+    pub fn remove_fixture(&mut self, id: u64) -> Option<Fixture> {
+        let fixture = self.fixtures.remove(&id)?;
+        self.remove_fixture_from_room_index(&fixture.zone, &fixture.room, id);
+        self.remove_room_object(&fixture.zone, &fixture.room, &RoomObjectRef::Fixture(id));
+        Some(fixture)
+    }
+
+    fn remove_fixture_from_room_index(&mut self, zone: &str, room: &str, id: u64) {
+        let key = format!("{zone}:{room}");
+        let empty = if let Some(fixtures) = self.room_fixtures.get_mut(&key) {
+            fixtures.retain(|fixture_id| *fixture_id != id);
+            fixtures.is_empty()
+        } else {
+            false
+        };
+        if empty {
+            self.room_fixtures.remove(&key);
+        }
     }
 
     fn record_room_object(&mut self, zone: &str, room: &str, object: RoomObjectRef) {
@@ -878,6 +977,20 @@ impl WorldState {
                 continue;
             };
             for mob in mobs {
+                if mob.alive && mob.mob_type == 6 {
+                    if let Some(data) = templates.get(&mob.mob_key) {
+                        if now.saturating_sub(mob.time_of_regen) >= data.item_regen {
+                            mob.time_of_regen = now;
+                            crate::server::game_loop::generate_mob_corpse_items(
+                                mob,
+                                data,
+                                &mut |upper| {
+                                    rand::Rng::gen_range(&mut rand::thread_rng(), 0..=upper)
+                                },
+                            );
+                        }
+                    }
+                }
                 if !mob.alive
                     && now.saturating_sub(mob.death_time)
                         >= templates
@@ -920,11 +1033,7 @@ impl WorldState {
             // Python removes the regenerated object from its wandering room
             // and inserts it at the front of its fixed origin room.
             self.remove_room_object(&old_zone, &old_room, &RoomObjectRef::Mob(instance_id));
-            self.record_room_object(
-                &origin_zone,
-                &origin_room,
-                RoomObjectRef::Mob(instance_id),
-            );
+            self.record_room_object(&origin_zone, &origin_room, RoomObjectRef::Mob(instance_id));
         }
         for instance_id in respawning_instances {
             let Some(mob) = self
@@ -1622,8 +1731,7 @@ mod world_state_tests {
             mob.death_time = chrono::Utc::now().timestamp() - 1;
         }
 
-        let messages =
-            world.update_occupied_room_mobs(&[("시험존".to_string(), "2".to_string())]);
+        let messages = world.update_occupied_room_mobs(&[("시험존".to_string(), "2".to_string())]);
 
         assert!(world
             .mob_cache
@@ -1728,6 +1836,30 @@ mod world_state_tests {
         assert_eq!(expired[0].name, "시험검");
         assert!(world.get_room_objs("시험존", "1").is_empty());
         assert!(world.get_room_object_order("시험존", "1").is_empty());
+    }
+
+    #[test]
+    fn type_six_box_refills_only_when_item_regen_is_due_and_empty() {
+        let mut world = WorldState::new();
+        let mut data = RawMobData::new();
+        data.name = "회귀상자".into();
+        data.zone = "시험존".into();
+        data.mob_type = 6;
+        data.item_regen = 180;
+        data.drop_items.push(("892".into(), 1, 100, 1));
+        let key = "시험존:회귀상자".to_string();
+        world.mob_cache.insert_mob_data(key.clone(), data.clone());
+        let mut instance = MobInstance::new(key, "시험존".into(), "1", &data);
+        instance.time_of_regen = chrono::Utc::now().timestamp() - 180;
+        world.mob_cache.add_mob_instance(instance);
+
+        world.update_occupied_room_mobs(&[("시험존".into(), "1".into())]);
+        let mobs = world.mob_cache.get_all_mobs_in_room("시험존", "1");
+        assert_eq!(mobs[0].inventory.len(), 1);
+        assert_eq!(
+            mobs[0].inventory[0].lock().unwrap().getString("인덱스"),
+            "892"
+        );
     }
 
     #[test]

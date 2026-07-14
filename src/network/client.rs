@@ -35,23 +35,25 @@ use crate::script::{
     build_room_view_player_snapshot_with_interactive, clear_precomputed_all_online,
     clear_precomputed_box_context, clear_precomputed_room_view_players,
     immediate_exit_destinations, installed_box_party_snapshot_by_pointer,
-    installed_box_party_snapshots, load_body_from_json,
-    load_user_password_hash, missing_party_person, password_hash, password_needs_upgrade,
+    installed_box_party_snapshots, load_body_from_json, missing_party_person, password_hash,
     password_verify, save_body_to_json, set_cast_room_players, set_precomputed_adult_channel,
     set_precomputed_all_online, set_precomputed_box_context, set_precomputed_connected_names,
     set_precomputed_online_names, set_precomputed_party_context, set_precomputed_room_inventories,
     set_precomputed_room_mugong_targets, set_precomputed_room_view_players,
     set_precomputed_tell_players, take_admin_set_player_value_request, take_adult_channel_requests,
     take_auto_move_request, take_box_deliveries, take_change_player_request,
-    take_force_command_request, take_guild_accept_request, take_guild_apply_request,
-    take_guild_kick_request, take_guild_nickname_request, take_guild_position_request,
-    take_guild_reset_request, take_guild_transfer_request, take_party_requests,
-    take_remove_skill_request, take_save_all_request, take_set_player_attr_request,
-    take_set_skill_request, take_summon_player_request, take_teach_skill_request,
-    upgrade_user_password_hash, AdultChannelDelivery, BoxDelivery, CastRoomPlayerRef,
-    PartyDelivery, TellPlayerSnapshot, PARTY_DISCONNECT_REQUEST,
+    take_event_command_request, take_force_command_request, take_guild_accept_request,
+    take_guild_apply_request, take_guild_kick_request, take_guild_nickname_request,
+    take_guild_position_request, take_guild_reset_request, take_guild_transfer_request,
+    take_party_requests, take_remove_skill_request, take_save_all_request,
+    take_set_player_attr_request, take_set_skill_request, take_summon_player_request,
+    take_teach_skill_request, verify_and_upgrade_user_password, AdultChannelDelivery, BoxDelivery,
+    CastRoomPlayerRef, PartyDelivery, TellPlayerSnapshot, PARTY_DISCONNECT_REQUEST,
 };
-use crate::world::event::{run_script_chunk, run_script_chunk_rhai, try_mob_event, ScriptNext};
+use crate::world::event::{
+    run_script_chunk, run_script_chunk_rhai, try_mob_event, ScriptNext, EVENT_DEATH_FINISH_REQUEST,
+    EVENT_LP_PROMPT_MARKER,
+};
 use crate::world::item::{get_item_display_name, get_item_weight_by_key};
 use crate::world::{get_world_state, PlayerPosition, RoomCache};
 use std::collections::{HashMap, VecDeque};
@@ -541,7 +543,13 @@ async fn process_login_state(
                 .is_some()
         };
         if has_pending {
-            handle_pending_change_password(broadcaster, addr, input).await?;
+            handle_pending_change_password_with_registry(
+                broadcaster,
+                addr,
+                input,
+                Some(command_registry.as_ref()),
+            )
+            .await?;
             return Ok(false);
         }
         handle_game_command(
@@ -555,6 +563,32 @@ async fn process_login_state(
         .await?;
         return Ok(false);
     }
+
+    // bcrypt is intentionally CPU-expensive. Never run it while holding the
+    // client map or on a Tokio worker that also serves other connections.
+    let password_ok = {
+        let identity = {
+            let clients = broadcaster.clients.lock();
+            clients
+                .get(&addr)
+                .and_then(|client| client.login_session.as_ref())
+                .and_then(|session| {
+                    (session.state == LoginState::Password).then(|| session.name.clone())
+                })
+        };
+        if let Some(name) = identity {
+            let plain = input.to_string();
+            Some(
+                tokio::task::spawn_blocking(move || {
+                    verify_and_upgrade_user_password(&name, &plain)
+                })
+                .await
+                .unwrap_or(false),
+            )
+        } else {
+            None
+        }
+    };
 
     // Now we're in login phase - get the next action to take
     // We must drop the lock before any await points
@@ -611,7 +645,9 @@ async fn process_login_state(
                 );
                 tracing::debug!(
                     "[NAME VALID] from Logo: name='{}', is_korean={}, is_special={}",
-                    input_name, is_korean, is_special
+                    input_name,
+                    is_korean,
+                    is_special
                 );
 
                 if input_name.is_empty() {
@@ -691,8 +727,7 @@ async fn process_login_state(
             }
             LoginState::Password => {
                 session.attempts += 1;
-                let stored = load_user_password_hash(&name);
-                let ok = stored.as_ref().is_some_and(|s| password_verify(s, input));
+                let ok = password_ok.unwrap_or(false);
 
                 if !ok {
                     // 암호 틀림: 3회면 접속 끊기, 아니면 재입력
@@ -702,11 +737,6 @@ async fn process_login_state(
                         LoginAction::AskPasswordRetry
                     }
                 } else {
-                    if stored.as_ref().is_some_and(|s| password_needs_upgrade(s)) {
-                        if let Err(error) = upgrade_user_password_hash(&name, input) {
-                            log::error!("failed to upgrade password hash for {}: {}", name, error);
-                        }
-                    }
                     session.attempts = 0;
                     if has_duplicate {
                         session.state = LoginState::AskKickExisting;
@@ -1189,7 +1219,9 @@ fn process_script_line(
 ) -> (u8, usize, Option<String>, Option<String>, bool, bool, u64) {
     tracing::debug!(
         "[process_script_line] input_len={}, doumi_step={:?}, doumi_resume_op={:?}",
-        input.len(), session.doumi_step, session.doumi_resume_op
+        input.len(),
+        session.doumi_step,
+        session.doumi_resume_op
     );
     tracing::debug!(
         "[process_script_line] doumi_script_path='{}'",
@@ -1291,7 +1323,8 @@ fn process_script_line(
     };
     tracing::debug!(
         "[process_script_line] resume_op={:?}, effective_input_len={}",
-        resume_op, effective_input.len()
+        resume_op,
+        effective_input.len()
     );
     let resume = resume_op.as_ref().map(|o| (o.as_str(), effective_input));
 
@@ -1785,6 +1818,142 @@ async fn send_game_prompt(
     };
     broadcaster.send_to(addr, &prompt)?;
     Ok(())
+}
+
+/// Render event output with Python `Player.lpPrompt()` boundaries intact.
+/// `$특성치변경` writes its prompt immediately, while normal event text uses
+/// `sendLine`; a plain `join("\r\n")` would insert a line break between the
+/// raw prompt and the following `sendLine` that Python does not emit.
+fn render_event_output_lines(
+    output_lines: &[String],
+    body: &Body,
+    interactive: i32,
+) -> (String, bool) {
+    let show_lp_prompt = interactive == 1
+        && !crate::script::config_is_enabled(&body.get_string("설정상태"), "엘피출력");
+    let mut output = String::new();
+    let mut wrote_part = false;
+    let mut previous_was_raw_prompt = false;
+
+    for line in output_lines {
+        if line == EVENT_LP_PROMPT_MARKER {
+            if show_lp_prompt {
+                // The preceding ordinary item represents sendLine(), whose
+                // CRLF comes before lpPrompt()'s own leading CRLF.
+                if wrote_part && !previous_was_raw_prompt {
+                    output.push_str("\r\n");
+                }
+                output.push_str(&format!(
+                    "\r\n\x1b[0;37;40m[ {}/{}, {}/{} ] ",
+                    body.get_hp(),
+                    body.get_max_hp(),
+                    body.get_mp(),
+                    body.get_max_mp()
+                ));
+                wrote_part = true;
+                previous_was_raw_prompt = true;
+            }
+            continue;
+        }
+
+        if wrote_part && !previous_was_raw_prompt {
+            output.push_str("\r\n");
+        }
+        output.push_str(line);
+        wrote_part = true;
+        previous_was_raw_prompt = false;
+    }
+
+    (output, previous_was_raw_prompt)
+}
+
+/// Python `$위치이동` reports a missing destination through `sendLine`.
+/// Preserve its boundary: with no preceding event output there is no leading
+/// blank line; after ordinary output there is exactly one CRLF; after a raw
+/// LP prompt the error begins on that prompt line.
+fn append_event_move_failure(output: &mut String, ends_with_raw_prompt: &mut bool) {
+    if !output.is_empty() && !*ends_with_raw_prompt {
+        output.push_str("\r\n");
+    }
+    output.push_str("어느곳으로도 위치이동 할 수 없습니다.");
+    *ends_with_raw_prompt = false;
+}
+
+/// `$위치이동` calls Python `Player.enterRoom`, so a real destination can
+/// still reject the actor.  The directive's preceding `sendLine('')` is only
+/// reached after `getRoom` succeeds; preserve that same event-output boundary
+/// for every `enterRoom` guard message.
+fn append_event_summon_rejection(
+    output: &mut String,
+    ends_with_raw_prompt: &mut bool,
+    reason: &str,
+) {
+    let text = match reason {
+        "pressure" => "강한 무형의 기운이 당신을 압박합니다.",
+        "room_full" => "☞ 알 수 없는 무형의 기운이 당신을 가로막습니다. ^_^",
+        "evil_forbidden" => "☞ 사파는 출입할 수 없는 곳이라네!",
+        "good_forbidden" => "☞ 정파는 출입할 수 없는 곳이라네!",
+        "guild_forbidden" => "☞ 그곳은 타 방파의 지역이므로 출입하실 수 없습니다.",
+        _ => return,
+    };
+    if output.is_empty() || *ends_with_raw_prompt {
+        output.push_str("\r\n");
+    } else {
+        output.push_str("\r\n\r\n");
+    }
+    output.push_str(text);
+    *ends_with_raw_prompt = false;
+}
+
+/// Python `$위치이동` first performs `sendLine('')`, then
+/// `exitRoom(..., "소환")`.  The self-facing departure text therefore has a
+/// blank-line boundary after ordinary event text (and no text at all while
+/// invisible).  Destination observers are handled by the room transition;
+/// this helper preserves the actor's otherwise easy-to-lose wire output.
+fn append_event_summon_departure(
+    output: &mut String,
+    ends_with_raw_prompt: &mut bool,
+    body: &Body,
+) {
+    if body.get_int("투명상태") == 1 {
+        return;
+    }
+    if output.is_empty() || *ends_with_raw_prompt {
+        output.push_str("\r\n");
+    } else {
+        output.push_str("\r\n\r\n");
+    }
+    output.push_str("당신이 알수 없는 기운에 휘말려 사라집니다. '고오오오~~~'");
+    *ends_with_raw_prompt = false;
+}
+
+/// Consume a lethal `$체력감소/$체력소모` request through the same Rhai
+/// scripts used by combat death: first the collapse presentation, then the
+/// Python-compatible inventory drop/coma presentation.
+fn finish_lethal_event_rhai(registry: &CommandRegistry, body: &mut Body) -> String {
+    if body.temp_mut().remove(EVENT_DEATH_FINISH_REQUEST).is_none() {
+        return String::new();
+    }
+
+    let mut output = String::new();
+    for name in ["combat_tick", "death"] {
+        let Some(handler) = registry.get_internal(name) else {
+            continue;
+        };
+        let result = handler(body, &[]);
+        let line = match result {
+            CommandResult::Output(line) | CommandResult::OutputAndSendToUsers(line, _) => line,
+            _ => String::new(),
+        };
+        if line.is_empty() {
+            continue;
+        }
+        if !output.is_empty() {
+            output.push_str("\r\n");
+        }
+        output.push_str(&line);
+    }
+    output
 }
 
 fn config_value_is_one(config: &str, key: &str) -> bool {
@@ -2333,12 +2502,9 @@ fn install_party_context(
                         Dynamic::from(snapshot)
                     }),
                 crate::world::RoomObjectRef::Box(pointer) => {
-                    installed_box_party_snapshot_by_pointer(
-                        &position.zone,
-                        &position.room,
-                        pointer,
-                    )
+                    installed_box_party_snapshot_by_pointer(&position.zone, &position.room, pointer)
                 }
+                crate::world::RoomObjectRef::Fixture(_) => None,
             };
             if let Some(selected) = selected {
                 room_objects.push(selected);
@@ -2872,6 +3038,39 @@ pub(crate) fn broadcast_notice(
     }
 }
 
+/// Python Event `$순위갱신` 공지: 실행자 이외의 모든 활성 접속자에게
+/// 출력만 보내며, `noPrompt=True`처럼 수신자의 프롬프트는 다시 그리지 않는다.
+fn broadcast_event_lines_except(
+    broadcaster: &crate::network::Broadcaster,
+    actor_name: &str,
+    lines: &[String],
+) {
+    use crate::network::ClientState;
+    let message = lines.join("\r\n");
+    if message.is_empty() {
+        return;
+    }
+    let clients = broadcaster.clients.lock();
+    let mut dead_addrs = Vec::new();
+    for (&target_addr, client) in clients.iter() {
+        if client.state != ClientState::Active
+            || client
+                .player
+                .as_ref()
+                .is_none_or(|player| player.body.get_name() == actor_name)
+        {
+            continue;
+        }
+        if client.sender.send(format!("\r\n{}\r\n", message)).is_err() {
+            dead_addrs.push(target_addr);
+        }
+    }
+    drop(clients);
+    for target_addr in dead_addrs {
+        broadcaster.remove_client(target_addr);
+    }
+}
+
 fn save_all_active_players(broadcaster: &crate::network::Broadcaster) {
     let ordered = broadcaster.client_addresses_in_order();
     let mut clients = broadcaster.clients.lock();
@@ -3005,6 +3204,48 @@ fn summon_observer_payload(message: &str, body: &Body, interactive: i32) -> Stri
         ));
     }
     payload
+}
+
+/// Python `exitRoom/enterRoom(..., "소환")` uses `writeRoom`, so every
+/// observer receives the message and its own LP prompt.  Event `$위치이동`
+/// takes the same path even though its state transition originates in the
+/// event engine rather than the regular movement command.
+fn send_event_summon_observers(
+    broadcaster: &crate::network::Broadcaster,
+    zone: &str,
+    room: &str,
+    actor_name: &str,
+    message: &str,
+) {
+    let names = get_world_state()
+        .read()
+        .unwrap()
+        .get_players_in_room(zone, room);
+    let bindings = broadcaster.player_bindings_for_names(&names);
+    let clients = broadcaster.clients.lock();
+    let mut dead_addrs = Vec::new();
+    for (name, addr) in bindings {
+        if name == actor_name {
+            continue;
+        }
+        let Some(client) = clients.get(&addr) else {
+            continue;
+        };
+        let Some(player) = client.player.as_ref() else {
+            continue;
+        };
+        if player.body.get_name() != name {
+            continue;
+        }
+        let payload = summon_observer_payload(message, &player.body, player.interactive);
+        if client.sender.send(payload).is_err() {
+            dead_addrs.push(addr);
+        }
+    }
+    drop(clients);
+    for addr in dead_addrs {
+        broadcaster.remove_client(addr);
+    }
 }
 
 /// Rhai가 완성한 전음 수신 문자열을 opaque 접속 토큰의 사용자에게 그대로
@@ -3155,14 +3396,58 @@ fn show_room_to_player_with_world(
     Ok(())
 }
 
+/// Python `Player.viewMapData()` appends the current `zone:room` only for
+/// administrators.  Event-driven movement renders a room through
+/// `build_room_lines()` after the command result, so keep that viewer-specific
+/// suffix at the network boundary rather than baking it into the shared view.
+fn append_admin_room_position(view: &mut String, zone: &str, room: &str, is_admin: bool) {
+    if !is_admin {
+        return;
+    }
+    if let Some(header_end) = view.get(2..).and_then(|tail| tail.find("\r\n")) {
+        view.insert_str(header_end + 2, &format!(" ({zone}:{room})"));
+    }
+}
+
+/// `$위치이동` calls `Player.lpPrompt()` after `enterRoom()` returns; the
+/// outer `do_command()` then emits its normal prompt as well.  Keep that
+/// first, event-local prompt separate so it still obeys Python's interactive
+/// and `엘피출력` gates.
+fn event_move_lp_prompt(
+    broadcaster: &Arc<crate::network::Broadcaster>,
+    addr: SocketAddr,
+) -> String {
+    let clients = broadcaster.clients.lock();
+    let Some(player) = clients.get(&addr).and_then(|client| client.player.as_ref()) else {
+        return String::new();
+    };
+    if player.interactive != 1
+        || crate::script::config_is_enabled(&player.body.get_string("설정상태"), "엘피출력")
+    {
+        return String::new();
+    }
+    format!(
+        "\r\n\r\n\x1b[0;37;40m[ {}/{}, {}/{} ] ",
+        player.body.get_hp(),
+        player.body.get_max_hp(),
+        player.body.get_mp(),
+        player.body.get_max_mp()
+    )
+}
+
 /// 암호변경 다단계 입력: 이전암호 → 새암호 → 확인. (명령줄에 암호 넣지 않음)
-pub(crate) async fn handle_pending_change_password(
+async fn handle_pending_change_password_with_registry(
     broadcaster: &Arc<crate::network::Broadcaster>,
     addr: SocketAddr,
     input: &str,
+    command_registry: Option<&CommandRegistry>,
 ) -> Result<(), Box<dyn std::error::Error>> {
     let input = input.trim_end_matches('\n').trim_end_matches('\r');
     let mut room_append: Option<(String, String, String)> = None;
+    let mut event_position_transition = false;
+    let mut resumed_event_room_broadcast: Option<(String, String, String, Vec<String>)> = None;
+    let mut resumed_event_broadcast_lines: Vec<String> = Vec::new();
+    let mut resumed_event_summon_observers: Vec<(String, String, String, String)> = Vec::new();
     let mut suppress_done_prompt = false;
     let (next_state, mut msg, done) = {
         let mut clients = broadcaster.clients.lock();
@@ -3189,6 +3474,7 @@ pub(crate) async fn handle_pending_change_password(
                 return Ok(());
             }
         };
+        let player_interactive = player.interactive;
         let body = &mut player.body;
         let stored = body.get_string("암호");
         match pending {
@@ -3252,27 +3538,206 @@ pub(crate) async fn handle_pending_change_password(
                     line_num,
                     resume_func,
                 );
+                let event_death_finish_output = command_registry
+                    .map(|registry| finish_lethal_event_rhai(registry, body))
+                    .unwrap_or_default();
                 match result {
-                    Some(CommandResult::MobEvent {
+                    Some(CommandResult::MobEventEnter {
                         output_lines,
                         set_position,
+                        broadcast_lines,
+                        room_broadcast_lines,
+                        mob_key,
+                        event_key,
+                        words,
+                        line_num,
+                        prompt,
+                        resume_func,
+                        ..
                     }) => {
-                        let mut out = output_lines.join("\r\n");
+                        // A resumed Python `$엔터$` sequence may hit another
+                        // `$엔터$`.  Keep the next callback exactly as the
+                        // initial event path does; otherwise the second
+                        // pause is discarded and the next user input falls
+                        // through to normal command parsing.
+                        if !room_broadcast_lines.is_empty() {
+                            resumed_event_room_broadcast = Some((
+                                zone.clone(),
+                                room.clone(),
+                                body.get_name().to_string(),
+                                room_broadcast_lines,
+                            ));
+                        }
+                        resumed_event_broadcast_lines = broadcast_lines;
+                        let (mut out, mut ends_with_event_lp_prompt) =
+                            render_event_output_lines(&output_lines, body, player_interactive);
+                        if !event_death_finish_output.is_empty() {
+                            if !out.is_empty() && !ends_with_event_lp_prompt {
+                                out.push_str("\r\n");
+                            }
+                            out.push_str(&event_death_finish_output);
+                            ends_with_event_lp_prompt = false;
+                        }
                         if let Some((z, r)) = set_position {
+                            let allowed =
+                                crate::script::check_event_summon_destination(body, &z, &r);
                             let mut w = get_world_state().write().unwrap();
-                            if w.room_cache.get_room(&z, &r).is_ok() {
+                            if (allowed.is_empty() || allowed == "same_place")
+                                && w.room_cache.get_room(&z, &r).is_ok()
+                            {
+                                drop(w);
+                                crate::script::clear_summon_combat(body);
+                                let mut w = get_world_state().write().unwrap();
                                 let pname = body.get_name().to_string();
+                                let old_position = w.get_player_position(&pname).cloned();
+                                append_event_summon_departure(
+                                    &mut out,
+                                    &mut ends_with_event_lp_prompt,
+                                    body,
+                                );
                                 w.set_player_position(
                                     &pname,
                                     PlayerPosition::new(z.clone(), r.clone()),
                                 );
                                 w.spawn_mobs_for_room(&z, &r);
                                 room_append = Some((z, r, pname));
+                                event_position_transition = true;
+                                if body.get_int("투명상태") != 1 {
+                                    let actor = format!(
+                                        "\x1b[1m{}\x1b[0;37m{}",
+                                        body.get_name(),
+                                        crate::hangul::han_iga(&body.get_name())
+                                    );
+                                    if let Some(old) = old_position {
+                                        resumed_event_summon_observers.push((
+                                            old.zone,
+                                            old.room,
+                                            body.get_name().to_string(),
+                                            format!("{} 알수 없는 기운에 휘말려 사라집니다. '고오오오~~~'", actor),
+                                        ));
+                                    }
+                                    let current = room_append.as_ref().unwrap();
+                                    resumed_event_summon_observers.push((
+                                        current.0.clone(),
+                                        current.1.clone(),
+                                        body.get_name().to_string(),
+                                        format!(
+                                            "{} 알수 없는 기운에 감싸여 나타납니다. '고오오오~~~'",
+                                            actor
+                                        ),
+                                    ));
+                                }
+                            } else if allowed == "fail" {
+                                append_event_move_failure(&mut out, &mut ends_with_event_lp_prompt);
                             } else {
-                                out.push_str("\r\n어느곳으로도 위치이동 할 수 없습니다.");
+                                append_event_summon_rejection(
+                                    &mut out,
+                                    &mut ends_with_event_lp_prompt,
+                                    &allowed,
+                                );
                             }
                         }
-                        if !out.is_empty() {
+                        if !out.is_empty() && !ends_with_event_lp_prompt {
+                            out.push_str("\r\n");
+                        }
+                        out.push_str(&prompt);
+                        out.push_str("\r\n");
+                        (
+                            Some(PendingInput::EventEnter {
+                                mob_key,
+                                event_key,
+                                words,
+                                line_num,
+                                resume_func,
+                            }),
+                            out,
+                            false,
+                        )
+                    }
+                    Some(CommandResult::MobEvent {
+                        output_lines,
+                        set_position,
+                        broadcast_lines,
+                        room_broadcast_lines,
+                        ..
+                    }) => {
+                        if !room_broadcast_lines.is_empty() {
+                            resumed_event_room_broadcast = Some((
+                                zone.clone(),
+                                room.clone(),
+                                body.get_name().to_string(),
+                                room_broadcast_lines,
+                            ));
+                        }
+                        resumed_event_broadcast_lines = broadcast_lines;
+                        let (mut out, mut ends_with_event_lp_prompt) =
+                            render_event_output_lines(&output_lines, body, player_interactive);
+                        if !event_death_finish_output.is_empty() {
+                            if !out.is_empty() && !ends_with_event_lp_prompt {
+                                out.push_str("\r\n");
+                            }
+                            out.push_str(&event_death_finish_output);
+                        }
+                        if let Some((z, r)) = set_position {
+                            let allowed =
+                                crate::script::check_event_summon_destination(body, &z, &r);
+                            let mut w = get_world_state().write().unwrap();
+                            if (allowed.is_empty() || allowed == "same_place")
+                                && w.room_cache.get_room(&z, &r).is_ok()
+                            {
+                                drop(w);
+                                crate::script::clear_summon_combat(body);
+                                let mut w = get_world_state().write().unwrap();
+                                let pname = body.get_name().to_string();
+                                let old_position = w.get_player_position(&pname).cloned();
+                                append_event_summon_departure(
+                                    &mut out,
+                                    &mut ends_with_event_lp_prompt,
+                                    body,
+                                );
+                                w.set_player_position(
+                                    &pname,
+                                    PlayerPosition::new(z.clone(), r.clone()),
+                                );
+                                w.spawn_mobs_for_room(&z, &r);
+                                room_append = Some((z, r, pname));
+                                event_position_transition = true;
+                                if body.get_int("투명상태") != 1 {
+                                    let actor = format!(
+                                        "\x1b[1m{}\x1b[0;37m{}",
+                                        body.get_name(),
+                                        crate::hangul::han_iga(&body.get_name())
+                                    );
+                                    if let Some(old) = old_position {
+                                        resumed_event_summon_observers.push((
+                                            old.zone,
+                                            old.room,
+                                            body.get_name().to_string(),
+                                            format!("{} 알수 없는 기운에 휘말려 사라집니다. '고오오오~~~'", actor),
+                                        ));
+                                    }
+                                    let current = room_append.as_ref().unwrap();
+                                    resumed_event_summon_observers.push((
+                                        current.0.clone(),
+                                        current.1.clone(),
+                                        body.get_name().to_string(),
+                                        format!(
+                                            "{} 알수 없는 기운에 감싸여 나타납니다. '고오오오~~~'",
+                                            actor
+                                        ),
+                                    ));
+                                }
+                            } else if allowed == "fail" {
+                                append_event_move_failure(&mut out, &mut ends_with_event_lp_prompt);
+                            } else {
+                                append_event_summon_rejection(
+                                    &mut out,
+                                    &mut ends_with_event_lp_prompt,
+                                    &allowed,
+                                );
+                            }
+                        }
+                        if !out.is_empty() && !ends_with_event_lp_prompt {
                             out.push_str("\r\n");
                         }
                         (None, out, true)
@@ -3464,9 +3929,21 @@ pub(crate) async fn handle_pending_change_password(
     };
     if let Some((z, r, pname)) = room_append {
         let others = get_other_players_desc_in_room(broadcaster.as_ref(), &z, &r, &pname);
-        if let Ok(room_str) = build_room_lines(&pname, &others) {
-            msg.push_str("\r\n");
+        if let Ok(mut room_str) = build_room_lines(&pname, &others) {
+            let is_admin = broadcaster
+                .clients
+                .lock()
+                .get(&addr)
+                .and_then(|client| client.player.as_ref())
+                .is_some_and(|player| player.body.get_int("관리자등급") >= 1_000);
+            append_admin_room_position(&mut room_str, &z, &r, is_admin);
+            if !event_position_transition {
+                msg.push_str("\r\n");
+            }
             msg.push_str(&room_str);
+            if event_position_transition {
+                msg.push_str(&event_move_lp_prompt(broadcaster, addr));
+            }
         }
     }
     if let Some(s) = next_state {
@@ -3476,10 +3953,70 @@ pub(crate) async fn handle_pending_change_password(
         }
     }
     broadcaster.send_to(addr, &msg)?;
+    for (zone, room, actor_name, message) in resumed_event_summon_observers {
+        send_event_summon_observers(broadcaster, &zone, &room, &actor_name, &message);
+    }
+    if !resumed_event_broadcast_lines.is_empty() {
+        let actor_name = broadcaster
+            .clients
+            .lock()
+            .get(&addr)
+            .and_then(|client| client.player.as_ref())
+            .map(|player| player.body.get_name().to_string())
+            .unwrap_or_default();
+        broadcast_event_lines_except(broadcaster, &actor_name, &resumed_event_broadcast_lines);
+    }
+    if let Some((zone, room, actor_name, lines)) = resumed_event_room_broadcast {
+        let message = lines.join("\r\n");
+        if !message.is_empty() {
+            let names = get_world_state()
+                .read()
+                .unwrap()
+                .get_players_in_room(&zone, &room);
+            let bindings = broadcaster.player_bindings_for_names(&names);
+            let deliveries = {
+                let clients = broadcaster.clients.lock();
+                bindings
+                    .into_iter()
+                    .filter_map(|(name, observer_addr)| {
+                        (name != actor_name)
+                            .then(|| clients.get(&observer_addr))
+                            .flatten()
+                            .and_then(|client| client.player.as_ref())
+                            .map(|player| {
+                                (
+                                    observer_addr,
+                                    summon_observer_payload(
+                                        &message,
+                                        &player.body,
+                                        player.interactive,
+                                    ),
+                                )
+                            })
+                    })
+                    .collect::<Vec<_>>()
+            };
+            for (observer_addr, payload) in deliveries {
+                broadcaster.send_to(observer_addr, &payload)?;
+            }
+        }
+    }
     if done && !suppress_done_prompt {
         send_game_prompt(broadcaster, addr).await?;
     }
     Ok(())
+}
+
+/// Compatibility entry point used by focused pending-input tests. Production
+/// command paths pass their registry through the private variant so a resumed
+/// lethal event can finish the same Rhai death sequence immediately.
+#[cfg(test)]
+pub(crate) async fn handle_pending_change_password(
+    broadcaster: &Arc<crate::network::Broadcaster>,
+    addr: SocketAddr,
+    input: &str,
+) -> Result<(), Box<dyn std::error::Error>> {
+    handle_pending_change_password_with_registry(broadcaster, addr, input, None).await
 }
 
 /// Python `Player.parse_command`의 사용자 줄임말 한 번 확장 결과.
@@ -3612,9 +4149,7 @@ fn global_player_snapshot_needs(resolved_command: &str) -> GlobalPlayerSnapshotN
         ]
         .iter()
         .any(|name| requested(name)),
-        online_names: ["외쳐", "외쳐2"]
-            .iter()
-            .any(|name| requested(name)),
+        online_names: ["외쳐", "외쳐2"].iter().any(|name| requested(name)),
         connected_names: ["쪽지", "기연정리", "기연정리리", "정리"]
             .iter()
             .any(|name| requested(name)),
@@ -3667,7 +4202,13 @@ pub(crate) async fn handle_game_command(
         if has_pending_input {
             // Python은 `;` 후속 줄을 channel._buffer 앞에 넣으므로, input_to가
             // 바뀌었다면 다음 줄은 일반 명령이 아니라 그 대기 입력으로 소비된다.
-            handle_pending_change_password(broadcaster, addr, &input).await?;
+            handle_pending_change_password_with_registry(
+                broadcaster,
+                addr,
+                &input,
+                Some(command_registry.as_ref()),
+            )
+            .await?;
             continue;
         }
 
@@ -3769,7 +4310,11 @@ async fn handle_single_game_command(
         return Ok(());
     }
 
-    debug!("Game command received from {} ({} bytes)", addr, command.len());
+    debug!(
+        "Game command received from {} ({} bytes)",
+        addr,
+        command.len()
+    );
     // Parse the command
     let parsed = if expanded_user_alias {
         parse_expanded_user_alias(command)
@@ -3848,9 +4393,8 @@ async fn handle_single_game_command(
     // no-argument same-zone listing does not check Player.state at all.
     // Preserve inactive Player entries only for this command and let Rhai
     // apply the branch-specific rule.
-    let global_details_include_inactive = command_requested("어디")
-        || command_requested("순위")
-        || command_requested("비교");
+    let global_details_include_inactive =
+        command_requested("어디") || command_requested("순위") || command_requested("비교");
     let socket_details_requested = command_requested("소켓");
     let online_names_requested = global_snapshot_needs.online_names;
     let connected_names_requested = global_snapshot_needs.connected_names;
@@ -3900,7 +4444,10 @@ async fn handle_single_game_command(
     let mut notice_to_broadcast: Option<String> = None;
     let mut send_to_users: Option<Vec<(String, String)>> = None; // 스크립트 send_to_user 수집분
     let mut broadcast_to_players: Option<(Vec<String>, String)> = None; // (names, msg) 방파말 등
-                                                                        // (opaque target token, sender token, recipient wire output, history line)
+    let mut event_broadcast_lines: Vec<String> = Vec::new();
+    let mut event_room_broadcast: Option<(String, String, Vec<String>)> = None;
+    let mut event_summon_observers: Vec<(String, String, String, String)> = Vec::new();
+    // (opaque target token, sender token, recipient wire output, history line)
     let mut tell_pending: Option<(String, String, String, String)> = None;
     let mut kick_pending: Option<(String, String)> = None; // (target_name, reason)
     let mut _ban_pending: Option<(String, i64, String)> = None; // (target_name, duration, reason)
@@ -3909,6 +4456,7 @@ async fn handle_single_game_command(
     let mut disconnect_after_response = false;
     let mut reboot_after_response = false;
     let mut room_append: Option<(String, String, String)> = None;
+    let mut event_position_transition = false;
     let mut adult_channel_action: Option<String> = None;
     let mut adult_channel_deliveries: Vec<AdultChannelDelivery> = Vec::new();
     let mut party_actor_id: Option<String> = None;
@@ -3929,6 +4477,7 @@ async fn handle_single_game_command(
     let mut admin_set_player_value_pending: Option<(String, String, serde_json::Value)> = None;
     let mut summon_player_pending: Vec<(String, String, String)> = Vec::new();
     let mut force_command_pending: Vec<(String, String)> = Vec::new();
+    let mut event_command_pending: Option<String> = None;
     let mut change_player_pending: Option<String> = None;
     let mut set_player_attr_pending: Option<(String, String, i64)> = None;
     let mut movement_follower_candidates: Vec<(SocketAddr, String)> = Vec::new();
@@ -4178,10 +4727,7 @@ async fn handle_single_game_command(
                 // not only the public allow-list. Snapshot the requested key
                 // dynamically so Rhai sees the same c[line] value.
                 if let Some(attribute) = live_rank_attribute.as_deref() {
-                    details.insert(
-                        attribute.into(),
-                        Dynamic::from(p.body.get_int(attribute)),
-                    );
+                    details.insert(attribute.into(), Dynamic::from(p.body.get_int(attribute)));
                 }
                 details.insert(
                     "공격력".into(),
@@ -4728,6 +5274,8 @@ async fn handle_single_game_command(
 
                 // Rhai 줄임말 명령이 Body 속성을 바꾼 경우 다음 입력부터 즉시 사용한다.
                 player.load_aliases_from_body();
+                let event_death_finish_output =
+                    finish_lethal_event_rhai(command_registry.as_ref(), &mut player.body);
                 let (channel_action, channel_deliveries) =
                     take_adult_channel_requests(&mut player.body);
                 adult_channel_action = channel_action;
@@ -4753,6 +5301,7 @@ async fn handle_single_game_command(
                     take_admin_set_player_value_request(&mut player.body);
                 summon_player_pending = take_summon_player_request(&mut player.body);
                 force_command_pending = take_force_command_request(&mut player.body);
+                event_command_pending = take_event_command_request(&mut player.body);
                 change_player_pending = take_change_player_request(&mut player.body);
                 if let Some(route) = take_auto_move_request(&mut player.body) {
                     // Python alias.split(';') preserves empty components and
@@ -4890,22 +5439,96 @@ async fn handle_single_game_command(
                     Some(CommandResult::MobEvent {
                         output_lines,
                         set_position,
+                        broadcast_lines,
+                        room_broadcast_lines,
                     }) => {
-                        let mut out = output_lines.join("\r\n");
+                        event_broadcast_lines = broadcast_lines;
+                        if !room_broadcast_lines.is_empty() {
+                            if let Some(position) = get_world_state()
+                                .read()
+                                .unwrap()
+                                .get_player_position(&player_name)
+                            {
+                                event_room_broadcast = Some((
+                                    position.zone.clone(),
+                                    position.room.clone(),
+                                    room_broadcast_lines,
+                                ));
+                            }
+                        }
+                        let (mut out, mut ends_with_event_lp_prompt) = render_event_output_lines(
+                            &output_lines,
+                            &player.body,
+                            player.interactive,
+                        );
+                        if !event_death_finish_output.is_empty() {
+                            if !out.is_empty() && !ends_with_event_lp_prompt {
+                                out.push_str("\r\n");
+                            }
+                            out.push_str(&event_death_finish_output);
+                            ends_with_event_lp_prompt = false;
+                        }
                         if let Some((z, r)) = set_position {
+                            let allowed =
+                                crate::script::check_event_summon_destination(&player.body, &z, &r);
                             let mut w = get_world_state().write().unwrap();
-                            if w.room_cache.get_room(&z, &r).is_ok() {
+                            if (allowed.is_empty() || allowed == "same_place")
+                                && w.room_cache.get_room(&z, &r).is_ok()
+                            {
+                                drop(w);
+                                crate::script::clear_summon_combat(&mut player.body);
+                                let mut w = get_world_state().write().unwrap();
+                                let old_position = w.get_player_position(&player_name).cloned();
+                                append_event_summon_departure(
+                                    &mut out,
+                                    &mut ends_with_event_lp_prompt,
+                                    &player.body,
+                                );
                                 w.set_player_position(
                                     &player_name,
                                     PlayerPosition::new(z.clone(), r.clone()),
                                 );
                                 w.spawn_mobs_for_room(&z, &r);
                                 room_append = Some((z, r, player_name.clone()));
+                                event_position_transition = true;
+                                if player.body.get_int("투명상태") != 1 {
+                                    let actor = format!(
+                                        "\x1b[1m{}\x1b[0;37m{}",
+                                        player_name,
+                                        crate::hangul::han_iga(&player_name)
+                                    );
+                                    if let Some(old) = old_position {
+                                        event_summon_observers.push((
+                                            old.zone,
+                                            old.room,
+                                            player_name.clone(),
+                                            format!(
+                                                "{} 알수 없는 기운에 휘말려 사라집니다. '고오오오~~~'",
+                                                actor
+                                            ),
+                                        ));
+                                    }
+                                    event_summon_observers.push((
+                                        room_append.as_ref().unwrap().0.clone(),
+                                        room_append.as_ref().unwrap().1.clone(),
+                                        player_name.clone(),
+                                        format!(
+                                            "{} 알수 없는 기운에 감싸여 나타납니다. '고오오오~~~'",
+                                            actor
+                                        ),
+                                    ));
+                                }
+                            } else if allowed == "fail" {
+                                append_event_move_failure(&mut out, &mut ends_with_event_lp_prompt);
                             } else {
-                                out.push_str("\r\n어느곳으로도 위치이동 할 수 없습니다.");
+                                append_event_summon_rejection(
+                                    &mut out,
+                                    &mut ends_with_event_lp_prompt,
+                                    &allowed,
+                                );
                             }
                         }
-                        if !out.is_empty() {
+                        if !out.is_empty() && !ends_with_event_lp_prompt {
                             out.push_str("\r\n");
                         }
                         out
@@ -4913,6 +5536,8 @@ async fn handle_single_game_command(
                     Some(CommandResult::MobEventEnter {
                         output_lines,
                         set_position,
+                        broadcast_lines,
+                        room_broadcast_lines,
                         mob_key,
                         event_key,
                         words,
@@ -4920,21 +5545,93 @@ async fn handle_single_game_command(
                         prompt,
                         resume_func,
                     }) => {
-                        let mut out = output_lines.join("\r\n");
+                        event_broadcast_lines = broadcast_lines;
+                        if !room_broadcast_lines.is_empty() {
+                            if let Some(position) = get_world_state()
+                                .read()
+                                .unwrap()
+                                .get_player_position(&player_name)
+                            {
+                                event_room_broadcast = Some((
+                                    position.zone.clone(),
+                                    position.room.clone(),
+                                    room_broadcast_lines,
+                                ));
+                            }
+                        }
+                        let (mut out, mut ends_with_event_lp_prompt) = render_event_output_lines(
+                            &output_lines,
+                            &player.body,
+                            player.interactive,
+                        );
+                        if !event_death_finish_output.is_empty() {
+                            if !out.is_empty() && !ends_with_event_lp_prompt {
+                                out.push_str("\r\n");
+                            }
+                            out.push_str(&event_death_finish_output);
+                            ends_with_event_lp_prompt = false;
+                        }
                         if let Some((z, r)) = set_position {
+                            let allowed =
+                                crate::script::check_event_summon_destination(&player.body, &z, &r);
                             let mut w = get_world_state().write().unwrap();
-                            if w.room_cache.get_room(&z, &r).is_ok() {
+                            if (allowed.is_empty() || allowed == "same_place")
+                                && w.room_cache.get_room(&z, &r).is_ok()
+                            {
+                                drop(w);
+                                crate::script::clear_summon_combat(&mut player.body);
+                                let mut w = get_world_state().write().unwrap();
+                                let old_position = w.get_player_position(&player_name).cloned();
+                                append_event_summon_departure(
+                                    &mut out,
+                                    &mut ends_with_event_lp_prompt,
+                                    &player.body,
+                                );
                                 w.set_player_position(
                                     &player_name,
                                     PlayerPosition::new(z.clone(), r.clone()),
                                 );
                                 w.spawn_mobs_for_room(&z, &r);
                                 room_append = Some((z, r, player_name.clone()));
+                                event_position_transition = true;
+                                if player.body.get_int("투명상태") != 1 {
+                                    let actor = format!(
+                                        "\x1b[1m{}\x1b[0;37m{}",
+                                        player_name,
+                                        crate::hangul::han_iga(&player_name)
+                                    );
+                                    if let Some(old) = old_position {
+                                        event_summon_observers.push((
+                                            old.zone,
+                                            old.room,
+                                            player_name.clone(),
+                                            format!(
+                                                "{} 알수 없는 기운에 휘말려 사라집니다. '고오오오~~~'",
+                                                actor
+                                            ),
+                                        ));
+                                    }
+                                    event_summon_observers.push((
+                                        room_append.as_ref().unwrap().0.clone(),
+                                        room_append.as_ref().unwrap().1.clone(),
+                                        player_name.clone(),
+                                        format!(
+                                            "{} 알수 없는 기운에 감싸여 나타납니다. '고오오오~~~'",
+                                            actor
+                                        ),
+                                    ));
+                                }
+                            } else if allowed == "fail" {
+                                append_event_move_failure(&mut out, &mut ends_with_event_lp_prompt);
                             } else {
-                                out.push_str("\r\n어느곳으로도 위치이동 할 수 없습니다.");
+                                append_event_summon_rejection(
+                                    &mut out,
+                                    &mut ends_with_event_lp_prompt,
+                                    &allowed,
+                                );
                             }
                         }
-                        if !out.is_empty() {
+                        if !out.is_empty() && !ends_with_event_lp_prompt {
                             out.push_str("\r\n");
                         }
                         set_pending = Some(PendingInput::EventEnter {
@@ -5439,9 +6136,21 @@ async fn handle_single_game_command(
 
     if let Some((z, r, pname)) = room_append {
         let others = get_other_players_desc_in_room(broadcaster.as_ref(), &z, &r, &pname);
-        if let Ok(room_str) = build_room_lines(&pname, &others) {
-            response.push_str("\r\n");
+        if let Ok(mut room_str) = build_room_lines(&pname, &others) {
+            let is_admin = broadcaster
+                .clients
+                .lock()
+                .get(&addr)
+                .and_then(|client| client.player.as_ref())
+                .is_some_and(|player| player.body.get_int("관리자등급") >= 1_000);
+            append_admin_room_position(&mut room_str, &z, &r, is_admin);
+            if !event_position_transition {
+                response.push_str("\r\n");
+            }
             response.push_str(&room_str);
+            if event_position_transition {
+                response.push_str(&event_move_lp_prompt(broadcaster, addr));
+            }
         }
     }
 
@@ -5956,6 +6665,61 @@ async fn handle_single_game_command(
         }
     }
     broadcaster.send_to(addr, &response)?;
+    for (zone, room, actor_name, message) in event_summon_observers {
+        send_event_summon_observers(broadcaster, &zone, &room, &actor_name, &message);
+    }
+    if !event_broadcast_lines.is_empty() {
+        let actor_name = broadcaster
+            .clients
+            .lock()
+            .get(&addr)
+            .and_then(|client| client.player.as_ref())
+            .map(|player| player.body.get_name().to_string())
+            .unwrap_or_default();
+        broadcast_event_lines_except(broadcaster, &actor_name, &event_broadcast_lines);
+    }
+    if let Some((zone, room, lines)) = event_room_broadcast {
+        let message = lines.join("\r\n");
+        if !message.is_empty() {
+            let event_actor_name = broadcaster
+                .clients
+                .lock()
+                .get(&addr)
+                .and_then(|client| client.player.as_ref())
+                .map(|player| player.body.get_name().to_string())
+                .unwrap_or_default();
+            let observer_deliveries = {
+                let names = get_world_state()
+                    .read()
+                    .unwrap()
+                    .get_players_in_room(&zone, &room);
+                let bindings = broadcaster.player_bindings_for_names(&names);
+                let clients = broadcaster.clients.lock();
+                bindings
+                    .into_iter()
+                    .filter_map(|(name, observer_addr)| {
+                        (name != event_actor_name)
+                            .then(|| clients.get(&observer_addr))
+                            .flatten()
+                            .and_then(|client| client.player.as_ref())
+                            .map(|player| {
+                                (
+                                    observer_addr,
+                                    summon_observer_payload(
+                                        &message,
+                                        &player.body,
+                                        player.interactive,
+                                    ),
+                                )
+                            })
+                    })
+                    .collect::<Vec<_>>()
+            };
+            for (observer_addr, payload) in observer_deliveries {
+                broadcaster.send_to(observer_addr, &payload)?;
+            }
+        }
+    }
     // Python emits the actor's Box command lines first, then each same-room
     // observer's sendRoom line and lpPrompt, and only then the actor's normal
     // command prompt.
@@ -5984,6 +6748,23 @@ async fn handle_single_game_command(
         if let Some(c) = clients.get_mut(&addr) {
             c.pending_input = Some(s);
         }
+    }
+
+    // Python `self.do_command()` from an NPC event runs immediately after
+    // the event's own sendLine output and supplies the one final prompt.  It
+    // is intentionally distinct from admin force-command delivery: no blank
+    // line is injected and the outer command must not add a second prompt.
+    if let Some(event_command) = event_command_pending.take() {
+        Box::pin(handle_game_command(
+            broadcaster,
+            addr,
+            &event_command,
+            command_registry.clone(),
+            room_cache.clone(),
+            shutdown_notify.clone(),
+        ))
+        .await?;
+        return Ok(());
     }
 
     // Python `obj.do_command(...)` is synchronous: every forced target
@@ -6118,6 +6899,46 @@ mod tests {
     use super::*;
 
     #[test]
+    fn event_room_view_adds_python_position_suffix_only_for_admins() {
+        let original = "\r\n\x1b[1m시험 방\x1b[0;37m\r\n설명";
+        let mut admin_view = original.to_string();
+        append_admin_room_position(&mut admin_view, "하북성", "3001", true);
+        assert_eq!(
+            admin_view,
+            "\r\n\x1b[1m시험 방\x1b[0;37m (하북성:3001)\r\n설명"
+        );
+
+        let mut player_view = original.to_string();
+        append_admin_room_position(&mut player_view, "하북성", "3001", false);
+        assert_eq!(player_view, original);
+    }
+
+    #[test]
+    fn event_move_keeps_python_inner_and_outer_prompt_boundaries() {
+        let broadcaster = Arc::new(crate::network::Broadcaster::new());
+        let addr: SocketAddr = "127.0.0.1:18192".parse().unwrap();
+        let (sender, _receiver) = mpsc::unbounded_channel();
+        let mut client = Client::new(addr, sender);
+        client.complete_login();
+        let mut player = Player::new();
+        player.interactive = 1;
+        player.body.set("체력", 90_i64);
+        player.body.set("최고체력", 100_i64);
+        player.body.set("내공", 8_i64);
+        player.body.set("최고내공", 10_i64);
+        client.player = Some(player);
+        broadcaster.add_client(client);
+        assert_eq!(
+            event_move_lp_prompt(&broadcaster, addr),
+            "\r\n\r\n\x1b[0;37;40m[ 90/100, 8/10 ] "
+        );
+
+        broadcaster.clients.lock().get_mut(&addr).unwrap().player.as_mut().unwrap()
+            .body.set("설정상태", "엘피출력 1");
+        assert!(event_move_lp_prompt(&broadcaster, addr).is_empty());
+    }
+
+    #[test]
     fn summon_observer_payload_matches_python_write_room_and_lp_prompt() {
         let mut body = Body::new();
         body.set("체력", 700_i64);
@@ -6127,6 +6948,14 @@ mod tests {
         assert_eq!(
             summon_observer_payload("소환 목격", &body, 1),
             "\r\n소환 목격\r\n\r\n\x1b[0;37;40m[ 700/800, 12/14 ] "
+        );
+        // `$출력`의 같은 방 문구는 Python Player.printScript()가
+        // getNameA()로 만든 굵은 ANSI 이름을 이미 포함한다. 전달 계층은
+        // 이를 NPC 노란색 이름으로 바꾸거나 ANSI를 제거하지 않고, sendRoom
+        // + lpPrompt 경계만 더해야 한다.
+        assert_eq!(
+            summon_observer_payload("\x1b[1m가람\x1b[0;37m이 절을 합니다.", &body, 1),
+            "\r\n\x1b[1m가람\x1b[0;37m이 절을 합니다.\r\n\r\n\x1b[0;37;40m[ 700/800, 12/14 ] "
         );
 
         body.set("설정상태", "엘피출력 1");
@@ -6139,6 +6968,589 @@ mod tests {
             summon_observer_payload("소환 목격", &body, 0),
             "\r\n소환 목격\r\n"
         );
+    }
+
+    #[test]
+    fn event_summon_observer_delivery_keeps_python_actor_ansi_and_prompt() {
+        let broadcaster = crate::network::Broadcaster::new();
+        let suffix = std::process::id();
+        let zone = format!("소환전달회귀{suffix}");
+        let room = "1".to_string();
+        let actor_name = format!("소환행위자{suffix}");
+        let observer_name = format!("소환목격자{suffix}");
+        let actor_addr: SocketAddr = "127.0.0.1:18230".parse().unwrap();
+        let observer_addr: SocketAddr = "127.0.0.1:18231".parse().unwrap();
+        let (actor_tx, mut actor_rx) = mpsc::unbounded_channel();
+        let (observer_tx, mut observer_rx) = mpsc::unbounded_channel();
+
+        let mut actor_client = Client::new(actor_addr, actor_tx);
+        actor_client.complete_login();
+        let mut actor_player = Player::new();
+        actor_player.state = STATE_ACTIVE;
+        actor_player.interactive = 1;
+        actor_player.body.set("이름", actor_name.clone());
+        actor_client.player = Some(actor_player);
+        broadcaster.add_client(actor_client);
+
+        let mut observer = Client::new(observer_addr, observer_tx);
+        observer.complete_login();
+        let mut player = Player::new();
+        player.state = STATE_ACTIVE;
+        player.interactive = 1;
+        player.body.set("이름", observer_name.clone());
+        player.body.set("체력", 70_i64);
+        player.body.set("최고체력", 100_i64);
+        player.body.set("내공", 8_i64);
+        player.body.set("최고내공", 10_i64);
+        player.body.set("설정상태", "엘피출력 0");
+        observer.player = Some(player);
+        broadcaster.add_client(observer);
+
+        {
+            let mut world = get_world_state().write().unwrap();
+            world.set_player_position(&actor_name, PlayerPosition::new(zone.clone(), room.clone()));
+            world.set_player_position(
+                &observer_name,
+                PlayerPosition::new(zone.clone(), room.clone()),
+            );
+        }
+        let actor = format!(
+            "\x1b[1m{}\x1b[0;37m{}",
+            actor_name,
+            crate::hangul::han_iga(&actor_name)
+        );
+        let message = format!(
+            "{} 알수 없는 기운에 휘말려 사라집니다. '고오오오~~~'",
+            actor
+        );
+        send_event_summon_observers(&broadcaster, &zone, &room, &actor_name, &message);
+        assert_eq!(
+            observer_rx
+                .try_recv()
+                .expect("observer event summon delivery"),
+            format!("\r\n{}\r\n\r\n\x1b[0;37;40m[ 70/100, 8/10 ] ", message)
+        );
+        assert!(
+            actor_rx.try_recv().is_err(),
+            "the actor must not receive their own summon observer message"
+        );
+
+        let mut world = get_world_state().write().unwrap();
+        world.remove_player_position(&actor_name);
+        world.remove_player_position(&observer_name);
+    }
+
+    #[tokio::test]
+    async fn resumed_event_script_output_keeps_python_get_name_a_for_same_room_observer() {
+        // Python `Player.pressEnter2()` resumes doEvent(), and a later
+        // `$출력` still calls printScript(): only the actor sees `당신`, while
+        // room observers receive getNameA() plus sendRoom/lpPrompt.  Exercise
+        // that full command -> Enter -> Enter delivery path with the original
+        // 안휘성 꼬마 event rather than only testing the payload helper.
+        let storage = Arc::new(tokio::sync::RwLock::new(crate::script::ScriptStorage::new(
+            crate::script::ScriptConfig::default(),
+        )));
+        let mut registry = CommandRegistry::new();
+        crate::command::commands::register_basic_commands(&mut registry);
+        crate::command::commands::script::register_script_commands(
+            &mut registry,
+            storage,
+            None,
+            None,
+            None,
+        )
+        .await;
+        let registry = Arc::new(registry);
+        let broadcaster = Arc::new(crate::network::Broadcaster::new());
+        let suffix = std::process::id();
+        let zone = "안휘성".to_string();
+        let room = format!("출력이벤트회귀-{suffix}");
+        let actor_name = format!("출력이벤트행위자-{suffix}");
+        let observer_name = format!("출력이벤트목격자-{suffix}");
+        let actor_addr: SocketAddr = "127.0.0.1:18191".parse().unwrap();
+        let observer_addr: SocketAddr = "127.0.0.1:18192".parse().unwrap();
+        let (actor_tx, mut actor_rx) = mpsc::unbounded_channel();
+        let (observer_tx, mut observer_rx) = mpsc::unbounded_channel();
+        let drain = |receiver: &mut mpsc::UnboundedReceiver<String>| {
+            let mut output = String::new();
+            while let Ok(chunk) = receiver.try_recv() {
+                output.push_str(&chunk);
+            }
+            output
+        };
+
+        let make_client = |addr, sender, name: &str, hp: i64| {
+            let mut client = Client::new(addr, sender);
+            client.complete_login();
+            let mut player = Player::new();
+            player.state = STATE_ACTIVE;
+            player.interactive = 1;
+            player.body.set("이름", name);
+            player.body.set("체력", hp);
+            player.body.set("최고체력", 100_i64);
+            player.body.set("내공", 8_i64);
+            player.body.set("최고내공", 10_i64);
+            player.body.set("설정상태", "엘피출력 0");
+            client.player = Some(player);
+            client
+        };
+        let mut actor = make_client(actor_addr, actor_tx, &actor_name, 90);
+        actor
+            .player
+            .as_mut()
+            .expect("active actor player")
+            .body
+            .set("이벤트설정리스트", "황소개구리끝");
+        broadcaster.add_client(actor);
+        broadcaster.add_client(make_client(observer_addr, observer_tx, &observer_name, 70));
+
+        let mob_name = format!("출력이벤트꼬마-{suffix}");
+        let mob_key = format!("{zone}:{mob_name}");
+        {
+            let mut world = get_world_state().write().unwrap();
+            let mut data = crate::world::RawMobData::new();
+            data.name = mob_name.clone();
+            data.zone = zone.clone();
+            data.reaction_names.push("꼬마".to_string());
+            data.events.insert(
+                "이벤트 $대화".to_string(),
+                crate::world::EventScript::Rhai("40_대화_대.rhai".to_string()),
+            );
+            world
+                .mob_cache
+                .insert_mob_data(mob_key.clone(), data.clone());
+            world
+                .mob_cache
+                .add_mob_instance(crate::world::MobInstance::new(
+                    mob_key.clone(),
+                    zone.clone(),
+                    room.clone(),
+                    &data,
+                ));
+            for name in [&actor_name, &observer_name] {
+                world.set_player_position(name, PlayerPosition::new(zone.clone(), room.clone()));
+            }
+        }
+
+        let room_cache = Arc::new(std::sync::Mutex::new(RoomCache::new()));
+        handle_game_command(
+            &broadcaster,
+            actor_addr,
+            "꼬마 대화",
+            registry.clone(),
+            room_cache.clone(),
+            None,
+        )
+        .await
+        .unwrap();
+        let initial_wire = drain(&mut actor_rx);
+        assert!(
+            initial_wire.contains("[엔터키를 누르세요]"),
+            "original event did not enter step1: {initial_wire:?}"
+        );
+        assert!(observer_rx.try_recv().is_err());
+
+        handle_pending_change_password_with_registry(
+            &broadcaster,
+            actor_addr,
+            "",
+            Some(registry.as_ref()),
+        )
+        .await
+        .unwrap();
+        let step1_wire = drain(&mut actor_rx);
+        assert!(
+            step1_wire.contains("[엔터키를 누르세요]"),
+            "first Enter did not enter step2: {step1_wire:?}"
+        );
+        assert!(observer_rx.try_recv().is_err());
+
+        handle_pending_change_password_with_registry(
+            &broadcaster,
+            actor_addr,
+            "",
+            Some(registry.as_ref()),
+        )
+        .await
+        .unwrap();
+        let step2_wire = drain(&mut actor_rx);
+        assert!(
+            step2_wire.contains("[엔터키를 누르세요]"),
+            "second Enter did not preserve the source step3 wait: {step2_wire:?}"
+        );
+        assert_eq!(
+            observer_rx.try_recv().unwrap_or_else(|_| {
+                panic!("second Enter did not broadcast the source $출력; actor={step2_wire:?}")
+            }),
+            format!(
+                "\r\n\x1b[33m꼬마\x1b[37;40m가 \x1b[1m{actor_name}\x1b[0;37m에게 철사를 선물로 줍니다.\r\n\r\n\x1b[0;37;40m[ 70/100, 8/10 ] "
+            )
+        );
+        assert!(observer_rx.try_recv().is_err());
+
+        handle_pending_change_password_with_registry(
+            &broadcaster,
+            actor_addr,
+            "",
+            Some(registry.as_ref()),
+        )
+        .await
+        .unwrap();
+        let step3_wire = drain(&mut actor_rx);
+        assert!(
+            step3_wire.ends_with("\x1b[0;37;40m[ 90/100, 8/10 ] "),
+            "third Enter must return to the ordinary prompt: {step3_wire:?}"
+        );
+        let clients = broadcaster.clients.lock();
+        let actor_body = &clients[&actor_addr]
+            .player
+            .as_ref()
+            .expect("active actor player")
+            .body;
+        assert!(actor_body.object.objs.iter().any(|item| {
+            item.lock()
+                .is_ok_and(|item| item.getString("인덱스") == "철사")
+        }));
+        assert!(clients[&actor_addr].pending_input.is_none());
+        drop(clients);
+
+        let mut world = get_world_state().write().unwrap();
+        world.mob_cache.remove_mob(&mob_key);
+        world.remove_player_position(&actor_name);
+        world.remove_player_position(&observer_name);
+    }
+
+    #[tokio::test]
+    async fn resumed_event_global_output_excludes_actor_and_has_no_observer_prompt() {
+        // A resumed Rhai event can emit `broadcast_output()` as well as a
+        // same-room `$출력`.  Python's `$순위갱신` path sends this as a
+        // sendToAll1/noPrompt notice after the actor's response.  Keep that
+        // ordering when the result comes from PendingInput::EventEnter.
+        let suffix = std::process::id();
+        let zone = "안휘성".to_string();
+        let room = format!("재개전역공지회귀-{suffix}");
+        let actor_name = format!("재개전역행위자-{suffix}");
+        let observer_name = format!("재개전역목격자-{suffix}");
+        let mob_name = format!("재개전역몹-{suffix}");
+        let mob_key = format!("{zone}:{mob_name}");
+        let script_name = format!("__resumed_global_output_{suffix}.rhai");
+        let script_path = std::path::Path::new("data/script")
+            .join(&zone)
+            .join(&script_name);
+        std::fs::write(
+            &script_path,
+            r#"
+fn event() { wait_enter("step1", "[엔터키를 누르세요]"); }
+fn step1() {
+    output("재개 본인 문구");
+    broadcast_output("재개 전역 공지");
+    set_position("안휘성", "1");
+    end_event();
+}
+"#,
+        )
+        .expect("write resumed global-output event script");
+
+        let broadcaster = Arc::new(crate::network::Broadcaster::new());
+        let actor_addr: SocketAddr = "127.0.0.1:18193".parse().unwrap();
+        let observer_addr: SocketAddr = "127.0.0.1:18194".parse().unwrap();
+        let (actor_tx, mut actor_rx) = mpsc::unbounded_channel();
+        let (observer_tx, mut observer_rx) = mpsc::unbounded_channel();
+        let make_client = |addr, sender, name: &str| {
+            let mut client = Client::new(addr, sender);
+            client.complete_login();
+            let mut player = Player::new();
+            player.state = STATE_ACTIVE;
+            player.interactive = 1;
+            player.body.set("이름", name);
+            player.body.set("체력", 90_i64);
+            player.body.set("최고체력", 100_i64);
+            player.body.set("내공", 8_i64);
+            player.body.set("최고내공", 10_i64);
+            client.player = Some(player);
+            client
+        };
+        let mut actor = make_client(actor_addr, actor_tx, &actor_name);
+        actor.pending_input = Some(PendingInput::EventEnter {
+            mob_key: mob_key.clone(),
+            event_key: "이벤트 $대화".to_string(),
+            words: vec!["재개전역몹".to_string(), "대화".to_string()],
+            line_num: 0,
+            resume_func: Some("step1".to_string()),
+        });
+        broadcaster.add_client(actor);
+        broadcaster.add_client(make_client(observer_addr, observer_tx, &observer_name));
+
+        {
+            let mut world = get_world_state().write().unwrap();
+            let mut data = crate::world::RawMobData::new();
+            data.name = mob_name.clone();
+            data.zone = zone.clone();
+            data.events.insert(
+                "이벤트 $대화".to_string(),
+                crate::world::EventScript::Rhai(script_name),
+            );
+            world
+                .mob_cache
+                .insert_mob_data(mob_key.clone(), data.clone());
+            world
+                .mob_cache
+                .add_mob_instance(crate::world::MobInstance::new(
+                    mob_key.clone(),
+                    zone.clone(),
+                    room.clone(),
+                    &data,
+                ));
+            for name in [&actor_name, &observer_name] {
+                world.set_player_position(name, PlayerPosition::new(zone.clone(), room.clone()));
+            }
+        }
+
+        handle_pending_change_password(&broadcaster, actor_addr, "")
+            .await
+            .unwrap();
+        let actor_wire = actor_rx.try_recv().expect("resumed actor response");
+        assert!(
+            actor_wire.starts_with("재개 본인 문구\r\n"),
+            "{actor_wire:?}"
+        );
+        let actor_prompt = actor_rx.try_recv().expect("ordinary actor prompt");
+        assert!(
+            actor_prompt.ends_with("\x1b[0;37;40m[ 90/100, 8/10 ] "),
+            "{actor_prompt:?}"
+        );
+        assert_eq!(
+            observer_rx
+                .try_recv()
+                .expect("resumed event move must notify the source observer"),
+            format!(
+                "\r\n\x1b[1m{actor_name}\x1b[0;37m{} 알수 없는 기운에 휘말려 사라집니다. '고오오오~~~'\r\n\r\n\x1b[0;37;40m[ 90/100, 8/10 ] ",
+                crate::hangul::han_iga(&actor_name)
+            )
+        );
+        assert_eq!(
+            observer_rx.try_recv().expect("resumed global notice"),
+            "\r\n재개 전역 공지\r\n"
+        );
+        assert!(
+            observer_rx.try_recv().is_err(),
+            "each resumed delivery is sent once"
+        );
+        assert!(
+            actor_rx.try_recv().is_err(),
+            "actor must not receive own global notice"
+        );
+
+        let mut world = get_world_state().write().unwrap();
+        world.mob_cache.remove_mob(&mob_key);
+        world.remove_player_position(&actor_name);
+        world.remove_player_position(&observer_name);
+        drop(world);
+        let _ = std::fs::remove_file(script_path);
+    }
+
+    #[test]
+    fn event_stat_change_lp_prompt_stays_on_the_same_wire_line_as_later_send_line() {
+        let mut body = Body::new();
+        body.set("체력", 100_i64);
+        body.set("최고체력", 100_i64);
+        body.set("내공", 20_i64);
+        body.set("최고내공", 30_i64);
+        let lines = vec![
+            "앞문장".to_string(),
+            EVENT_LP_PROMPT_MARKER.to_string(),
+            "뒤문장".to_string(),
+        ];
+
+        let (wire, ends_with_raw_prompt) = render_event_output_lines(&lines, &body, 1);
+        assert_eq!(wire, "앞문장\r\n\r\n\x1b[0;37;40m[ 100/100, 20/30 ] 뒤문장");
+        assert!(!ends_with_raw_prompt);
+
+        let (wire, ends_with_raw_prompt) =
+            render_event_output_lines(&[EVENT_LP_PROMPT_MARKER.to_string()], &body, 1);
+        assert_eq!(wire, "\r\n\x1b[0;37;40m[ 100/100, 20/30 ] ");
+        assert!(ends_with_raw_prompt);
+
+        body.set("설정상태", "엘피출력 1");
+        let (wire, ends_with_raw_prompt) = render_event_output_lines(&lines, &body, 1);
+        assert_eq!(wire, "앞문장\r\n뒤문장");
+        assert!(!ends_with_raw_prompt);
+    }
+
+    #[test]
+    fn event_missing_move_uses_python_send_line_boundaries() {
+        let mut wire = String::new();
+        let mut ends_with_raw_prompt = false;
+        append_event_move_failure(&mut wire, &mut ends_with_raw_prompt);
+        assert_eq!(wire, "어느곳으로도 위치이동 할 수 없습니다.");
+        assert!(!ends_with_raw_prompt);
+
+        let mut wire = "앞선 이벤트 문장".to_string();
+        append_event_move_failure(&mut wire, &mut ends_with_raw_prompt);
+        assert_eq!(
+            wire,
+            "앞선 이벤트 문장\r\n어느곳으로도 위치이동 할 수 없습니다."
+        );
+
+        let mut wire = "\r\n\x1b[0;37;40m[ 100/100, 20/30 ] ".to_string();
+        ends_with_raw_prompt = true;
+        append_event_move_failure(&mut wire, &mut ends_with_raw_prompt);
+        assert_eq!(
+            wire,
+            "\r\n\x1b[0;37;40m[ 100/100, 20/30 ] 어느곳으로도 위치이동 할 수 없습니다."
+        );
+        assert!(!ends_with_raw_prompt);
+    }
+
+    #[test]
+    fn event_summon_rejection_uses_python_enter_room_messages_and_boundaries() {
+        let mut wire = "앞선 이벤트 문장".to_string();
+        let mut ends_with_raw_prompt = false;
+        append_event_summon_rejection(&mut wire, &mut ends_with_raw_prompt, "pressure");
+        assert_eq!(
+            wire,
+            "앞선 이벤트 문장\r\n\r\n강한 무형의 기운이 당신을 압박합니다."
+        );
+
+        let mut wire = "\r\n\x1b[0;37;40m[ 100/100, 20/30 ] ".to_string();
+        ends_with_raw_prompt = true;
+        append_event_summon_rejection(&mut wire, &mut ends_with_raw_prompt, "room_full");
+        assert_eq!(
+            wire,
+            "\r\n\x1b[0;37;40m[ 100/100, 20/30 ] \r\n☞ 알 수 없는 무형의 기운이 당신을 가로막습니다. ^_^"
+        );
+        assert!(!ends_with_raw_prompt);
+
+        let mut wire = String::new();
+        append_event_summon_rejection(&mut wire, &mut ends_with_raw_prompt, "guild_forbidden");
+        assert_eq!(
+            wire,
+            "\r\n☞ 그곳은 타 방파의 지역이므로 출입하실 수 없습니다."
+        );
+    }
+
+    #[test]
+    fn event_position_move_keeps_python_summon_departure_wire_boundary() {
+        let mut body = Body::new();
+        let mut wire = "왕대협이 말합니다. \"그럼 열심히 수련 하거라~\"".to_string();
+        let mut ends_with_raw_prompt = false;
+        append_event_summon_departure(&mut wire, &mut ends_with_raw_prompt, &body);
+        assert_eq!(
+            wire,
+            "왕대협이 말합니다. \"그럼 열심히 수련 하거라~\"\r\n\r\n당신이 알수 없는 기운에 휘말려 사라집니다. '고오오오~~~'"
+        );
+        assert!(!ends_with_raw_prompt);
+
+        body.set("투명상태", 1_i64);
+        let mut hidden = "앞선 문장".to_string();
+        append_event_summon_departure(&mut hidden, &mut ends_with_raw_prompt, &body);
+        assert_eq!(hidden, "앞선 문장");
+    }
+
+    #[tokio::test]
+    async fn lethal_mob_event_runs_python_death_presentation_and_drop_in_the_same_response() {
+        let storage = Arc::new(tokio::sync::RwLock::new(crate::script::ScriptStorage::new(
+            crate::script::ScriptConfig::default(),
+        )));
+        let mut registry = CommandRegistry::new();
+        crate::command::commands::register_basic_commands(&mut registry);
+        crate::command::commands::script::register_script_commands(
+            &mut registry,
+            storage,
+            None,
+            None,
+            None,
+        )
+        .await;
+        let registry = Arc::new(registry);
+        let room_cache = Arc::new(std::sync::Mutex::new(RoomCache::new()));
+        let broadcaster = Arc::new(crate::network::Broadcaster::new());
+        let addr: SocketAddr = "127.0.0.1:18181".parse().unwrap();
+        let name = format!("이벤트즉사회귀-{}", std::process::id());
+        let zone = "사천성".to_string();
+        let room = "1";
+        let (sender, mut receiver) = mpsc::unbounded_channel();
+        let mut client = Client::new(addr, sender);
+        client.complete_login();
+        let mut player = Player::new();
+        player.state = STATE_ACTIVE;
+        player.interactive = 1;
+        player.body.set("이름", name.as_str());
+        player.body.set("체력", 100_i64);
+        player.body.set("최고체력", 100_i64);
+        player.body.set("내공", 10_i64);
+        player.body.set("최고내공", 10_i64);
+        let mut item = crate::object::Object::new();
+        item.set("이름", "즉사시험검");
+        item.set("인덱스", "즉사시험검");
+        item.set("반응이름", "검");
+        player
+            .body
+            .object
+            .objs
+            .push(Arc::new(std::sync::Mutex::new(item)));
+        client.player = Some(player);
+        broadcaster.add_client(client);
+
+        let mob_key = format!("{zone}:이벤트즉사무면옹-{}", std::process::id());
+        {
+            let mut world = get_world_state().write().unwrap();
+            let mut data = crate::world::RawMobData::new();
+            data.name = "즉사무면옹".to_string();
+            data.zone = zone.clone();
+            data.events.insert(
+                "이벤트 $대화".to_string(),
+                crate::world::EventScript::Rhai("무면옹_대화_대.rhai".to_string()),
+            );
+            world
+                .mob_cache
+                .insert_mob_data(mob_key.clone(), data.clone());
+            world
+                .mob_cache
+                .add_mob_instance(crate::world::MobInstance::new(
+                    mob_key.clone(),
+                    zone.clone(),
+                    room,
+                    &data,
+                ));
+            world.set_player_position(&name, PlayerPosition::new(zone.clone(), room.to_string()));
+        }
+
+        handle_game_command(
+            &broadcaster,
+            addr,
+            "즉사무면옹 대화",
+            registry,
+            room_cache,
+            None,
+        )
+        .await
+        .unwrap();
+        let mut output = String::new();
+        while let Ok(chunk) = receiver.try_recv() {
+            output.push_str(&chunk);
+        }
+        assert!(
+            output.contains("당신이 쓰러집니다. '쿠웅~~ 철퍼덕~~'"),
+            "{output:?}"
+        );
+        assert!(output.contains("즉사시험검"), "{output:?}");
+        assert!(output.contains("당신은 정신이 혼미합니다."), "{output:?}");
+        let clients = broadcaster.clients.lock();
+        let body = &clients[&addr].player.as_ref().unwrap().body;
+        assert_eq!(body.act, crate::player::ActState::Death);
+        assert!(body.object.objs.is_empty());
+        drop(clients);
+        let mut world = get_world_state().write().unwrap();
+        assert!(world
+            .room_objs
+            .get(&format!("{zone}:{room}"))
+            .is_some_and(|items| items.iter().any(|item| {
+                item.lock().is_ok_and(|item| item.getName() == "즉사시험검")
+            })));
+        world.mob_cache.remove_mob(&mob_key);
+        world.remove_player_position(&name);
+        world.room_objs.remove(&format!("{zone}:{room}"));
     }
 
     #[test]
@@ -6164,11 +7576,7 @@ mod tests {
         let room = "1";
         let runtime_box = Arc::new(std::sync::Mutex::new(crate::object::Object::new()));
         runtime_box.lock().unwrap().set("이름", "혼합스냅대상");
-        crate::script::register_installed_box(
-            zone,
-            room,
-            runtime_box.clone(),
-        );
+        crate::script::register_installed_box(zone, room, runtime_box.clone());
         let summoned_id = {
             let mut world = get_world_state().write().unwrap();
             world.set_player_position(
@@ -6195,7 +7603,9 @@ mod tests {
             let world = get_world_state().read().unwrap();
             assert_eq!(
                 install_party_context(&broadcaster, &clients, &world, actor_addr),
-                clients.get(&actor_addr).map(|client| client.connection_token.clone())
+                clients
+                    .get(&actor_addr)
+                    .map(|client| client.connection_token.clone())
             );
         }
         let context = crate::script::precomputed_party_context_for_test().unwrap();
@@ -6214,8 +7624,7 @@ mod tests {
             })
             .collect::<Vec<_>>();
         assert_eq!(kinds, ["unbound_player", "box", "player", "player"]);
-        let selected = crate::script::find_follow_player_for_test("혼합스냅대상")
-            .cast::<Map>();
+        let selected = crate::script::find_follow_player_for_test("혼합스냅대상").cast::<Map>();
         assert_eq!(selected["lookup_supported"].as_bool().unwrap(), false);
 
         // Removing only the socket-less Player leaves the matching runtime
@@ -6229,8 +7638,7 @@ mod tests {
             let world = get_world_state().read().unwrap();
             install_party_context(&broadcaster, &clients, &world, actor_addr);
         }
-        let selected = crate::script::find_follow_player_for_test("혼합스냅대상")
-            .cast::<Map>();
+        let selected = crate::script::find_follow_player_for_test("혼합스냅대상").cast::<Map>();
         assert_eq!(selected["lookup_supported"].as_bool().unwrap(), false);
 
         // Re-entering the connected target prepends that Player ahead of the
@@ -6248,8 +7656,7 @@ mod tests {
             let world = get_world_state().read().unwrap();
             install_party_context(&broadcaster, &clients, &world, actor_addr);
         }
-        let selected = crate::script::find_follow_player_for_test("혼합스냅대상")
-            .cast::<Map>();
+        let selected = crate::script::find_follow_player_for_test("혼합스냅대상").cast::<Map>();
         assert_eq!(selected["kind"].clone().into_string().unwrap(), "player");
         assert_eq!(
             selected["name"].clone().into_string().unwrap(),
@@ -6479,6 +7886,52 @@ mod tests {
             recipient_rx.try_recv().unwrap(),
             format!("\r\n{message}\r\n\r\n\x1b[0;37;40m[ 11/22, 3/44 ] ")
         );
+        assert!(inactive_rx.try_recv().is_err());
+    }
+
+    #[test]
+    fn rank_event_broadcast_skips_actor_and_preserves_recipient_prompt() {
+        let broadcaster = crate::network::Broadcaster::new();
+        let actor_addr: SocketAddr = "127.0.0.1:18058".parse().unwrap();
+        let observer_addr: SocketAddr = "127.0.0.1:18059".parse().unwrap();
+        let inactive_addr: SocketAddr = "127.0.0.1:18060".parse().unwrap();
+        let (actor_tx, mut actor_rx) = mpsc::unbounded_channel();
+        let (observer_tx, mut observer_rx) = mpsc::unbounded_channel();
+        let (inactive_tx, mut inactive_rx) = mpsc::unbounded_channel();
+
+        let mut actor = Client::new(actor_addr, actor_tx);
+        actor.complete_login();
+        let mut actor_player = Player::new();
+        actor_player.body.set("이름", "순위기록자");
+        actor.player = Some(actor_player);
+        broadcaster.add_client(actor);
+
+        let mut observer = Client::new(observer_addr, observer_tx);
+        observer.complete_login();
+        let mut observer_player = Player::new();
+        observer_player.body.set("이름", "순위관찰자");
+        observer_player.body.set("설정상태", "엘피출력 0");
+        observer.player = Some(observer_player);
+        broadcaster.add_client(observer);
+
+        let mut inactive = Client::new(inactive_addr, inactive_tx);
+        let mut inactive_player = Player::new();
+        inactive_player.body.set("이름", "비접속관찰자");
+        inactive.player = Some(inactive_player);
+        broadcaster.add_client(inactive);
+
+        broadcast_event_lines_except(
+            &broadcaster,
+            "순위기록자",
+            &["첫 공지".to_string(), "둘째 공지".to_string()],
+        );
+
+        assert!(actor_rx.try_recv().is_err());
+        assert_eq!(
+            observer_rx.try_recv().unwrap(),
+            "\r\n첫 공지\r\n둘째 공지\r\n"
+        );
+        assert!(observer_rx.try_recv().is_err());
         assert!(inactive_rx.try_recv().is_err());
     }
 

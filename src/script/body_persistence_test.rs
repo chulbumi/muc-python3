@@ -65,10 +65,8 @@ fn save_body_emits_python_numeric_alias_defaults() {
 
 #[test]
 fn save_body_emits_python_skill_lists_as_arrays_even_when_empty() {
-    let path = std::env::temp_dir().join(format!(
-        "muc_empty_skill_lists_{}.json",
-        std::process::id()
-    ));
+    let path =
+        std::env::temp_dir().join(format!("muc_empty_skill_lists_{}.json", std::process::id()));
     let mut body = Body::new();
     body.set("이름", "빈무공배열검사");
     assert!(save_body_to_json_without_timestamp(
@@ -186,10 +184,8 @@ assert player.save(False)
 
 #[test]
 fn python_string_array_attributes_keep_their_json_shape_across_rust_round_trip() {
-    let path = std::env::temp_dir().join(format!(
-        "muc_body_array_shape_{}.json",
-        std::process::id()
-    ));
+    let path =
+        std::env::temp_dir().join(format!("muc_body_array_shape_{}.json", std::process::id()));
     let source = serde_json::json!({
         "사용자오브젝트": {
             "이름": "배열형태왕복",

@@ -298,6 +298,14 @@ mod tests {
     }
 
     #[test]
+    fn dot_before_attack_is_the_python_first_mob_selector() {
+        let parsed = CommandParser::parse(". 쳐");
+        assert_eq!(parsed.command, "쳐");
+        assert_eq!(parsed.args, ".");
+        assert_eq!(parsed.tokens, ["."]);
+    }
+
+    #[test]
     fn test_parse_command_with_args() {
         let parsed = CommandParser::parse("검을 주워 동");
         assert_eq!(parsed.command, "동");

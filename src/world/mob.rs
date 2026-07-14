@@ -4,18 +4,14 @@
 //! Mobs are loaded from JSON files in the data/mob/ directory.
 
 use crate::object::Object;
+pub use crate::world::event_binding::EventScript;
+use crate::world::EventBindings;
 use serde_json::Value as JsonValue;
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::{Arc, Mutex};
 
 static NEXT_MOB_INSTANCE_ID: AtomicU64 = AtomicU64::new(1);
 
-/// 이벤트 스크립트: 배열(legacy)이거나 Rhai 파일명(문자열).
-#[derive(Debug, Clone)]
-pub enum EventScript {
-    Legacy(Vec<String>),
-    Rhai(String),
-}
 use std::collections::{HashMap, HashSet};
 use std::path::{Path, PathBuf};
 use std::sync::RwLock;
@@ -81,7 +77,7 @@ pub struct RawMobData {
     /// Auto scripts (자동스크립)
     pub auto_scripts: Vec<String>,
     /// Events map (이벤트:...). 값이 배열이면 Legacy, 문자열이면 Rhai 스크립트 경로(예: "83_편지.rhai").
-    pub events: HashMap<String, EventScript>,
+    pub events: EventBindings,
     /// Items for sale (물건판매)
     pub items_for_sale: Vec<(String, i64)>,
     /// Sale menu script lines (물건판매스크립)
@@ -92,6 +88,8 @@ pub struct RawMobData {
     pub use_items: Vec<(String, i64, i64, i64)>,
     /// Corpse drop declarations (아이템): key, count, chance, roll scale.
     pub drop_items: Vec<(String, i64, i64, i64)>,
+    /// Type-6 container item refill interval (`아이템리젠`, minimum 180 seconds in Python).
+    pub item_regen: i64,
     /// Skills mob knows (무공)
     pub skills: Vec<(String, i64, i64)>,
     /// Death script (소멸스크립)
@@ -141,12 +139,13 @@ impl RawMobData {
             personality: 0,
             safe_zone: false,
             auto_scripts: Vec::new(),
-            events: HashMap::new(),
+            events: EventBindings::default(),
             items_for_sale: Vec::new(),
             sale_script: Vec::new(),
             buy_percent: 0,
             use_items: Vec::new(),
             drop_items: Vec::new(),
+            item_regen: 180,
             skills: Vec::new(),
             death_script: String::new(),
             combat_start_script: String::new(),
@@ -229,6 +228,12 @@ pub struct MobInstance {
     pub arm: i64,
     /// Difficulty-adjusted agility
     pub agility: i64,
+    /// Per-instance combat attributes. Event `$특성치복사…` mutates these
+    /// values after the template has been loaded, just like Python Mob.attr.
+    pub miss: i64,
+    pub hit: i64,
+    pub luck: i64,
+    pub critical: i64,
     /// Temporary stat modifiers applied by defense/non-combat skills.
     pub str_modifier: i64,
     pub dex_modifier: i64,
@@ -356,6 +361,10 @@ impl MobInstance {
             strength,
             arm,
             agility,
+            miss: data.miss,
+            hit: data.hit,
+            luck: data.luck,
+            critical: data.critical,
             str_modifier: 0,
             dex_modifier: 0,
             arm_modifier: 0,
@@ -393,6 +402,10 @@ impl MobInstance {
         self.strength = config.apply_str(data.strength);
         self.arm = config.apply_arm(data.arm);
         self.agility = config.apply_agi(data.agility);
+        self.miss = data.miss;
+        self.hit = data.hit;
+        self.luck = data.luck;
+        self.critical = data.critical;
 
         self.alive = true;
         self.death_time = 0;
@@ -1145,22 +1158,7 @@ impl MobCache {
             }
         }
 
-        // Parse events (이벤트:...). 배열=Legacy, 문자열=Rhai 스크립트 파일명.
-        for (key, value) in mob_info {
-            if key.starts_with("이벤트") {
-                if let Some(arr) = value.as_array() {
-                    let event_scripts: Vec<String> = arr
-                        .iter()
-                        .filter_map(|v| v.as_str().map(|s| s.to_string()))
-                        .collect();
-                    data.events
-                        .insert(key.clone(), EventScript::Legacy(event_scripts));
-                } else if let Some(s) = value.as_str() {
-                    data.events
-                        .insert(key.clone(), EventScript::Rhai(s.to_string()));
-                }
-            }
-        }
+        data.events = EventBindings::from_json_map(mob_info);
 
         // Items for sale (물건판매)
         if let Some(items) = mob_info.get("물건판매") {
@@ -1243,20 +1241,32 @@ impl MobCache {
                 ));
             }
         }
+        data.item_regen = mob_info
+            .get("아이템리젠")
+            .and_then(JsonValue::as_i64)
+            .unwrap_or(180)
+            .max(180);
 
         // Skills (무공)
         if let Some(skills) = mob_info.get("무공") {
-            if let Some(arr) = skills.as_array() {
-                for skill in arr {
-                    if let Some(s) = skill.as_str() {
-                        let parts: Vec<&str> = s.split_whitespace().collect();
-                        if parts.len() >= 3 {
-                            let skill_name = parts[0].to_string();
-                            let level = parts[1].parse::<i64>().unwrap_or(100);
-                            let prob = parts[2].parse::<i64>().unwrap_or(100);
-                            data.skills.push((skill_name, level, prob));
-                        }
-                    }
+            // The legacy converter preserves a single #무공 line as a JSON
+            // string and repeated lines as an array.  Python accepts both;
+            // treating only arrays silently removes the skill from many
+            // late-game mobs (including 천상선계).
+            let mut add_skill = |skill: &str| {
+                let parts: Vec<&str> = skill.split_whitespace().collect();
+                if parts.len() >= 3 {
+                    let skill_name = parts[0].to_string();
+                    let level = parts[1].parse::<i64>().unwrap_or(100);
+                    let prob = parts[2].parse::<i64>().unwrap_or(100);
+                    data.skills.push((skill_name, level, prob));
+                }
+            };
+            if let Some(skill) = skills.as_str() {
+                add_skill(skill);
+            } else if let Some(arr) = skills.as_array() {
+                for skill in arr.iter().filter_map(JsonValue::as_str) {
+                    add_skill(skill);
                 }
             }
         }

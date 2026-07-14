@@ -90,6 +90,121 @@ fn test_script_storage_new() {
     let storage = ScriptStorage::default();
     assert!(storage.config.script_dir.ends_with("cmds"));
 }
+
+#[test]
+fn cached_ast_reloads_only_after_valid_script_or_library_change() {
+    let root = std::env::temp_dir().join(format!(
+        "muc_script_ast_cache_{}_{}",
+        std::process::id(),
+        std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap()
+            .as_nanos()
+    ));
+    let commands = root.join("cmds");
+    let libraries = root.join("lib");
+    std::fs::create_dir_all(&commands).unwrap();
+    std::fs::create_dir_all(&libraries).unwrap();
+    let command_path = commands.join("cached.rhai");
+    let library_path = libraries.join("value.rhai");
+    std::fs::write(&library_path, r#"fn lib_value() { "one" }"#).unwrap();
+    std::fs::write(
+        &command_path,
+        r#"fn main(ob, line) { send_line(ob, "cmd1-" + lib_value()); }"#,
+    )
+    .unwrap();
+
+    let config = ScriptConfig {
+        script_dir: commands,
+        lib_dir: libraries,
+        ..ScriptConfig::default()
+    };
+    let mut storage = ScriptStorage::new(config);
+    let mut body = Body::new();
+    let run = |storage: &ScriptStorage, body: &mut Body| {
+        storage
+            .execute("cached", body, "", None, None, None)
+            .unwrap()
+            .0
+    };
+    assert_eq!(run(&storage, &mut body), vec!["cmd1-one"]);
+
+    // Execution uses the cached AST, not the retained source string.
+    storage.scripts.get_mut("cached").unwrap().source = "invalid source".to_string();
+    assert_eq!(run(&storage, &mut body), vec!["cmd1-one"]);
+
+    std::thread::sleep(std::time::Duration::from_millis(20));
+    std::fs::write(
+        &command_path,
+        r#"fn main(ob, line) { send_line(ob, "cmd2-" + lib_value()); }"#,
+    )
+    .unwrap();
+    assert!(storage.reload_script("cached").unwrap());
+    assert_eq!(run(&storage, &mut body), vec!["cmd2-one"]);
+
+    std::thread::sleep(std::time::Duration::from_millis(20));
+    std::fs::write(&library_path, r#"fn lib_value() { "two" }"#).unwrap();
+    assert!(storage.reload_all().unwrap() >= 1);
+    assert_eq!(run(&storage, &mut body), vec!["cmd2-two"]);
+
+    // A bad hot reload never replaces the last valid source/revision/AST.
+    std::thread::sleep(std::time::Duration::from_millis(20));
+    std::fs::write(&command_path, "fn main(").unwrap();
+    assert!(storage.reload_script("cached").is_err());
+    assert_eq!(run(&storage, &mut body), vec!["cmd2-two"]);
+
+    let _ = std::fs::remove_dir_all(root);
+}
+
+#[test]
+fn different_users_do_not_share_a_global_rhai_execution_mutex() {
+    let root = std::env::temp_dir().join(format!(
+        "muc_script_parallel_{}_{}",
+        std::process::id(),
+        std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap()
+            .as_nanos()
+    ));
+    std::fs::create_dir_all(&root).unwrap();
+    std::fs::write(
+        root.join("parallel.rhai"),
+        r#"fn main(ob, line) { __test_sleep_ms(500); send_line(ob, line); }"#,
+    )
+    .unwrap();
+    let storage = Arc::new(ScriptStorage::new(ScriptConfig {
+        script_dir: root.clone(),
+        lib_dir: root.join("lib"),
+        ..ScriptConfig::default()
+    }));
+    let barrier = Arc::new(std::sync::Barrier::new(3));
+    let started = std::time::Instant::now();
+    let handles = ["first", "second"].map(|line| {
+        let storage = storage.clone();
+        let barrier = barrier.clone();
+        std::thread::spawn(move || {
+            let mut body = Body::new();
+            barrier.wait();
+            storage
+                .execute("parallel", &mut body, line, None, None, None)
+                .unwrap()
+                .0
+        })
+    });
+    barrier.wait();
+    let outputs = handles.map(|handle| handle.join().unwrap());
+    let elapsed = started.elapsed();
+
+    assert_eq!(outputs[0], vec!["first"]);
+    assert_eq!(outputs[1], vec!["second"]);
+    assert!(
+        elapsed < std::time::Duration::from_millis(850),
+        "two 500ms Rhai commands were serialized: {elapsed:?}"
+    );
+
+    let _ = std::fs::remove_dir_all(root);
+}
+
 #[test]
 fn test_script_config_default() {
     let config = ScriptConfig::default();
@@ -101,13 +216,14 @@ fn test_script_config_default() {
 fn password_hash_uses_bcrypt_and_reads_legacy_formats() {
     let stored = password_hash("새암호");
     assert!(stored.starts_with("$2"));
+    assert_eq!(stored.split('$').nth(2), Some("10"));
     assert!(password_verify(&stored, "새암호"));
     assert!(!password_verify(&stored, "틀린암호"));
     assert!(!password_needs_upgrade(&stored));
 
     let old_bcrypt = bcrypt::hash("옛암호", bcrypt::DEFAULT_COST).unwrap();
     assert!(password_verify(&old_bcrypt, "옛암호"));
-    assert!(!password_needs_upgrade(&old_bcrypt));
+    assert!(password_needs_upgrade(&old_bcrypt));
 
     let prehashed = bcrypt::hash(password_sha256("전처리암호"), bcrypt::DEFAULT_COST).unwrap();
     let tagged_prehashed = format!("{BCRYPT_SHA256_PREFIX}{prehashed}");

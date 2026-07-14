@@ -21,8 +21,8 @@ if [ "$PORT" -lt 1 ] || [ "$PORT" -gt 65535 ]; then
     exit 2
 fi
 
-echo "=== cargo build --bin murim_server ==="
-cargo build --bin murim_server
+echo "=== cargo build --release --bin murim_server ==="
+cargo build --release --bin murim_server
 
 echo "=== 포트 $PORT 점유 확인 ==="
 if command -v fuser >/dev/null 2>&1; then
@@ -75,4 +75,4 @@ if [ -n "$OLD_PIDS" ]; then
 fi
 
 echo "=== Rust MUD 서버 시작: 0.0.0.0:$PORT ==="
-exec ./target/debug/murim_server "$PORT"
+exec ./target/release/murim_server "$PORT"

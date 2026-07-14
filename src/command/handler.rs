@@ -167,12 +167,21 @@ pub enum CommandResult {
     MobEvent {
         output_lines: Vec<String>,
         set_position: Option<(String, String)>,
+        /// Python `$순위갱신`처럼 실행자 이외의 접속자에게만 보내는
+        /// 이벤트 공지. 수신자의 프롬프트는 갱신하지 않는다.
+        broadcast_lines: Vec<String>,
+        /// Python printScript()처럼 실행자 이외의 같은 방 사용자에게만
+        /// 보내는 이벤트 출력. 수신자는 Python sendRoom()과 같이
+        /// 개행 뒤 자신의 프롬프트를 다시 받는다.
+        room_broadcast_lines: Vec<String>,
     },
     /// $엔터$: 출력·이동 적용 후 엔터 대기. prompt 전송, PendingInput::EventEnter { ... }.
     /// resume_func: Rhai wait_enter(next_func, prompt) 시 Some(next_func). Legacy면 None.
     MobEventEnter {
         output_lines: Vec<String>,
         set_position: Option<(String, String)>,
+        broadcast_lines: Vec<String>,
+        room_broadcast_lines: Vec<String>,
         mob_key: String,
         event_key: String,
         words: Vec<String>,

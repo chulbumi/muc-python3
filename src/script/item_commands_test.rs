@@ -195,13 +195,11 @@ fn pickup_uses_python_raw_mode_numeric_prefix_actual_name_particle_and_room_noti
         CommandResult::OutputAndSendToUsers(_, sends) => sends,
         other => panic!("unexpected all-pickup delivery: {other:?}"),
     };
-    assert!(all_sends[0]
-        .1
-        .starts_with(&format!(
-            "{}\r\n\x1b[1m{actor}\x1b[0;37m{} ",
-            RAW_USER_MESSAGE_PREFIX,
-            han_iga(&actor)
-        )));
+    assert!(all_sends[0].1.starts_with(&format!(
+        "{}\r\n\x1b[1m{actor}\x1b[0;37m{} ",
+        RAW_USER_MESSAGE_PREFIX,
+        han_iga(&actor)
+    )));
 
     let mut world = get_world_state().write().unwrap();
     world.remove_player_position(&actor);

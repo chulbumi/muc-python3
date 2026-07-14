@@ -316,9 +316,11 @@ fn tweet_uses_python_usage_and_recipient_time_ansi_preferences() {
     assert!(shout_sends
         .iter()
         .find(|(name, _)| name == timed)
-        .is_some_and(|(_, wire)| wire.starts_with(&format!("{}\r\n[", RAW_USER_MESSAGE_PREFIX))
-            && !wire.contains("\x1b[31m")
-            && wire.ends_with("\r\n\r\n\x1b[0;37;40m[ 321/765, 12/43 ] ")));
+        .is_some_and(
+            |(_, wire)| wire.starts_with(&format!("{}\r\n[", RAW_USER_MESSAGE_PREFIX))
+                && !wire.contains("\x1b[31m")
+                && wire.ends_with("\r\n\r\n\x1b[0;37;40m[ 321/765, 12/43 ] ")
+        ));
 
     let shout2 = storage
         .execute("외쳐2", &mut body, "두번째", None, None, None)
@@ -536,10 +538,19 @@ fn say_matches_python_send_room_ansi_and_each_players_prompt() {
         vec![
             (
                 "영희".to_string(),
-                format!("{}{room}\r\n\r\n\x1b[0;37;40m[ 700/800, 12/14 ] ", RAW_USER_MESSAGE_PREFIX)
+                format!(
+                    "{}{room}\r\n\r\n\x1b[0;37;40m[ 700/800, 12/14 ] ",
+                    RAW_USER_MESSAGE_PREFIX
+                )
             ),
-            ("길동".to_string(), format!("{}{room}\r\n", RAW_USER_MESSAGE_PREFIX)),
-            ("잠든이".to_string(), format!("{}{room}\r\n", RAW_USER_MESSAGE_PREFIX)),
+            (
+                "길동".to_string(),
+                format!("{}{room}\r\n", RAW_USER_MESSAGE_PREFIX)
+            ),
+            (
+                "잠든이".to_string(),
+                format!("{}{room}\r\n", RAW_USER_MESSAGE_PREFIX)
+            ),
         ]
     );
 

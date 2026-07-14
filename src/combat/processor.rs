@@ -281,10 +281,9 @@ pub(crate) fn calculate_mob_skill_damage(
         .map(|training| training.level)
         .unwrap_or(1);
     let (mastery_chance, mastery_damage) = mob_skill_mastery_bonus(training_level);
-    let chance =
-        mob_data.luck as f64 * crate::script::get_murim_config_float("운확률") + mastery_chance;
+    let chance = mob.luck as f64 * crate::script::get_murim_config_float("운확률") + mastery_chance;
     let multiplier = if chance > critical_roll as f64 {
-        (mob_data.critical as f64 * crate::script::get_murim_config_float("필살배수")).max(1.0)
+        (mob.critical as f64 * crate::script::get_murim_config_float("필살배수")).max(1.0)
     } else {
         1.0
     };
@@ -343,7 +342,8 @@ pub fn check_hit(player: &Body, mob_data: &RawMobData) -> bool {
 }
 
 fn check_hit_instance(player: &Body, mob: &MobInstance, mob_data: &RawMobData) -> bool {
-    let hit_chance = calculate_attack_chance_with_level(player, mob_data, mob.level);
+    let hit_chance = calculate_attack_chance_with_level(player, mob_data, mob.level)
+        + (mob_data.miss - mob.miss) as f64 * 0.2;
     hit_chance >= rand::thread_rng().gen_range(0..=100) as f64
 }
 
@@ -442,7 +442,7 @@ pub fn process_mob_strike(
 ) -> CombatRound {
     let mut round = CombatRound::new();
     let chance = 100.0 - ((player.get_int("레벨") - mob.level + 90).div_euclid(3)) as f64
-        + mob_data.hit as f64 * 0.2
+        + mob.hit as f64 * 0.2
         - player.get_miss() as f64 * 0.2;
     if chance < rand::thread_rng().gen_range(0..=100) as f64 {
         round.presentation_events.push(serde_json::json!({
@@ -617,7 +617,7 @@ fn calculate_skill_result_with_rolls(
     let chance = skill.probability as f64 + skill_level as f64 * 4.0
         - ((mob.level - player.get_int("레벨") + 90).div_euclid(3)) as f64
         + player.get_hit() as f64 * 0.2
-        - mob_data.miss as f64 * 0.2
+        - mob.miss as f64 * 0.2
         + mastery_chance;
     if chance < attack_roll as f64 {
         return (false, 0);

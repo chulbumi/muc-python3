@@ -15,6 +15,7 @@ use std::path::{Path, PathBuf};
 use std::sync::{Arc, RwLock};
 
 use super::difficulty::{base_zone_name, difficulty_from_zone, DifficultyLevel};
+use super::event_binding::EventBindings;
 
 /// Direction types for room exits. 파이썬 objs/room.sortExit·longExitStr와 동일(동서남북위아래 + 대각 4방향).
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
@@ -138,6 +139,8 @@ pub struct RawRoomData {
     pub mob_ids: Vec<String>,
     /// Python `설치리스트` entries. Room.create inserts their Boxes before mobs.
     pub installed_box_count: usize,
+    /// Optional trigger-to-script bindings; execution is owned elsewhere.
+    pub events: EventBindings,
 }
 
 /// Room structure representing a game room
@@ -165,6 +168,8 @@ pub struct Room {
     pub items: Vec<String>,
     /// Count of installation-list Boxes in Python insertion order.
     pub installed_box_count: usize,
+    /// Optional room-level scripts such as enter, search, or custom triggers.
+    pub events: EventBindings,
     /// Last Python-compatible `Room.update()` time in Unix milliseconds.
     pub last_update_millis: i64,
     /// Level restriction (lower bound)
@@ -192,6 +197,7 @@ impl Room {
             mob_ids: Vec::new(),
             items: Vec::new(),
             installed_box_count: 0,
+            events: EventBindings::default(),
             last_update_millis: 0,
             level_limit: 0,
             level_upper: 0,
@@ -492,6 +498,7 @@ impl RoomCache {
         room.properties = raw.properties;
         room.mob_ids = raw.mob_ids.clone();
         room.installed_box_count = raw.installed_box_count;
+        room.events = raw.events;
 
         // Parse exits (zone needed for same-zone "동 35" 형식)
         room.exits = self.parse_exits(&raw.exits, &raw.zone)?;
@@ -596,6 +603,7 @@ impl RoomCache {
             exits,
             mob_ids,
             installed_box_count,
+            events: EventBindings::from_json_map(map_info),
         })
     }
 
@@ -1098,6 +1106,33 @@ mod tests {
         assert!(room.can_enter(10));
         assert!(room.can_enter(50));
         assert!(!room.can_enter(60));
+    }
+
+    #[test]
+    fn room_data_can_define_event_bindings_without_fixtures() {
+        let json = serde_json::json!({
+            "맵속성": [],
+            "설명": [],
+            "이름": "숨겨진 서재",
+            "존이름": "시험존",
+            "출구": [],
+            "몹": [],
+            "events": {
+                "enter": "room_enter.rhai",
+                "search": ["$출력 벽에 틈이 보인다."]
+            }
+        });
+        let map = json.as_object().unwrap();
+        let raw = RoomCache::new().parse_raw_room_data(map).unwrap();
+
+        assert_eq!(
+            raw.events.get("enter"),
+            Some(&crate::world::EventScript::Rhai("room_enter.rhai".into()))
+        );
+        assert!(matches!(
+            raw.events.get("search"),
+            Some(crate::world::EventScript::Legacy(_))
+        ));
     }
 
     #[test]

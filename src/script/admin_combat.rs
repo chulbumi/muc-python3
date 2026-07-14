@@ -157,6 +157,13 @@ pub(super) fn python_named_room_selection_is_nonmob(
                     .unwrap_or((false, 0));
                 (matched, true)
             }
+            crate::world::RoomObjectRef::Fixture(id) => {
+                let matched = world
+                    .get_fixture(id)
+                    .map(|fixture| fixture.match_counts(query))
+                    .unwrap_or((false, 0));
+                (matched, true)
+            }
         };
         if exact {
             exact_count += 1;
@@ -607,7 +614,7 @@ fn insurance_count(level: i64, premium: i64) -> i64 {
     }
 }
 
-fn clear_summon_combat(body: &mut Body) {
+pub(crate) fn clear_summon_combat(body: &mut Body) {
     let name = body.get_name();
     crate::script::combat_commands::clear_pvp_target(body);
     body.targets.clear();
@@ -821,11 +828,7 @@ mod tests {
         }
         let runtime_box = Arc::new(Mutex::new(Object::new()));
         runtime_box.lock().unwrap().set("이름", "충돌대상");
-        super::super::box_commands::register_installed_box(
-            &zone,
-            room,
-            runtime_box,
-        );
+        super::super::box_commands::register_installed_box(&zone, room, runtime_box);
         let blocked = storage
             .execute("몹회복", &mut body, "충돌대상", None, None, None)
             .unwrap();

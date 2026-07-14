@@ -1418,6 +1418,57 @@ mod tests {
     }
 
     #[test]
+    fn royal_tomb_hidden_entrance_and_random_corridors_match_map_data() {
+        let entrance = room_info("낙양성", "150").expect("royal tomb entrance fixture");
+        let exits = accessible_exits(&entrance);
+        let down = exits
+            .iter()
+            .find(|exit| exit.name == "아래")
+            .expect("hidden downward entrance");
+        assert!(down.hidden);
+        assert_eq!(down.destinations, vec!["151"]);
+        let displayed = sorted_exit_names(&entrance)
+            .into_iter()
+            .filter(|name| !name.ends_with('$'))
+            .collect::<Vec<_>>();
+        assert!(!displayed.iter().any(|name| name == "아래"));
+
+        for (room, direction, destinations) in [
+            ("154", "남", vec!["153", "155"]),
+            ("155", "북", vec!["153", "154"]),
+        ] {
+            let info = room_info("낙양성", room).expect("random royal tomb corridor fixture");
+            let exit = accessible_exits(&info)
+                .into_iter()
+                .find(|exit| exit.name == direction)
+                .expect("random corridor exit");
+            assert!(exit.random_destination);
+            assert_eq!(exit.destinations, destinations);
+        }
+    }
+
+    #[test]
+    fn muguk_cave_hidden_slide_randomly_reaches_three_circuits() {
+        for (room, destination) in [("6002", "6003"), ("6003", "6004"), ("6004", "6005")] {
+            let info = room_info("낙양성", room).expect("Muguk cave slide fixture");
+            let down = accessible_exits(&info)
+                .into_iter()
+                .find(|exit| exit.name == "아래")
+                .expect("hidden downward slide");
+            assert!(down.hidden);
+            assert_eq!(down.destinations, vec![destination]);
+        }
+        let info = room_info("낙양성", "6005").expect("three-way slide fixture");
+        let down = accessible_exits(&info)
+            .into_iter()
+            .find(|exit| exit.name == "아래")
+            .expect("random hidden downward slide");
+        assert!(down.hidden);
+        assert!(down.random_destination);
+        assert_eq!(down.destinations, vec!["6014", "6023", "6032"]);
+    }
+
+    #[test]
     fn room_command_limit_uses_python_substring_membership() {
         let player_name = "명령제한상태검사";
         get_world_state().write().unwrap().set_player_position(

@@ -1791,8 +1791,14 @@ mod tests {
             other => panic!("expected attack room deliveries, got {other:?}"),
         };
         for (name, prompt) in [
-            ("공격관전자", "\0MUC_RAW_USER\0\r\n\x1b[0;37;40m[ 41/42, 8/9 ] "),
-            ("공격출력거부관전자", "\0MUC_RAW_USER\0\r\n\x1b[0;37;40m[ 11/12, 3/4 ] "),
+            (
+                "공격관전자",
+                "\0MUC_RAW_USER\0\r\n\x1b[0;37;40m[ 41/42, 8/9 ] ",
+            ),
+            (
+                "공격출력거부관전자",
+                "\0MUC_RAW_USER\0\r\n\x1b[0;37;40m[ 11/12, 3/4 ] ",
+            ),
         ] {
             let messages = sends
                 .iter()
@@ -1868,8 +1874,10 @@ mod tests {
             Value::String(current_id.to_string()),
         );
 
+        // Python Room.findObjName(".") rewrites the selector to "1", so the
+        // complete `. 쳐` command attacks the first eligible room mob.
         let first = storage
-            .execute("쳐", &mut body, "1", None, None, None)
+            .execute("쳐", &mut body, ".", None, None, None)
             .unwrap();
         assert_eq!(first.0, vec!["☞ 이미 공격중이에요. ^_^"]);
         let second = storage
@@ -1955,10 +1963,7 @@ mod tests {
         details.insert("현재내공".into(), Dynamic::from(7_i64));
         details.insert("현재최고내공".into(), Dynamic::from(9_i64));
         crate::script::set_precomputed_all_online(vec![Dynamic::from(details)]);
-        queue_combat_presentation_event(
-            &mut actor,
-            serde_json::json!({"kind": "anger_100"}),
-        );
+        queue_combat_presentation_event(&mut actor, serde_json::json!({"kind": "anger_100"}));
 
         let result = ScriptStorage::default()
             .execute("__combat_tick", &mut actor, "", None, None, None)
@@ -1978,6 +1983,54 @@ mod tests {
         );
         super::super::cast::clear_cast_room_players();
         crate::script::clear_precomputed_all_online();
+    }
+
+    #[test]
+    fn combat_tick_defers_raw_self_prompt_until_after_death_rewards() {
+        let mut actor = Body::new();
+        actor.set("이름", "보상프롬프트검사");
+        actor.set("체력", 1333_i64);
+        actor.set("최고체력", 1594_i64);
+        actor.set("내공", 19_i64);
+        actor.set("최고내공", 19_i64);
+        queue_combat_presentation_event(
+            &mut actor,
+            serde_json::json!({
+                "kind": "mob_death", "mob": "청년",
+                "script": "청년이 고통스런 신음소리를 지르며 쓰러집니다."
+            }),
+        );
+        queue_combat_presentation_event(&mut actor, serde_json::json!({ "kind": "combat_prompt" }));
+        queue_combat_presentation_event(
+            &mut actor,
+            serde_json::json!({
+                "kind": "reward", "mob": "청년", "exp": 32,
+                "bonus_exp": 0, "gold": 18, "bonus_gold": 0,
+                "difficulty": 0
+            }),
+        );
+
+        let result = ScriptStorage::default()
+            .execute("__combat_tick", &mut actor, "", None, None, None)
+            .unwrap();
+        let (output, sends) = match result.1.unwrap() {
+            crate::command::CommandResult::OutputAndSendToUsers(output, sends) => (output, sends),
+            other => panic!("unexpected combat tick result: {other:?}"),
+        };
+        let death = output.find("청년이 고통스런").unwrap();
+        let exp = output.find("당신이 32의 경험치를").unwrap();
+        let gold = output.find("은전 18개를 획득합니다.").unwrap();
+        assert!(death < exp && exp < gold, "{output:?}");
+        assert!(!output.contains("[ 1333/1594, 19/19 ]"));
+        assert_eq!(sends.len(), 1);
+        assert_eq!(sends[0].0, "보상프롬프트검사");
+        assert_eq!(
+            sends[0].1,
+            format!(
+                "{}\r\n\x1b[0;37;40m[ 1333/1594, 19/19 ] ",
+                crate::script::RAW_USER_MESSAGE_PREFIX
+            )
+        );
     }
 
     #[test]
@@ -2003,7 +2056,9 @@ mod tests {
         let result = ScriptStorage::default()
             .execute("__combat_tick", &mut actor, "", None, None, None)
             .unwrap();
-        assert!(result.0.is_empty());
+        // End the actor's already-visible prompt before the asynchronous
+        // room respawn notification is delivered.
+        assert_eq!(result.0, vec![""]);
         let sends = match result.1.unwrap() {
             crate::command::CommandResult::SendToUsers(sends) => sends,
             crate::command::CommandResult::OutputAndSendToUsers(_, sends) => sends,

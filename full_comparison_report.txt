@@ -1,0 +1,6 @@
+Commands tested: 3
+Matched: 3
+Different: 0
+Match rate: 100.0%
+
+Differences:

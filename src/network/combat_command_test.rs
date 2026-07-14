@@ -18,11 +18,7 @@ async fn script_registry() -> Arc<CommandRegistry> {
     Arc::new(registry)
 }
 
-fn combat_client(
-    port: u16,
-    name: &str,
-    hp: i64,
-) -> (Client, mpsc::UnboundedReceiver<String>) {
+fn combat_client(port: u16, name: &str, hp: i64) -> (Client, mpsc::UnboundedReceiver<String>) {
     let (tx, rx) = mpsc::unbounded_channel();
     let addr: SocketAddr = format!("127.0.0.1:{port}").parse().unwrap();
     let mut client = Client::new(addr, tx);

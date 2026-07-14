@@ -51,19 +51,22 @@ fn nickname_success_sends_python_global_departure_arrival_wires_with_prompts() {
             PlayerPosition::new("사용자맵".into(), actor.clone()),
         );
     }
-    let online = [(&source_observer, 31_i64, 62_i64), (&destination_observer, 41, 82)]
-        .into_iter()
-        .map(|(name, hp, max_hp)| {
-            let mut player = rhai::Map::new();
-            player.insert("이름".into(), Dynamic::from(name.clone()));
-            player.insert("show_prompt".into(), Dynamic::from(true));
-            player.insert("현재체력".into(), Dynamic::from(hp));
-            player.insert("현재최고체력".into(), Dynamic::from(max_hp));
-            player.insert("현재내공".into(), Dynamic::from(7_i64));
-            player.insert("현재최고내공".into(), Dynamic::from(9_i64));
-            Dynamic::from(player)
-        })
-        .collect();
+    let online = [
+        (&source_observer, 31_i64, 62_i64),
+        (&destination_observer, 41, 82),
+    ]
+    .into_iter()
+    .map(|(name, hp, max_hp)| {
+        let mut player = rhai::Map::new();
+        player.insert("이름".into(), Dynamic::from(name.clone()));
+        player.insert("show_prompt".into(), Dynamic::from(true));
+        player.insert("현재체력".into(), Dynamic::from(hp));
+        player.insert("현재최고체력".into(), Dynamic::from(max_hp));
+        player.insert("현재내공".into(), Dynamic::from(7_i64));
+        player.insert("현재최고내공".into(), Dynamic::from(9_i64));
+        Dynamic::from(player)
+    })
+    .collect();
     set_precomputed_all_online(online);
 
     let mut body = Body::new();

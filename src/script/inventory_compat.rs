@@ -30,6 +30,14 @@ fn json_array_marker(field: &str) -> String {
     format!("{JSON_ARRAY_MARKER_PREFIX}{field}")
 }
 
+/// Mark an item field as a Python JSON array after an in-memory mutation that
+/// has Python `list` semantics (for example Object.setAttr or list.append).
+/// Rust stores the elements in a newline-delimited scalar internally, so the
+/// shape marker is required for Player.save() to reconstruct the array.
+pub(crate) fn mark_item_field_as_json_array(item: &mut Object, field: &str) {
+    item.temp.insert(json_array_marker(field), Value::Int(1));
+}
+
 /// Python's `value in item[field]`: list-valued JSON fields use exact element
 /// membership, while legacy scalar strings use substring membership.
 pub(crate) fn python_item_field_contains(item: &Object, field: &str, wanted: &str) -> bool {

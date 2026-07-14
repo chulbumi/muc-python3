@@ -8,9 +8,9 @@ pub mod server;
 pub(crate) mod social;
 
 #[cfg(test)]
-mod compare_command_test;
-#[cfg(test)]
 mod combat_command_test;
+#[cfg(test)]
+mod compare_command_test;
 #[cfg(test)]
 mod economy_command_test;
 #[cfg(test)]

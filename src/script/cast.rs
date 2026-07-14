@@ -25,6 +25,7 @@ pub(crate) struct CastRoomPlayerRef {
 }
 
 impl CastRoomPlayerRef {
+    #[cfg(test)]
     pub(crate) fn new(body: &mut Body) -> Self {
         Self {
             body: body as *mut Body,
@@ -520,6 +521,15 @@ pub(super) fn find_cast_target(caster: &Body, query: &str) -> Dynamic {
                             return Dynamic::UNIT;
                         }
                     };
+                }
+                RoomObjectRef::Fixture(id) => {
+                    let (exact, prefixes) = world
+                        .get_fixture(id)
+                        .map(|fixture| fixture.match_counts(&name))
+                        .unwrap_or((false, 0));
+                    if reaches_order(exact, prefixes as i64) {
+                        return Dynamic::UNIT;
+                    }
                 }
             }
         }
@@ -1622,12 +1632,7 @@ mod tests {
                 .mob_cache
                 .load_mob("절강성", "7")
                 .expect("repository mob fixture");
-            let mob = MobInstance::new(
-                "절강성:7".to_string(),
-                zone.to_string(),
-                room,
-                &data,
-            );
+            let mob = MobInstance::new("절강성:7".to_string(), zone.to_string(), room, &data);
             let id = mob.instance_id;
             world.mob_cache.add_mob_instance(mob);
             world.record_test_room_object(zone, room, RoomObjectRef::Mob(id));
@@ -1637,9 +1642,7 @@ mod tests {
             );
             (data.name, id)
         };
-        let runtime_box = std::sync::Arc::new(std::sync::Mutex::new(
-            crate::object::Object::new(),
-        ));
+        let runtime_box = std::sync::Arc::new(std::sync::Mutex::new(crate::object::Object::new()));
         runtime_box.lock().unwrap().set("이름", mob_name.as_str());
         super::super::box_commands::register_installed_box(zone, room, runtime_box);
         let mut caster = Body::new();
@@ -1982,8 +1985,14 @@ mod tests {
             other => panic!("expected room deliveries, got {other:?}"),
         };
         for (name, prompt) in [
-            ("전투시전관전자", "\0MUC_RAW_USER\0\r\n\x1b[0;37;40m[ 55/66, 7/8 ] "),
-            ("전투시전거부관전자", "\0MUC_RAW_USER\0\r\n\x1b[0;37;40m[ 11/22, 3/4 ] "),
+            (
+                "전투시전관전자",
+                "\0MUC_RAW_USER\0\r\n\x1b[0;37;40m[ 55/66, 7/8 ] ",
+            ),
+            (
+                "전투시전거부관전자",
+                "\0MUC_RAW_USER\0\r\n\x1b[0;37;40m[ 11/22, 3/4 ] ",
+            ),
         ] {
             let messages = sends
                 .iter()
@@ -1993,10 +2002,8 @@ mod tests {
             assert_eq!(messages.len(), 4, "{name}: {messages:?}");
             assert!(messages[0].contains("雙手"));
             assert!(messages[1].contains("주먹을 쥐며 공격 합니다."));
-            assert!(messages[2].starts_with(&format!(
-                "\0MUC_RAW_USER\0\r\n\x1b[33m{}\x1b[37m",
-                mob_name
-            )));
+            assert!(messages[2]
+                .starts_with(&format!("\0MUC_RAW_USER\0\r\n\x1b[33m{}\x1b[37m", mob_name)));
             assert_eq!(messages[3], prompt);
         }
         assert_eq!(body.get_int("내공"), 700);

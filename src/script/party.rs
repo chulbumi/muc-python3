@@ -174,7 +174,9 @@ pub(crate) fn installed_box_party_snapshot_by_pointer(
     let index = boxes
         .iter()
         .position(|object| std::sync::Arc::as_ptr(object) as usize == pointer)?;
-    installed_box_party_snapshots(zone, room)?.get(index).cloned()
+    installed_box_party_snapshots(zone, room)?
+        .get(index)
+        .cloned()
 }
 
 pub(crate) fn missing_party_person(connection_id: String, relation: RelationState) -> Dynamic {

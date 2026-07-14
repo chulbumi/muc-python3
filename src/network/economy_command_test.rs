@@ -19,11 +19,7 @@ async fn script_registry() -> Arc<CommandRegistry> {
     Arc::new(registry)
 }
 
-fn shop_client(
-    port: u16,
-    name: &str,
-    hp: i64,
-) -> (Client, mpsc::UnboundedReceiver<String>) {
+fn shop_client(port: u16, name: &str, hp: i64) -> (Client, mpsc::UnboundedReceiver<String>) {
     let (tx, rx) = mpsc::unbounded_channel();
     let addr: SocketAddr = format!("127.0.0.1:{port}").parse().unwrap();
     let mut client = Client::new(addr, tx);
@@ -56,8 +52,18 @@ async fn shop_recipient_wire_matches_python_send_fight_script_room() {
     let listener = format!("구입망관찰자-{suffix}");
     let buyer_addr: SocketAddr = "127.0.0.1:18201".parse().unwrap();
     let (mut buyer_client, mut buyer_rx) = shop_client(18201, &buyer, 90);
-    buyer_client.player.as_mut().unwrap().body.set("은전", 100_i64);
-    buyer_client.player.as_mut().unwrap().body.set("힘", 100_i64);
+    buyer_client
+        .player
+        .as_mut()
+        .unwrap()
+        .body
+        .set("은전", 100_i64);
+    buyer_client
+        .player
+        .as_mut()
+        .unwrap()
+        .body
+        .set("힘", 100_i64);
     let (listener_client, mut listener_rx) = shop_client(18202, &listener, 70);
     let broadcaster = Arc::new(Broadcaster::new());
     broadcaster.add_client(buyer_client);
@@ -66,14 +72,8 @@ async fn shop_recipient_wire_matches_python_send_fight_script_room() {
         let mut world = get_world_state().write().unwrap();
         world.room_cache.get_room("낙양성", "6").unwrap();
         world.spawn_mobs_for_room("낙양성", "6");
-        world.set_player_position(
-            &buyer,
-            PlayerPosition::new("낙양성".into(), "6".into()),
-        );
-        world.set_player_position(
-            &listener,
-            PlayerPosition::new("낙양성".into(), "6".into()),
-        );
+        world.set_player_position(&buyer, PlayerPosition::new("낙양성".into(), "6".into()));
+        world.set_player_position(&listener, PlayerPosition::new("낙양성".into(), "6".into()));
     }
 
     handle_game_command(
@@ -110,23 +110,14 @@ async fn shop_recipient_wire_matches_python_send_fight_script_room() {
         item.set("이름", "자주판매품");
         item.set("안시", "\x1b[1;35m");
         item.set("판매가격", 100_i64);
-        buyer_body
-            .object
-            .objs
-            .push(Arc::new(Mutex::new(item)));
+        buyer_body.object.objs.push(Arc::new(Mutex::new(item)));
     }
     {
         let mut world = get_world_state().write().unwrap();
         world.room_cache.get_room("낙양성", "43").unwrap();
         world.spawn_mobs_for_room("낙양성", "43");
-        world.set_player_position(
-            &buyer,
-            PlayerPosition::new("낙양성".into(), "43".into()),
-        );
-        world.set_player_position(
-            &listener,
-            PlayerPosition::new("낙양성".into(), "43".into()),
-        );
+        world.set_player_position(&buyer, PlayerPosition::new("낙양성".into(), "43".into()));
+        world.set_player_position(&listener, PlayerPosition::new("낙양성".into(), "43".into()));
     }
     handle_game_command(
         &broadcaster,

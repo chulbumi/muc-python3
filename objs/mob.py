@@ -73,6 +73,14 @@ class Mob(Body):
             self.attr = scr['몹정보']
         except:
             return False
+
+        # The Rust migration keeps JSON event keys as ``*.rhai`` references,
+        # while the Python reference server executes the original list of
+        # legacy event lines directly.  Keep the JSON untouched for Rust and
+        # hydrate only those Python runtime values from the paired ``.mob``
+        # source.  Without this, Python iterates a filename one character at
+        # a time in Player.doEvent(), so it cannot be used as a parity oracle.
+        self._hydrate_legacy_event_scripts()
             
         
         """
@@ -131,6 +139,47 @@ class Mob(Body):
         self.save()
         """
         self.init()
+
+    def _hydrate_legacy_event_scripts(self):
+        mob_path = self.path[:-5] + '.mob'
+        if os.path.exists(mob_path) == False:
+            return
+
+        events = {}
+        key = None
+        lines = []
+
+        try:
+            fp = open(mob_path, encoding='utf-8')
+        except IOError:
+            return
+
+        try:
+            for raw_line in fp:
+                line = raw_line.rstrip('\r\n')
+                if line.startswith('#'):
+                    if key != None:
+                        events[key] = lines
+                    candidate = line[1:].strip()
+                    if candidate.startswith('이벤트'):
+                        key = candidate
+                        lines = []
+                    else:
+                        key = None
+                        lines = []
+                elif key != None and line.startswith(':'):
+                    # One leading ':' is the legacy property delimiter; a
+                    # second ':' is intentional event text and must remain.
+                    lines.append(line[1:])
+            if key != None:
+                events[key] = lines
+        finally:
+            fp.close()
+
+        for event_key, script in events.items():
+            value = self.attr.get(event_key)
+            if type(value) is str and value.endswith('.rhai'):
+                self.attr[event_key] = script
 
     def save(self, mode = True):
         o = {}
@@ -1275,4 +1324,3 @@ def loadAllMob():
     Mob.numMovings = len(Mob.movingMobs)
     log(str( Mob.numMovings ) + '개의 활동 몹이 로딩되었습니다.')
     
-

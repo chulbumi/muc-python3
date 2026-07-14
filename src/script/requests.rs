@@ -19,6 +19,9 @@ pub(crate) const SET_PLAYER_ATTR_REQUEST: &str = "_set_player_attr_request";
 pub(crate) const CHANGE_PLAYER_REQUEST: &str = "_change_player_request";
 pub(crate) const SUMMON_PLAYER_REQUEST: &str = "_summon_player_request";
 pub(crate) const FORCE_COMMAND_REQUEST: &str = "_force_command_request";
+/// NPC event `$별호변경`처럼 Python `do_command()`가 현재 사용자의 다음
+/// 명령을 같은 입력 처리 안에서 동기 실행해야 할 때 쓴다.
+pub(crate) const EVENT_COMMAND_REQUEST: &str = "_event_command_request";
 
 fn take_json<T: serde::de::DeserializeOwned>(body: &mut Body, key: &str) -> Option<T> {
     body.temp_mut()
@@ -33,6 +36,12 @@ pub(crate) fn take_summon_player_request(body: &mut Body) -> Vec<(String, String
 
 pub(crate) fn take_force_command_request(body: &mut Body) -> Vec<(String, String)> {
     take_json(body, FORCE_COMMAND_REQUEST).unwrap_or_default()
+}
+
+pub(crate) fn take_event_command_request(body: &mut Body) -> Option<String> {
+    body.temp_mut()
+        .remove(EVENT_COMMAND_REQUEST)
+        .and_then(|value| value.as_str().map(str::to_string))
 }
 
 pub(crate) fn take_guild_accept_request(body: &mut Body) -> Option<(String, String)> {

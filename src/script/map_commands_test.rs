@@ -411,6 +411,16 @@ fn summon_admin_move_enforces_python_destination_guards_but_direct_move_bypasses
     body.set("레벨", 10_i64);
     body.set("힘", 20_i64);
     body.set("민첩성", 30_i64);
+    assert_eq!(
+        crate::script::check_summon_destination(&body, &zone, "1"),
+        "same_place",
+        "관리자 이동.py returns before enterRoom for the current room"
+    );
+    assert_eq!(
+        crate::script::check_event_summon_destination(&body, &zone, "1"),
+        "",
+        "event.py always calls enterRoom even when $위치이동 points at the current room"
+    );
     let storage = ScriptStorage::default();
     let cases = [
         ("2", "선인", "강한 무형의 기운이 당신을 압박합니다."),

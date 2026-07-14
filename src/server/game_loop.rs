@@ -622,6 +622,7 @@ impl GameLoop {
                             line_num,
                             prompt,
                             resume_func,
+                            ..
                         }) => {
                             if let Some((zone, room)) = set_position {
                                 if let Ok(mut world) = get_world_state().write() {
@@ -717,6 +718,7 @@ impl GameLoop {
                         Some(crate::command::CommandResult::MobEvent {
                             output_lines,
                             set_position,
+                            ..
                         }) => {
                             if let Some((zone, room)) = set_position {
                                 if let Ok(mut world) = get_world_state().write() {
@@ -879,9 +881,10 @@ impl GameLoop {
                             let mut clients = broadcaster.clients.lock();
                             for player_name in player_names {
                                 let Some(client) = clients.values_mut().find(|client| {
-                                    client.player.as_ref().is_some_and(|player| {
-                                        player.body.get_name() == player_name
-                                    })
+                                    client
+                                        .player
+                                        .as_ref()
+                                        .is_some_and(|player| player.body.get_name() == player_name)
                                 }) else {
                                     continue;
                                 };
@@ -1073,7 +1076,7 @@ fn award_mob_death(
     pending_rewards.push(reward);
 }
 
-fn generate_mob_corpse_items(
+pub(crate) fn generate_mob_corpse_items(
     mob: &mut crate::world::MobInstance,
     data: &crate::world::RawMobData,
     roll: &mut dyn FnMut(i64) -> i64,
@@ -2279,6 +2282,17 @@ fn process_pvp_ticks(
                 damage_to_first,
                 damage_to_second,
             );
+            // PvP shares the same terminal contract as mob combat: resolve
+            // both actions (and simultaneous deaths) first, then leave each
+            // surviving player at one final, unterminated input prompt.
+            for body in [&mut first.body, &mut second.body] {
+                if body.act != ActState::Death {
+                    crate::script::combat_commands::queue_combat_presentation_event(
+                        body,
+                        serde_json::json!({ "kind": "combat_prompt" }),
+                    );
+                }
+            }
         }
         for (addr, player) in [
             (first_addr, first_client.player.as_ref()),
@@ -2308,7 +2322,7 @@ fn render_combat_presentation(
     command_registry: &Arc<CommandRegistry>,
     addr: SocketAddr,
 ) {
-    let result = {
+    let (result, break_after_prompt) = {
         let mut clients = broadcaster.clients.lock();
         let actor_name = clients
             .get(&addr)
@@ -2322,9 +2336,7 @@ fn render_combat_presentation(
                 world
                     .get_player_position(&actor_name)
                     .cloned()
-                    .map(|position| {
-                        world.get_players_in_room(&position.zone, &position.room)
-                    })
+                    .map(|position| world.get_players_in_room(&position.zone, &position.room))
             })
             .unwrap_or_default();
         let mut observers = Vec::new();
@@ -2348,18 +2360,12 @@ fn render_combat_presentation(
                         ),
                 ),
             );
-            details.insert(
-                "현재체력".into(),
-                rhai::Dynamic::from(other.body.get_hp()),
-            );
+            details.insert("현재체력".into(), rhai::Dynamic::from(other.body.get_hp()));
             details.insert(
                 "현재최고체력".into(),
                 rhai::Dynamic::from(other.body.get_max_hp()),
             );
-            details.insert(
-                "현재내공".into(),
-                rhai::Dynamic::from(other.body.get_mp()),
-            );
+            details.insert("현재내공".into(), rhai::Dynamic::from(other.body.get_mp()));
             details.insert(
                 "현재최고내공".into(),
                 rhai::Dynamic::from(other.body.get_max_mp()),
@@ -2374,6 +2380,15 @@ fn render_combat_presentation(
         }
         set_cast_room_players(observers);
         set_precomputed_all_online(online);
+        let break_after_prompt = clients
+            .get(&addr)
+            .and_then(|client| client.player.as_ref())
+            // This boundary follows what can physically be on the terminal,
+            // not the config bit.  The ordinary command path may have just
+            // written an unterminated prompt, while combat presentation is
+            // asynchronous.  Starting it on a fresh line is harmless when a
+            // prompt was suppressed and required when one was visible.
+            .is_some_and(|player| player.interactive == 1);
         let result = clients
             .get_mut(&addr)
             .and_then(|client| client.player.as_mut())
@@ -2384,15 +2399,25 @@ fn render_combat_presentation(
             });
         clear_cast_room_players();
         clear_precomputed_all_online();
-        result
+        (result, break_after_prompt)
     };
     match result {
         Some(crate::command::CommandResult::Output(output)) if !output.is_empty() => {
-            let _ = broadcaster.send_to(addr, &(output + "\r\n"));
+            let prefix = if break_after_prompt && !output.starts_with("\r\n") {
+                "\r\n"
+            } else {
+                ""
+            };
+            let _ = broadcaster.send_to(addr, &format!("{prefix}{output}\r\n"));
         }
         Some(crate::command::CommandResult::OutputAndSendToUsers(output, deliveries)) => {
             if !output.is_empty() {
-                let _ = broadcaster.send_to(addr, &(output + "\r\n"));
+                let prefix = if break_after_prompt && !output.starts_with("\r\n") {
+                    "\r\n"
+                } else {
+                    ""
+                };
+                let _ = broadcaster.send_to(addr, &format!("{prefix}{output}\r\n"));
             }
             for (name, message) in deliveries {
                 send_collected_user_message(broadcaster, &name, &message);
@@ -2603,9 +2628,7 @@ mod tests {
             player.body.set("최고체력", 45_i64);
             player.body.set("내공", 7_i64);
             player.body.set("최고내공", 9_i64);
-            player
-                .body
-                .set("설정상태", "엘피출력 0 타인전투출력거부 0");
+            player.body.set("설정상태", "엘피출력 0 타인전투출력거부 0");
             client.player = Some(player);
             client
         };
@@ -2613,6 +2636,10 @@ mod tests {
         crate::script::combat_commands::queue_combat_presentation_event(
             &mut actor_client.player.as_mut().unwrap().body,
             serde_json::json!({"kind": "anger_100"}),
+        );
+        crate::script::combat_commands::queue_combat_presentation_event(
+            &mut actor_client.player.as_mut().unwrap().body,
+            serde_json::json!({"kind": "combat_prompt"}),
         );
         let broadcaster = Arc::new(Broadcaster::new());
         broadcaster.add_client(actor_client);
@@ -2633,7 +2660,9 @@ mod tests {
                 crate::world::PlayerPosition::new(zone, "1".into()),
             );
         }
-        let storage = Arc::new(tokio::sync::RwLock::new(crate::script::ScriptStorage::default()));
+        let storage = Arc::new(tokio::sync::RwLock::new(
+            crate::script::ScriptStorage::default(),
+        ));
         let mut registry = CommandRegistry::new();
         crate::command::commands::script::register_script_commands(
             &mut registry,
@@ -2645,7 +2674,18 @@ mod tests {
         .await;
 
         render_combat_presentation(&broadcaster, &Arc::new(registry), actor_addr);
-        let _ = actor_rx.try_recv();
+        let mut actor_wire = String::new();
+        while let Ok(message) = actor_rx.try_recv() {
+            actor_wire.push_str(&message);
+        }
+        assert!(
+            actor_wire.starts_with("\r\n당신이 갑자기"),
+            "the next tick must end the previous input prompt first: {actor_wire:?}"
+        );
+        assert!(
+            actor_wire.ends_with("\r\n\x1b[0;37;40m[ 40/45, 7/9 ] "),
+            "the replacement prompt must remain the final unterminated wire: {actor_wire:?}"
+        );
         let mut wire = String::new();
         while let Ok(message) = observer_rx.try_recv() {
             wire.push_str(&message);
@@ -2916,9 +2956,73 @@ mod tests {
     }
 
     #[test]
+    fn pvp_tick_queues_one_final_prompt_for_each_survivor() {
+        let first_name = "비무프롬프트첫째";
+        let second_name = "비무프롬프트둘째";
+        let (mut first_client, _first_rx) = active_client(41305, first_name, ActState::Fight);
+        let (mut second_client, _second_rx) = active_client(41306, second_name, ActState::Fight);
+        for (client, target) in [
+            (&mut first_client, second_name),
+            (&mut second_client, first_name),
+        ] {
+            let body = &mut client.player.as_mut().unwrap().body;
+            body.set("체력", 1_000_000_i64);
+            body.set("최고체력", 1_000_000_i64);
+            body.set("명중", 10_000_i64);
+            body.temp_mut().insert(
+                crate::script::combat_commands::PVP_TARGET.to_string(),
+                crate::object::Value::String(target.to_string()),
+            );
+        }
+        let zone = format!("비무프롬프트존-{}", std::process::id());
+        {
+            let mut world = get_world_state().write().unwrap();
+            for name in [first_name, second_name] {
+                world.set_player_position(
+                    name,
+                    crate::world::PlayerPosition::new(zone.clone(), "1".to_string()),
+                );
+            }
+        }
+        let mut clients = std::collections::HashMap::from([
+            (addr(41305), first_client),
+            (addr(41306), second_client),
+        ]);
+        let mut render = Vec::new();
+        process_pvp_ticks(&mut clients, &mut render, &mut Vec::new());
+
+        for address in [addr(41305), addr(41306)] {
+            assert!(render.contains(&address));
+            let body = &mut clients
+                .get_mut(&address)
+                .unwrap()
+                .player
+                .as_mut()
+                .unwrap()
+                .body;
+            let events = crate::script::combat_commands::take_combat_presentation_events(body);
+            let kinds = events
+                .into_iter()
+                .filter_map(|event| event.try_cast::<rhai::Map>())
+                .filter_map(|event| event["kind"].clone().into_string().ok())
+                .collect::<Vec<_>>();
+            assert_eq!(
+                kinds
+                    .iter()
+                    .filter(|kind| kind.as_str() == "combat_prompt")
+                    .count(),
+                1
+            );
+            assert_eq!(kinds.last().map(String::as_str), Some("combat_prompt"));
+        }
+        let mut world = get_world_state().write().unwrap();
+        world.remove_player_position(first_name);
+        world.remove_player_position(second_name);
+    }
+
+    #[test]
     fn pvp_tick_result_is_independent_of_which_player_has_the_lower_connection_address() {
-        for (case, first_port, second_port) in
-            [("정방향", 41321, 41322), ("역방향", 41324, 41323)]
+        for (case, first_port, second_port) in [("정방향", 41321, 41322), ("역방향", 41324, 41323)]
         {
             let first_name = format!("비무순서첫째{case}");
             let second_name = format!("비무순서둘째{case}");
@@ -3043,8 +3147,7 @@ mod tests {
     fn pvp_tick_clears_stale_fight_when_target_disconnects_or_leaves_room() {
         let survivor_name = "비무잔류자";
         let missing_name = "비무이탈자";
-        let (mut survivor_client, _rx) =
-            active_client(41311, survivor_name, ActState::Fight);
+        let (mut survivor_client, _rx) = active_client(41311, survivor_name, ActState::Fight);
         survivor_client
             .player
             .as_mut()

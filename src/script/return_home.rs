@@ -189,6 +189,7 @@ fn run_return_entry_events(body: &mut Body) -> Map {
             CommandResult::MobEvent {
                 output_lines,
                 set_position: None,
+                ..
             } => lines.extend(output_lines),
             _ => return event_result("unsupported_entry_event", lines),
         }
