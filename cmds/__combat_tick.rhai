@@ -41,15 +41,33 @@ fn cmd(ob, line) {
     let own_name = get_string(ob, "이름");
     let own_a = "\x1b[1m" + own_name + "\x1b[0;37m";
     let training = get_user_config(ob, "수련모드") == "1";
-    for event in take_combat_presentation_events(ob) {
+    // Python writes the combat prompt only after the entire tick, including
+    // death rewards, and leaves the cursor immediately after the trailing
+    // space.  Defer it and send it as raw wire so no CRLF is appended.
+    let final_prompt = "";
+    let events = take_combat_presentation_events(ob);
+    // The preceding prompt is an unterminated write.  End that input line
+    // before the next asynchronous heartbeat message.  Keeping this in Rhai
+    // covers every presentation-event combination, not only Rust's ordinary
+    // combat-render response branch.
+    let breaks_previous_prompt = events.len > 0
+        && (training || get_user_config(ob, "엘피출력") != "1");
+    if breaks_previous_prompt {
+        send_line(ob, "");
+    }
+    // The blank line above is the only terminal boundary needed when a
+    // previous LP prompt is visible. Death text therefore must not add its
+    // own CRLF in that case.
+    let death_prefix = if breaks_previous_prompt { "" } else { "\r\n" };
+    for event in events {
         if event["kind"] == "combat_prompt" {
             let vitals = return_vitals(ob);
             if training {
-                send_line(ob, "\r\n\x1b[0;37;40m[ " + vitals["hp"].to_string() + "/" + vitals["max_hp"].to_string()
-                    + ", " + vitals["mp"].to_string() + "/" + vitals["max_mp"].to_string() + " ] \r");
+                final_prompt = "\r\n\x1b[0;37;40m[ " + vitals["hp"].to_string() + "/" + vitals["max_hp"].to_string()
+                    + ", " + vitals["mp"].to_string() + "/" + vitals["max_mp"].to_string() + " ] \r";
             } else if get_user_config(ob, "엘피출력") != "1" {
-                send_line(ob, "\r\n\x1b[0;37;40m[ " + vitals["hp"].to_string() + "/" + vitals["max_hp"].to_string()
-                    + ", " + vitals["mp"].to_string() + "/" + vitals["max_mp"].to_string() + " ] ");
+                final_prompt = "\r\n\x1b[0;37;40m[ " + vitals["hp"].to_string() + "/" + vitals["max_hp"].to_string()
+                    + ", " + vitals["mp"].to_string() + "/" + vitals["max_mp"].to_string() + " ] ";
             }
             continue;
         }
@@ -140,29 +158,29 @@ fn cmd(ob, line) {
             continue;
         }
         if event["kind"] == "player_death" {
-            send_line(ob, "\r\n\x1b[1;37m당신이 쓰러집니다. '쿠웅~~ 철퍼덕~~'\x1b[0;37m");
+            send_line(ob, death_prefix + "\x1b[1;37m당신이 쓰러집니다. '쿠웅~~ 철퍼덕~~'\x1b[0;37m");
             continue;
         }
         if event["kind"] == "death_progress" {
             let step = event["step"];
-            if step == 0 { send_line(ob, "\r\n기혈이 거꾸로 돌며 정신이 혼미해 집니다."); }
-            else if step == 1 { send_line(ob, "\r\n누군가가 당신 주위를 어슬렁 거립니다."); }
-            else if step == 2 { send_line(ob, "\r\n웅성 웅성 거리는 소리가 귓전에 맴돌며 점점 멀어져 갑니다."); }
-            else if step == 4 { send_line(ob, "\r\n코끝을 찌르는 향냄새에 정신을 차려보니 장의사 내부다."); }
-            else if step == 5 { send_line(ob, "\r\n장의사가 말합니다. \"앗~~ 죽은줄 알았는데 다시 깨어나는군~\""); }
-            else if step == 6 { send_line(ob, "\r\n장의사가 말합니다. \"하나뿐인 목숨 무모하게 행동하지 말고 조심해서 행동하게나.\""); }
-            else if step == 7 { send_line(ob, "\r\n당신이 떠지지 않는 눈을 힘겹게 뜨며 주위를 살펴 봅니다."); }
+            if step == 0 { send_line(ob, death_prefix + "기혈이 거꾸로 돌며 정신이 혼미해 집니다."); }
+            else if step == 1 { send_line(ob, death_prefix + "누군가가 당신 주위를 어슬렁 거립니다."); }
+            else if step == 2 { send_line(ob, death_prefix + "웅성 웅성 거리는 소리가 귓전에 맴돌며 점점 멀어져 갑니다."); }
+            else if step == 4 { send_line(ob, death_prefix + "코끝을 찌르는 향냄새에 정신을 차려보니 장의사 내부다."); }
+            else if step == 5 { send_line(ob, death_prefix + "장의사가 말합니다. \"앗~~ 죽은줄 알았는데 다시 깨어나는군~\""); }
+            else if step == 6 { send_line(ob, death_prefix + "장의사가 말합니다. \"하나뿐인 목숨 무모하게 행동하지 말고 조심해서 행동하게나.\""); }
+            else if step == 7 { send_line(ob, death_prefix + "당신이 떠지지 않는 눈을 힘겹게 뜨며 주위를 살펴 봅니다."); }
             else if step == 8 {
                 if event["insured_items"] == 0 {
-                    send_line(ob, "\r\n장의사가 말합니다. \"쯧쯧... 표국에서 보험을 들지 않았군...\"");
+                    send_line(ob, death_prefix + "장의사가 말합니다. \"쯧쯧... 표국에서 보험을 들지 않았군...\"");
                     send_line(ob, "                   \"무리한 무공수련은 화를 자초한다네.\"");
                 } else {
-                    send_line(ob, "\r\n장의사가 말합니다. \"자네가 가지고 다니던 물건은 표국에서 회수 해왔으니\"");
+                    send_line(ob, death_prefix + "장의사가 말합니다. \"자네가 가지고 다니던 물건은 표국에서 회수 해왔으니\"");
                     send_line(ob, "                   \"잃어버린 것이 없는지 확인해 보게나..\"");
                     send_line(ob, "                   \"표국무사가 그러는데 보험료가 나갔다더군...\"");
                 }
             } else if step == 9 {
-                send_line(ob, "\r\n당신이 자세를 편안히 하며 운기조식에 들어갑니다.");
+                send_line(ob, death_prefix + "당신이 자세를 편안히 하며 운기조식에 들어갑니다.");
                 send_line(ob, "\x1b[1;36m당신의 기혈이 타동하기 시작합니다.\x1b[0;37m");
                 let own_name = get_string(ob, "이름");
                 let room_message = "\x1b[1m" + own_name + "\x1b[0;37m" + han_iga(own_name)
@@ -173,9 +191,9 @@ fn cmd(ob, line) {
             }
             if step != 3 && get_user_config(ob, "엘피출력") != "1" {
                 let vitals = return_vitals(ob);
-                send_line(ob, "\x1b[0;37;40m[ " + vitals["hp"].to_string() + "/"
+                final_prompt = "\r\n\x1b[0;37;40m[ " + vitals["hp"].to_string() + "/"
                     + vitals["max_hp"].to_string() + ", " + vitals["mp"].to_string()
-                    + "/" + vitals["max_mp"].to_string() + " ] ");
+                    + "/" + vitals["max_mp"].to_string() + " ] ";
             }
             continue;
         }
@@ -220,9 +238,9 @@ fn cmd(ob, line) {
             }
             if get_user_config(ob, "엘피출력") != "1" {
                 let vitals = return_vitals(ob);
-                send_line(ob, "\x1b[0;37;40m[ " + vitals["hp"].to_string() + "/"
+                final_prompt = "\r\n\x1b[0;37;40m[ " + vitals["hp"].to_string() + "/"
                     + vitals["max_hp"].to_string() + ", " + vitals["mp"].to_string()
-                    + "/" + vitals["max_mp"].to_string() + " ] ");
+                    + "/" + vitals["max_mp"].to_string() + " ] ";
             }
             continue;
         }
@@ -402,6 +420,9 @@ fn cmd(ob, line) {
                 send_to_user(player["name"], to_room);
             }
         }
+    }
+    if final_prompt != "" {
+        send_raw_to_user(own_name, final_prompt);
     }
 }
 

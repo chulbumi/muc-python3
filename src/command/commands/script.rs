@@ -1277,12 +1277,21 @@ mod tests {
         );
 
         let result = (command)(&mut body, &[]);
-        assert!(matches!(
-            result,
-            CommandResult::Output(ref output)
-                if output.contains("기혈이 거꾸로 돌며 정신이 혼미해 집니다.")
-                    && output.contains("[ 0/900, 18/18 ]")
-        ));
+        match result {
+            CommandResult::Output(output) => {
+                assert!(output.contains("기혈이 거꾸로 돌며 정신이 혼미해 집니다."));
+                assert!(output.contains("[ 0/900, 18/18 ]"));
+                assert!(!output.starts_with("\r\n\r\n"));
+            }
+            CommandResult::OutputAndSendToUsers(output, sends) => {
+                assert!(output.contains("기혈이 거꾸로 돌며 정신이 혼미해 집니다."));
+                assert!(!output.starts_with("\r\n\r\n"));
+                assert!(sends.iter().any(|(recipient, message)| {
+                    recipient == "사망단계라이검사" && message.contains("[ 0/900, 18/18 ]")
+                }));
+            }
+            other => panic!("unexpected death presentation result: {other:?}"),
+        }
     }
 
     #[tokio::test]
