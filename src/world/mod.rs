@@ -4,6 +4,7 @@
 //! the game world including rooms, zones, mobs, items, and navigation.
 
 pub mod difficulty;
+pub mod editor;
 pub mod event;
 pub mod event_binding;
 pub mod fixture;
@@ -22,6 +23,7 @@ mod event_directive_test;
 
 // Re-export commonly used types
 pub use difficulty::{base_zone_name, difficulty_from_zone, DifficultyConfig, DifficultyLevel};
+pub use editor::{WorldEditError, WorldEditor};
 pub use event_binding::{EventBindings, EventScript};
 pub use fixture::{Fixture, FixtureKind, FixturePlacement};
 
@@ -517,6 +519,48 @@ impl WorldState {
         self.remove_fixture_from_room_index(&fixture.zone, &fixture.room, id);
         self.remove_room_object(&fixture.zone, &fixture.room, &RoomObjectRef::Fixture(id));
         Some(fixture)
+    }
+
+    /// Reconcile persistent fixture declarations with the live room. Stable
+    /// placement keys keep runtime ids/order where possible.
+    pub fn reload_room_fixtures(&mut self, zone: &str, room: &str) -> Result<(), String> {
+        let placements = self
+            .room_cache
+            .get_room_cached(zone, room)
+            .and_then(|cached| {
+                cached
+                    .read()
+                    .ok()
+                    .map(|room| room.fixture_placements.clone())
+            })
+            .ok_or_else(|| format!("room not loaded: {zone}:{room}"))?;
+        for placement in placements {
+            let existing_id = self
+                .get_room_fixtures(zone, room)
+                .into_iter()
+                .find_map(|fixture| {
+                    (fixture
+                        .attribute("placement_key")
+                        .and_then(serde_json::Value::as_str)
+                        == Some(placement.key.as_str()))
+                    .then_some(fixture.id)
+                });
+            let mut attributes = placement.attributes;
+            attributes.insert(
+                "placement_key".into(),
+                serde_json::Value::String(placement.key),
+            );
+            if let Some(id) = existing_id {
+                if let Some(fixture) = self.get_fixture_mut(id) {
+                    fixture.kind = placement.kind;
+                    fixture.events = EventBindings::from_attributes(&attributes);
+                    fixture.attributes = attributes;
+                }
+            } else {
+                self.create_fixture(zone, room, placement.kind, attributes);
+            }
+        }
+        Ok(())
     }
 
     fn remove_fixture_from_room_index(&mut self, zone: &str, room: &str, id: u64) {

@@ -976,6 +976,17 @@ impl MobCache {
         Ok(data)
     }
 
+    /// Refresh only the template. Existing cloned instances intentionally
+    /// retain their current HP/state, just as Python objects do after editing.
+    pub fn reload_mob(&mut self, zone: &str, filename: &str) -> Result<RawMobData, MobError> {
+        let key = format!("{}:{}", zone, filename);
+        let existed = self.mobs.remove(&key).is_some();
+        if existed {
+            self.mob_order.retain(|loaded| loaded != &key);
+        }
+        self.load_mob(zone, filename)
+    }
+
     /// Parse mob data from JSON object
     fn parse_mob_data(
         &self,

@@ -280,7 +280,7 @@ fn every_current_rhai_source_is_syntax_valid() {
     storage
         .load_all_scripts_checked()
         .expect("every cmds/*.rhai source must compile before registration");
-    assert_eq!(storage.script_names().len(), 211);
+    assert_eq!(storage.script_names().len(), 212);
 }
 #[test]
 fn test_script_preserves_self_output_with_targeted_sends() {

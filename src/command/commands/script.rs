@@ -137,6 +137,11 @@ const PYTHON_COMMAND_LEVELS: &[(&str, i32)] = &[
     ("특정방파초기화", 2000),
 ];
 
+/// New Rust/Rhai commands which deliberately extend the Python command set.
+/// Keep these separate so parity audits can still compare Python metadata
+/// exactly while extensions receive an explicit non-public permission level.
+const EXTENSION_COMMAND_LEVELS: &[(&str, i32)] = &[("월드편집", 2000)];
+
 fn is_player_command_script(script_name: &str) -> bool {
     !NON_COMMAND_SCRIPTS.contains(&script_name)
 }
@@ -144,6 +149,7 @@ fn is_player_command_script(script_name: &str) -> bool {
 fn python_command_level(script_name: &str) -> i32 {
     PYTHON_COMMAND_LEVELS
         .iter()
+        .chain(EXTENSION_COMMAND_LEVELS.iter())
         .find_map(|(name, level)| (*name == script_name).then_some(*level))
         .unwrap_or(0)
 }
@@ -565,6 +571,12 @@ mod tests {
                 .collect::<HashSet<_>>();
         let registered_set = registered_names.iter().cloned().collect::<HashSet<_>>();
         assert_eq!(expected_python_commands.len(), 190);
+        let mut expected_python_commands = expected_python_commands;
+        expected_python_commands.extend(
+            EXTENSION_COMMAND_LEVELS
+                .iter()
+                .map(|(name, _)| (*name).to_string()),
+        );
         assert_eq!(
             registered_set, expected_python_commands,
             "player-visible Rust registry must exactly match Python CmdObj filenames"
@@ -838,6 +850,11 @@ mod tests {
         // New Rust/Rhai gameplay extensions that have no legacy Python CmdObj
         // must be listed explicitly so an accidental extra command still fails.
         expected_names.insert("투척".to_string());
+        expected_names.extend(
+            EXTENSION_COMMAND_LEVELS
+                .iter()
+                .map(|(name, _)| (*name).to_string()),
+        );
 
         let actual_names: HashSet<String> = registry.command_names().into_iter().collect();
         assert_eq!(

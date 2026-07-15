@@ -7,6 +7,8 @@ use rhai::{Dynamic, Engine, Map, Scope, AST};
 use serde_json::Value as JsonValue;
 use std::cell::RefCell;
 use std::collections::HashMap;
+#[cfg(unix)]
+use std::os::unix::fs::MetadataExt;
 use std::path::{Component, Path, PathBuf};
 use std::sync::{Arc, Mutex};
 use std::time::SystemTime;
@@ -20,7 +22,7 @@ use crate::world::{
 thread_local! {
     /// Rhai AST contains `Rc` without Rhai's sync feature, so fixture event
     /// scripts use the same worker-local caching rule as ordinary commands.
-    static FIXTURE_EVENT_AST_CACHE: RefCell<HashMap<PathBuf, (SystemTime, AST)>> =
+    static FIXTURE_EVENT_AST_CACHE: RefCell<HashMap<PathBuf, (SystemTime, u64, u64, AST)>> =
         RefCell::new(HashMap::new());
 }
 
@@ -45,26 +47,37 @@ fn cached_fixture_event_ast(path: &Path) -> Result<AST, String> {
     let metadata = std::fs::metadata(path)
         .map_err(|error| format!("fixture event metadata {}: {error}", path.display()))?;
     let modified = metadata.modified().unwrap_or(SystemTime::UNIX_EPOCH);
+    let length = metadata.len();
+    #[cfg(unix)]
+    let identity = metadata.ino();
+    #[cfg(not(unix))]
+    let identity = 0;
     if let Some(ast) = FIXTURE_EVENT_AST_CACHE.with(|cache| {
         cache
             .borrow()
             .get(path)
-            .filter(|(cached_modified, _)| *cached_modified == modified)
-            .map(|(_, ast)| ast.clone())
+            .filter(|(cached_modified, cached_length, cached_identity, _)| {
+                *cached_modified == modified
+                    && *cached_length == length
+                    && *cached_identity == identity
+            })
+            .map(|(_, _, _, ast)| ast.clone())
     }) {
         return Ok(ast);
     }
 
     let source = std::fs::read_to_string(path)
         .map_err(|error| format!("fixture event read {}: {error}", path.display()))?;
+
     let executable = format!("{source}\nmain(ob, fixture_id, cmdline);");
     let ast = Engine::new()
         .compile(&executable)
         .map_err(|error| format!("fixture event compile {}: {error}", path.display()))?;
     FIXTURE_EVENT_AST_CACHE.with(|cache| {
-        cache
-            .borrow_mut()
-            .insert(path.to_path_buf(), (modified, ast.clone()));
+        cache.borrow_mut().insert(
+            path.to_path_buf(),
+            (modified, length, identity, ast.clone()),
+        );
     });
     Ok(ast)
 }
@@ -441,6 +454,44 @@ mod tests {
     use crate::script::{build_room_lines, ScriptStorage};
     use crate::world::{PlayerPosition, RoomObjectRef};
     use std::sync::{Arc, Mutex};
+    use std::time::{SystemTime, UNIX_EPOCH};
+
+    #[test]
+    fn fixture_event_ast_reloads_after_atomic_runtime_edit() {
+        let path = std::env::temp_dir().join(format!(
+            "fixture-hot-reload-{}-{}.rhai",
+            std::process::id(),
+            SystemTime::now()
+                .duration_since(UNIX_EPOCH)
+                .unwrap()
+                .as_nanos()
+        ));
+        std::fs::write(&path, "fn main(ob, fixture_id, cmdline) { \"A\" }").unwrap();
+        let first = cached_fixture_event_ast(&path).unwrap();
+        let engine = Engine::new();
+        let mut scope = Scope::new();
+        scope.push("ob", Map::new());
+        scope.push("fixture_id", 1_i64);
+        scope.push("cmdline", "밀어");
+        assert_eq!(
+            engine
+                .eval_ast_with_scope::<String>(&mut scope, &first)
+                .unwrap(),
+            "A"
+        );
+
+        let replacement = path.with_extension("replacement");
+        std::fs::write(&replacement, "fn main(ob, fixture_id, cmdline) { \"B\" }").unwrap();
+        std::fs::rename(replacement, &path).unwrap();
+        let second = cached_fixture_event_ast(&path).unwrap();
+        assert_eq!(
+            engine
+                .eval_ast_with_scope::<String>(&mut scope, &second)
+                .unwrap(),
+            "B"
+        );
+        let _ = std::fs::remove_file(path);
+    }
 
     #[test]
     fn fixture_efuns_create_mutate_move_and_remove_without_output() {

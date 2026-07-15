@@ -16,6 +16,7 @@ pub(crate) use cast::skill_up_python;
 pub(crate) mod combat_commands;
 mod drop_item;
 mod fixture;
+mod world_edit;
 pub(crate) use fixture::{try_fixture_event, visible_fixture_short_lines};
 pub(crate) mod inventory_compat;
 pub(crate) use inventory_compat::mark_item_field_as_json_array;
@@ -6354,6 +6355,7 @@ pub fn create_engine_with_body_and_output(
     // Room-bound interactive objects expose only identity, placement, and
     // attribute state. Rhai owns their interaction rules and visible output.
     fixture::register_fixture_efuns(&mut engine, body_ptr);
+    world_edit::register_world_edit_efuns(&mut engine, body_ptr, script_name != Some("item_event"));
 
     // Python `cmds/귀환.py`의 검사/위치 전이만 제공한다. 명령 문구와
     // 같은 방 알림은 hot-reload되는 `귀환.rhai`가 결정한다.

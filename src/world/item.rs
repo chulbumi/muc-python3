@@ -13,6 +13,9 @@ use super::event_binding::EventBindings;
 /// Raw item data from JSON
 #[derive(Debug, Clone)]
 pub struct RawItemData {
+    /// Complete extensible definition map. New Rhai-facing mechanics such as
+    /// scoped world capabilities must not require fixed Rust fields.
+    pub attributes: HashMap<String, JsonValue>,
     /// Optional item-level scripts such as use, examine, equip, or custom triggers.
     pub events: EventBindings,
     /// Item name (이름)
@@ -69,6 +72,7 @@ impl RawItemData {
     /// Create empty item data
     pub fn new() -> Self {
         Self {
+            attributes: HashMap::new(),
             events: EventBindings::default(),
             name: String::new(),
             item_type: "기타".to_string(),
@@ -287,12 +291,19 @@ impl ItemCache {
         Ok(data)
     }
 
+    /// Force a template refresh after an atomic runtime edit.
+    pub fn reload_item(&mut self, filename: &str) -> Result<RawItemData, ItemError> {
+        self.items.remove(filename);
+        self.load_item(filename)
+    }
+
     /// Parse item data from JSON object
     fn parse_item_data(
         &self,
         item_info: &serde_json::Map<String, JsonValue>,
     ) -> Result<RawItemData, ItemError> {
         let mut data = RawItemData::new();
+        data.attributes = item_info.clone().into_iter().collect();
 
         // Name (이름)
         data.name = item_info
