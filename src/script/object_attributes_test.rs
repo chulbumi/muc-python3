@@ -109,6 +109,18 @@ fn attributes_command_reads_room_json_then_room_object_and_inventory_fallback() 
         .0
         .join("");
     assert!(inventory.contains("#문자값\r\n보관값\r\n\r\n"));
+    body.object.inv_stack.insert("비황석".into(), 2);
+    let counted_inventory = storage
+        .execute("속성", &mut body, "암기", None, None, None)
+        .unwrap()
+        .0
+        .join("");
+    assert!(counted_inventory.contains("#판매가격\r\n8\r\n\r\n"));
+    assert!(body
+        .object
+        .objs
+        .iter()
+        .all(|item| { item.lock().unwrap().getString("인덱스") != "비황석" }));
     let self_by_alias = storage
         .execute("속성", &mut body, "속성자신", None, None, None)
         .unwrap()
@@ -302,6 +314,22 @@ fn save_object_command_handles_room_item_mob_and_room_as_valid_python_targets() 
         numbered_item_second.0,
         vec![format!("* data/item/{item_key}.json 저장되었습니다.")]
     );
+
+    {
+        let mut world = get_world_state().write().unwrap();
+        world.get_room_objs_mut(&zone, "1").clear();
+        world.remove_floor_item_record(&zone, "1", &floor_item);
+    }
+    body.object.inv_stack.insert(item_key.clone(), 2);
+    let counted_item_saved = storage
+        .execute("오브젝트저장", &mut body, "저장시험석", None, None, None)
+        .unwrap();
+    assert_eq!(
+        counted_item_saved.0,
+        vec![format!("* data/item/{item_key}.json 저장되었습니다.")]
+    );
+    assert_eq!(body.object.inv_stack.get(&item_key), Some(&2));
+    assert!(body.object.objs.is_empty());
 
     let missing = storage
         .execute("오브젝트저장", &mut body, "없는대상", None, None, None)

@@ -19,10 +19,10 @@ use std::sync::{Arc, Mutex, Weak};
 /// * `attr` - Persistent attributes stored as key-value pairs
 /// * `temp` - Temporary attributes that don't persist
 /// * `env` - Weak reference to parent object (prevents circular references)
-/// * `objs` - Child objects in insertion order. Python inventories keep every
-///   item here as an individual object, including repeated consumables.
-/// * `inv_stack` - Legacy Rust-only compressed inventory. New persistence and
-///   command code must materialize it into `objs`; Python has no such field.
+/// * `objs` - Stateful child objects in insertion order: equipped, extended,
+///   strengthened, UUID-bearing, unique, or otherwise template-different.
+/// * `inv_stack` - Counts for pristine, template-identical items. Consumables
+///   and ordinary repeated items stay counted both at runtime and on disk.
 #[derive(Debug)]
 pub struct Object {
     /// Persistent attributes map
@@ -31,9 +31,9 @@ pub struct Object {
     pub temp: HashMap<String, Value>,
     /// Parent object (weak reference to prevent cycles)
     pub env: Option<Weak<Mutex<Object>>>,
-    /// Child objects in Python-compatible insertion order
+    /// Stateful child objects in Python-compatible insertion order.
     pub objs: Vec<Arc<Mutex<Object>>>,
-    /// Legacy Rust-only compressed inventory retained for one-way migration.
+    /// Runtime counts for pristine, interchangeable item templates.
     pub inv_stack: HashMap<String, i64>,
 }
 

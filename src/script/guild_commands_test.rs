@@ -161,8 +161,8 @@ fn guild_position_command_moves_python_role_lists_and_emits_group_layout() {
     let actor_text = format!("\x1b[1m{actor}\x1b[0;37m{}", han_iga(&actor));
     let target_text = format!("\x1b[1m{target}\x1b[0;37m{}", han_eul(&target));
     let expected = format!(
-            "\x1b[1m《\x1b[36m시험방주\x1b[37mː\x1b[36m{actor}\x1b[37m》\x1b[0;37m {actor_text} {target_text} \x1b[1m장로\x1b[0m로 직위를 임명합니다."
-        );
+        "\x1b[1m《\x1b[36m시험방주\x1b[37mː\x1b[36m{actor}\x1b[37m》\x1b[0;37m {actor_text} {target_text} \x1b[1m장로\x1b[0m로 직위를 임명합니다."
+    );
     assert_eq!(changed.0, vec![expected.clone()]);
     let sends = match changed.1.unwrap() {
         CommandResult::OutputAndSendToUsers(_, sends) => sends,
@@ -1743,9 +1743,9 @@ fn guild_title_setting_persists_and_announces_with_new_sender_title() {
         .unwrap();
     assert_eq!(crate::world::guild::guild_get(&guild, "방주명칭"), "대종사");
     let announcement = format!(
-            "\x1b[1m《\x1b[36m대종사\x1b[37mː\x1b[36m{leader}\x1b[37m》\x1b[0;37m \x1b[1m{leader}\x1b[0;37m{} 방주의 명칭을 \x1b[1m대종사\x1b[0;37m로 변경하여 선포합니다.",
-            han_iga(&leader)
-        );
+        "\x1b[1m《\x1b[36m대종사\x1b[37mː\x1b[36m{leader}\x1b[37m》\x1b[0;37m \x1b[1m{leader}\x1b[0;37m{} 방주의 명칭을 \x1b[1m대종사\x1b[0;37m로 변경하여 선포합니다.",
+        han_iga(&leader)
+    );
     assert_eq!(result.0, vec![announcement.clone()]);
     let sends = match result.1.unwrap() {
         crate::command::handler::CommandResult::OutputAndSendToUsers(_, sends) => sends,
@@ -1852,11 +1852,7 @@ fn guild_signboard_matches_python_guard_order_schema_rooms_cost_item_and_notice(
     assert_eq!(body.get_string("소속"), guild);
     assert_eq!(body.get_string("직위"), "방주");
     assert_eq!(body.get_int("은전"), 10_000_000);
-    assert!(body.object.objs.iter().any(|item| {
-        item.lock()
-            .ok()
-            .is_some_and(|item| item.getName() == "보관함")
-    }));
+    assert_eq!(body.object.inv_stack.get("보관함"), Some(&1));
     assert_eq!(crate::world::guild::guild_get(&guild, "방주이름"), player);
     assert_eq!(crate::world::guild::guild_get(&guild, "방파원수"), "1");
     assert_eq!(

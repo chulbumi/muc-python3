@@ -14,9 +14,9 @@ fn settings_command_lists_python_cfg_and_toggles_with_python_text() {
         .unwrap();
     assert_eq!(listed.0[0], "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━");
     assert_eq!(
-            listed.0[1],
-            "\x1b[47m\x1b[30m◁               설      정      상      태               ▷\x1b[40m\x1b[37m"
-        );
+        listed.0[1],
+        "\x1b[47m\x1b[30m◁               설      정      상      태               ▷\x1b[40m\x1b[37m"
+    );
     assert!(listed
         .0
         .join("\r\n")
@@ -173,15 +173,15 @@ fn user_alias_rhai_matches_python_messages_and_state_rules() {
         .execute("줄임말", &mut body, "", None, None, None)
         .unwrap();
     assert_eq!(
-            output,
-            vec![
-                "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━",
-                "\x1b[47m\x1b[30m◁ 줄임말 ▷                                                                  \x1b[40m\x1b[37m",
-                "───────────────────────────────────────",
-                "[길] 동;서",
-                "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━",
-            ]
-        );
+        output,
+        vec![
+            "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━",
+            "\x1b[47m\x1b[30m◁ 줄임말 ▷                                                                  \x1b[40m\x1b[37m",
+            "───────────────────────────────────────",
+            "[길] 동;서",
+            "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━",
+        ]
+    );
 
     let (output, _) = storage
         .execute("줄임말", &mut body, "길 북", None, None, None)

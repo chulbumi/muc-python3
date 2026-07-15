@@ -564,7 +564,7 @@ mod tests {
                 })
                 .collect::<HashSet<_>>();
         let registered_set = registered_names.iter().cloned().collect::<HashSet<_>>();
-        assert_eq!(expected_python_commands.len(), 189);
+        assert_eq!(expected_python_commands.len(), 190);
         assert_eq!(
             registered_set, expected_python_commands,
             "player-visible Rust registry must exactly match Python CmdObj filenames"
@@ -835,10 +835,14 @@ mod tests {
         assert!(registry.get("종료").is_none());
         assert!(registry.get_internal("leave").is_some());
 
+        // New Rust/Rhai gameplay extensions that have no legacy Python CmdObj
+        // must be listed explicitly so an accidental extra command still fails.
+        expected_names.insert("투척".to_string());
+
         let actual_names: HashSet<String> = registry.command_names().into_iter().collect();
         assert_eq!(
             actual_names, expected_names,
-            "registry must expose only Python CmdObj files"
+            "registry must expose only Python CmdObj files and explicit extensions"
         );
     }
 

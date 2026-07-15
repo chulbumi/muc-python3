@@ -286,7 +286,9 @@ mod tests {
             .unwrap();
         assert_eq!(
             output,
-            vec!["☞ 지금은 \x1b[1m\x1b[31m살겁\x1b[0m\x1b[37m\x1b[40m을 일으키기에 부적합한 상황 이라네"]
+            vec![
+                "☞ 지금은 \x1b[1m\x1b[31m살겁\x1b[0m\x1b[37m\x1b[40m을 일으키기에 부적합한 상황 이라네"
+            ]
         );
         assert!(special.is_none());
     }

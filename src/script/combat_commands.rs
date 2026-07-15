@@ -24,6 +24,7 @@ use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
 const RUNAWAY_KEY: &str = "_runaway";
 const RUNAWAY_STARTED_KEY: &str = "_runaway_started_millis";
+const CONCEALED_THROW_TICK: &str = "_concealed_throw_tick";
 pub(crate) const COMBAT_PRESENTATION_EVENTS: &str = "_combat_presentation_events";
 pub(crate) const PVP_TARGET: &str = "_pvp_target";
 
@@ -707,6 +708,218 @@ fn start_attack(body: &mut Body, target_id: &str, room_index: i64) -> Map {
     result
 }
 
+fn concealed_throw_result(status: &str) -> Map {
+    let mut result = attack_result(status);
+    result.insert("started".into(), Dynamic::from(false));
+    result.insert("surprise".into(), Dynamic::from(false));
+    result.insert("damage".into(), Dynamic::from(0_i64));
+    result.insert("item_name".into(), Dynamic::from(String::new()));
+    result.insert("target_name".into(), Dynamic::from(String::new()));
+    result.insert("died".into(), Dynamic::from(false));
+    result.insert("death_script".into(), Dynamic::from(String::new()));
+    result
+}
+
+fn map_string(map: &Map, key: &str) -> Option<String> {
+    map.get(key)
+        .and_then(|value| value.clone().try_cast::<String>())
+}
+
+fn map_i64(map: &Map, key: &str) -> Option<i64> {
+    map.get(key).and_then(|value| value.as_int().ok())
+}
+
+/// Consume one concealed weapon and apply its data-defined combat damage.
+///
+/// The command line follows the Python parser's postfix form:
+/// `[target] [concealed weapon] 투척`. Presentation remains in `cmds/투척.rhai`.
+fn throw_concealed_weapon(body: &mut Body, line: &str) -> Map {
+    let mut words = line.split_whitespace();
+    let Some(target_query) = words.next() else {
+        return concealed_throw_result("usage");
+    };
+    let item_query = words.collect::<Vec<_>>().join(" ");
+    if item_query.is_empty() {
+        return concealed_throw_result("usage");
+    }
+    if body.act == ActState::Death {
+        return concealed_throw_result("dead");
+    }
+
+    let target = find_cast_target(body, target_query);
+    let Some(target) = target.try_cast::<Map>() else {
+        return concealed_throw_result("missing_target");
+    };
+    if map_string(&target, "kind").as_deref() != Some("mob")
+        || map_i64(&target, "mob_type") != Some(1)
+        || map_i64(&target, "act").is_some_and(|act| act > 1)
+    {
+        return concealed_throw_result("invalid_target");
+    }
+    let Some(target_id) = map_string(&target, "id") else {
+        return concealed_throw_result("missing_target");
+    };
+    let Some(room_index) = map_i64(&target, "room_index") else {
+        return concealed_throw_result("missing_target");
+    };
+    let target_current = target
+        .get("current")
+        .and_then(|value| value.as_bool().ok())
+        .unwrap_or(false);
+
+    let selected = body
+        .object
+        .objs
+        .iter()
+        .find_map(|item| {
+            let object = item.lock().ok()?;
+            let aliases = object
+                .getString("반응이름")
+                .split("\r\n")
+                .map(str::trim)
+                .any(|alias| alias == item_query);
+            if object.getName() != item_query && !aliases {
+                return None;
+            }
+            if object.getString("종류") != "암기" || object.getBool("inUse") {
+                return None;
+            }
+            let surprise_damage = object.getInt("급습위력");
+            let combat_damage = object.getInt("교전위력");
+            if surprise_damage <= 0 || combat_damage <= 0 {
+                return None;
+            }
+            Some((
+                Some(item.clone()),
+                None,
+                object.getName(),
+                surprise_damage,
+                combat_damage,
+            ))
+        })
+        .or_else(|| {
+            let key = super::inventory_compat::find_counted_item_key(
+                &body.object.inv_stack,
+                &item_query,
+            )?;
+            let (item, _) = super::object_from_item_json(&key)?;
+            let object = item.lock().ok()?;
+            if object.getString("종류") != "암기" {
+                return None;
+            }
+            let surprise_damage = object.getInt("급습위력");
+            let combat_damage = object.getInt("교전위력");
+            (surprise_damage > 0 && combat_damage > 0).then(|| {
+                (
+                    None,
+                    Some(key),
+                    object.getName(),
+                    surprise_damage,
+                    combat_damage,
+                )
+            })
+        });
+    let Some((item, stack_key, item_name, surprise_damage, combat_damage)) = selected else {
+        return concealed_throw_result("missing_item");
+    };
+
+    let was_fighting = body.act == ActState::Fight;
+    if was_fighting && !target_current {
+        return concealed_throw_result("other_target");
+    }
+    if was_fighting
+        && body
+            .temp()
+            .get(CONCEALED_THROW_TICK)
+            .is_some_and(|value| matches!(value, Value::Int(tick) if *tick == body.tick as i64))
+    {
+        return concealed_throw_result("cooldown");
+    }
+    if !was_fighting && combat_target_count(body) != 0 {
+        return concealed_throw_result("other_target");
+    }
+
+    let mut result = if was_fighting {
+        concealed_throw_result("ok")
+    } else {
+        let start = start_attack(body, &target_id, room_index);
+        if map_string(&start, "status").as_deref() != Some("ok") {
+            return concealed_throw_result("start_failed");
+        }
+        start
+    };
+
+    let Some((zone, room)) = current_body_position(body) else {
+        return concealed_throw_result("missing_target");
+    };
+    let mut world = match get_world_state().write() {
+        Ok(world) => world,
+        Err(_) => return concealed_throw_result("missing_target"),
+    };
+    let Some(data) = world.mob_cache.get_mob(&target_id).cloned() else {
+        return concealed_throw_result("missing_target");
+    };
+    let Some(mobs) = world.mob_cache.get_all_mobs_in_room_mut(&zone, &room) else {
+        return concealed_throw_result("missing_target");
+    };
+    let Ok(index) = usize::try_from(room_index) else {
+        return concealed_throw_result("missing_target");
+    };
+    let Some(mob) = mobs.get_mut(index) else {
+        return concealed_throw_result("missing_target");
+    };
+    if mob.mob_key != target_id || !mob.alive {
+        return concealed_throw_result("missing_target");
+    }
+
+    let damage = if was_fighting {
+        combat_damage
+    } else {
+        surprise_damage
+    }
+    .max(1);
+    let applied = damage.min(mob.hp.max(0));
+    mob.hp = mob.hp.saturating_sub(applied);
+    mob.record_player_damage(&body.get_name(), applied);
+    let target_name = mob.name.clone();
+    let died = mob.hp <= 0;
+    let death_script = data.death_script.clone();
+    let instance_id = mob.instance_id;
+    if died {
+        let _ = crate::server::game_loop::queue_admin_mob_death(mob, &data);
+    }
+    drop(world);
+
+    if let Some(item) = item {
+        body.object.remove(&item);
+    } else if let Some(stack_key) = stack_key {
+        let _ = super::inventory_compat::remove_pristine_count(&mut body.object, &stack_key, 1);
+    }
+    let current_tick = body.tick as i64;
+    body.temp_mut()
+        .insert(CONCEALED_THROW_TICK.to_string(), Value::Int(current_tick));
+    if died {
+        remove_combat_target_instance_id(body, instance_id);
+        let next = remove_combat_target_id(body, &target_id);
+        if next.is_none() && combat_target_instance_ids(body).is_empty() {
+            body.act = ActState::Stand;
+            body.dex = 0;
+            body.stop_skill();
+        }
+    }
+    let _ = super::save_body_to_json(body, &format!("data/user/{}.json", body.get_name()));
+
+    result.insert("status".into(), Dynamic::from("ok"));
+    result.insert("started".into(), Dynamic::from(!was_fighting));
+    result.insert("surprise".into(), Dynamic::from(!was_fighting));
+    result.insert("damage".into(), Dynamic::from(applied));
+    result.insert("item_name".into(), Dynamic::from(item_name));
+    result.insert("target_name".into(), Dynamic::from(target_name));
+    result.insert("died".into(), Dynamic::from(died));
+    result.insert("death_script".into(), Dynamic::from(death_script));
+    result
+}
+
 fn reset_runaway(body: &mut Body) {
     body.set(RUNAWAY_KEY, 0_i64);
     body.temp_mut().remove(RUNAWAY_STARTED_KEY);
@@ -1338,6 +1551,13 @@ pub(super) fn register_combat_command_efuns(
     );
     let ptr = body_ptr;
     engine.register_fn(
+        "throw_concealed_weapon",
+        move |_ob: &mut Map, line: &str| -> Map {
+            throw_concealed_weapon(unsafe { &mut *ptr }, line)
+        },
+    );
+    let ptr = body_ptr;
+    engine.register_fn(
         "start_pvp_attack",
         move |_ob: &mut Map, target_name: &str| -> Map {
             start_pvp_attack(unsafe { &mut *ptr }, target_name)
@@ -1365,6 +1585,84 @@ pub(super) fn register_combat_command_efuns(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn concealed_weapon_is_strong_on_entry_weak_in_combat_and_once_per_tick() {
+        let suffix = std::process::id();
+        let player_name = format!("암기검사자-{suffix}");
+        let zone = format!("암기검사존-{suffix}");
+        let room = "1";
+        let mob_key = format!("{zone}:암기표적");
+        {
+            let mut world = get_world_state().write().unwrap();
+            let mut data = crate::world::RawMobData::new();
+            data.name = "암기표적".into();
+            data.zone = zone.clone();
+            data.mob_type = 1;
+            data.max_hp = 500;
+            world
+                .mob_cache
+                .insert_mob_data(mob_key.clone(), data.clone());
+            world.mob_cache.add_mob_instance(MobInstance::new(
+                mob_key.clone(),
+                zone.clone(),
+                room,
+                &data,
+            ));
+            world.set_player_position(
+                &player_name,
+                PlayerPosition::new(zone.clone(), room.to_string()),
+            );
+        }
+        let mut body = Body::new();
+        body.set("이름", player_name.as_str());
+        body.object.inv_stack.insert("비황석".to_string(), 2);
+
+        let output = crate::script::ScriptStorage::default()
+            .execute("투척", &mut body, "암기표적 비황석", None, None, None)
+            .unwrap()
+            .0;
+        assert!(output[0].contains("허점을 꿰뚫습니다"), "{output:?}");
+        assert_eq!(body.object.inv_stack.get("비황석"), Some(&1));
+        assert!(body.object.objs.is_empty());
+        {
+            let world = get_world_state().read().unwrap();
+            let mob = world
+                .mob_cache
+                .get_all_mobs_in_room(&zone, room)
+                .into_iter()
+                .find(|mob| mob.mob_key == mob_key)
+                .unwrap();
+            assert_eq!(mob.hp, 420);
+        }
+
+        let blocked = throw_concealed_weapon(&mut body, "암기표적 비황석");
+        assert_eq!(map_string(&blocked, "status").as_deref(), Some("cooldown"));
+        assert_eq!(body.object.inv_stack.get("비황석"), Some(&1));
+
+        body.tick += 1;
+        let combat = throw_concealed_weapon(&mut body, "암기표적 비황석");
+        assert_eq!(map_string(&combat, "status").as_deref(), Some("ok"));
+        assert_eq!(map_i64(&combat, "damage"), Some(12));
+        assert!(!combat["surprise"].as_bool().unwrap());
+        assert!(!body.object.inv_stack.contains_key("비황석"));
+        assert!(body.object.objs.is_empty());
+        {
+            let world = get_world_state().read().unwrap();
+            let mob = world
+                .mob_cache
+                .get_all_mobs_in_room(&zone, room)
+                .into_iter()
+                .find(|mob| mob.mob_key == mob_key)
+                .unwrap();
+            assert_eq!(mob.hp, 408);
+        }
+
+        let _ = std::fs::remove_file(format!("data/user/{player_name}.json"));
+        let mut world = get_world_state().write().unwrap();
+        world.remove_player_position(&player_name);
+        world.mob_cache.remove_mob(&mob_key);
+    }
 
     #[test]
     fn pvp_start_sets_reciprocal_live_player_state_and_rejects_busy_target() {
@@ -1415,7 +1713,9 @@ mod tests {
             .unwrap();
         assert_eq!(
             denied.0,
-            vec!["☞ 지금은 \x1b[1m\x1b[31m살겁\x1b[0m\x1b[37m\x1b[40m을 일으키기에 부적합한 상황 이라네"]
+            vec![
+                "☞ 지금은 \x1b[1m\x1b[31m살겁\x1b[0m\x1b[37m\x1b[40m을 일으키기에 부적합한 상황 이라네"
+            ]
         );
         assert!(pvp_target(&attacker).is_none());
         assert!(pvp_target(&defender).is_none());

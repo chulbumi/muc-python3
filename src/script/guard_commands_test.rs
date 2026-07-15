@@ -220,9 +220,9 @@ fn guard_qi_command_matches_python_full_shortage_and_partial_inventory_order() {
     assert_eq!(partial.object.objs[1].lock().unwrap().getInt("체력"), 1200);
     assert_eq!(partial_result.0.len(), 2);
     assert_eq!(
-            partial_result.0[0],
-            "당신이 사강시에게 내가진기를 주입하여 체력을 회복 시킵니다. (\x1b[1;36m+224\x1b[0;37m)\r\n"
-        );
+        partial_result.0[0],
+        "당신이 사강시에게 내가진기를 주입하여 체력을 회복 시킵니다. (\x1b[1;36m+224\x1b[0;37m)\r\n"
+    );
     assert_eq!(
         partial_result.0[1],
         "당신이 소모된 진기를 다스립니다. (\x1b[1;32m-10\x1b[0;37m)"
@@ -293,7 +293,9 @@ fn guard_view_reads_the_same_inventory_objects_as_guard_combat() {
     let (output, _) = storage
         .execute("호위", &mut body, "", None, None, None)
         .unwrap();
-    assert_eq!(output, vec![concat!(
+    assert_eq!(
+        output,
+        vec![concat!(
             "━━━━━━━━━━━━━━━━━━━━━━━━━━━━\r\n",
             "\x1b[1;44m☞ 당신의 호위 : 사강시, 호위수 : 1, 분노 : 37                        \x1b[0;40m\r\n",
             "────────────────────────────\r\n",
@@ -301,7 +303,8 @@ fn guard_view_reads_the_same_inventory_objects_as_guard_combat() {
             "────────────────────────────\r\n",
             "\x1b[1;32m·\x1b[0;36m 1.사강시\x1b[0;37m ː \x1b[33m━━━━━\x1b[37m━━━━━\x1b[37m (50)\r\n",
             "━━━━━━━━━━━━━━━━━━━━━━━━━━━━"
-        )]);
+        )]
+    );
 }
 
 #[test]
@@ -314,9 +317,9 @@ fn guard_view_preserves_list_description_crlf_and_uses_last_guard_like_python() 
     first.lock().unwrap().set("체력", 700_i64);
     last.lock().unwrap().set("체력", 850_i64);
     assert_eq!(
-            last.lock().unwrap().getString("설명2"),
-            "인간의 심지를 말살시켜 하나의 가공할 살상병기로 만들어\n내는 극악무도한 사술을 이용해서 만들어내는 강시로써 자\n아기능이 상실되어 무차별적인 공격과 살생을 일삼는다"
-        );
+        last.lock().unwrap().getString("설명2"),
+        "인간의 심지를 말살시켜 하나의 가공할 살상병기로 만들어\n내는 극악무도한 사술을 이용해서 만들어내는 강시로써 자\n아기능이 상실되어 무차별적인 공격과 살생을 일삼는다"
+    );
     body.object.objs.push(first);
     body.object.objs.push(last);
 

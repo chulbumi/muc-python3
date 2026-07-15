@@ -80,7 +80,8 @@ fn item_editor_and_delete_match_python_runtime_registry_semantics() {
         recreated.0,
         vec!["\x1b[1;32m* [삭제시험품] 생성 되었습니다.\x1b[0;37m"]
     );
-    assert_eq!(body.object.objs.len(), 2);
+    assert_eq!(body.get_item_count(), 2);
+    assert_eq!(body.object.inv_stack.get(&key), Some(&1));
     let deleted_again = storage
         .execute("아이템삭제", &mut body, &key, None, None, None)
         .unwrap();
@@ -382,17 +383,16 @@ fn test_item_commands_create_drop_get_destroy() {
     assert!(res.is_ok(), "생성 실패: {:?}", res.err());
     let (out, _) = res.as_ref().unwrap();
     assert_eq!(
-        body.object.objs.len(),
-        1,
-        "생성 후 인벤 1개 (outputs: {:?})",
-        out
+        body.object.inv_stack.get("289"),
+        Some(&1),
+        "outputs: {out:?}"
     );
-    assert_eq!(body.object.objs[0].lock().unwrap().getName(), "철퇴");
+    assert!(body.object.objs.is_empty());
 
     // 2) 버리기 철퇴
     let res = storage.execute("버려", &mut body, "철퇴", None, None, None);
     assert!(res.is_ok(), "버리기 실패: {:?}", res.err());
-    assert_eq!(body.object.objs.len(), 0, "버린 후 인벤 비어있음");
+    assert_eq!(body.get_item_count(), 0, "버린 후 인벤 비어있음");
     {
         let mut w = get_world_state().write().unwrap();
         let ro = w.get_room_objs_mut("낙양성", "1");
@@ -412,7 +412,8 @@ fn test_item_commands_create_drop_get_destroy() {
         "가져 조사는 Python han_obj처럼 목적격이어야 함: {:?}",
         res.as_ref().unwrap().0
     );
-    assert_eq!(body.object.objs.len(), 1, "가져온 후 인벤 1개");
+    assert_eq!(body.object.inv_stack.get("289"), Some(&1));
+    assert!(body.object.objs.is_empty());
     {
         let mut w = get_world_state().write().unwrap();
         let ro = w.get_room_objs_mut("낙양성", "1");
@@ -422,14 +423,14 @@ fn test_item_commands_create_drop_get_destroy() {
     // 4) 소각 철퇴
     let res = storage.execute("소각", &mut body, "철퇴", None, None, None);
     assert!(res.is_ok(), "소각 실패: {:?}", res.err());
-    assert_eq!(body.object.objs.len(), 0, "소각 후 인벤 비어있음");
+    assert_eq!(body.get_item_count(), 0, "소각 후 인벤 비어있음");
 
     // 5) 생성 → 부셔
     let _ = storage.execute("생성", &mut body, "289", None, None, None);
-    assert_eq!(body.object.objs.len(), 1);
+    assert_eq!(body.object.inv_stack.get("289"), Some(&1));
     let res = storage.execute("부셔", &mut body, "철퇴", None, None, None);
     assert!(res.is_ok(), "부셔 실패: {:?}", res.err());
-    assert_eq!(body.object.objs.len(), 0, "부신 후 인벤 비어있음");
+    assert_eq!(body.get_item_count(), 0, "부신 후 인벤 비어있음");
 
     // 6) 모두 가져 / 모두 입어
     let _ = storage.execute("생성", &mut body, "289", None, None, None);
@@ -439,7 +440,7 @@ fn test_item_commands_create_drop_get_destroy() {
     let picked = storage
         .execute("가져", &mut body, "모두", None, None, None)
         .unwrap();
-    assert_eq!(body.object.objs.len(), 2);
+    assert_eq!(body.object.inv_stack.get("289"), Some(&2));
     assert!(picked.0.join("\r\n").contains("철퇴\x1b[37m 2개를 집어서"));
 
     let equipped = storage
@@ -617,16 +618,16 @@ fn set_wear_equips_the_tagged_same_name_instance_by_python_inventory_order() {
         other => panic!("unexpected set-wear result: {other:?}"),
     };
     assert_eq!(
-            sends,
-            vec![(
-                observer.clone(),
-                format!(
-                    "{}\r\n\x1b[1m{actor}\x1b[0;37m{} \x1b[36m\x1b[35m쌍검\x1b[0;37m을\x1b[37m 착용합니다.\r\n\r\n\x1b[0;37;40m[ 19/29, 2/3 ] ",
-                    RAW_USER_MESSAGE_PREFIX,
-                    han_iga(&actor)
-                )
-            )]
-        );
+        sends,
+        vec![(
+            observer.clone(),
+            format!(
+                "{}\r\n\x1b[1m{actor}\x1b[0;37m{} \x1b[36m\x1b[35m쌍검\x1b[0;37m을\x1b[37m 착용합니다.\r\n\r\n\x1b[0;37;40m[ 19/29, 2/3 ] ",
+                RAW_USER_MESSAGE_PREFIX,
+                han_iga(&actor)
+            )
+        )]
+    );
     let mut world = get_world_state().write().unwrap();
     world.remove_player_position(&actor);
     world.remove_player_position(&observer);
@@ -782,9 +783,22 @@ fn burn_and_break_use_actual_item_text_notify_room_and_persist_removal() {
         .execute("부셔", &mut body, "토령시", None, None, None)
         .unwrap();
     assert_eq!(protected_stack.0, vec!["☞ 부셔지지 않네요. ^^"]);
-    assert!(body.object.inv_stack.is_empty());
-    assert_eq!(body.object.objs.len(), 1);
-    assert_eq!(body.object.objs[0].lock().unwrap().getName(), "토령시");
+    assert_eq!(body.object.inv_stack.get("토령시"), Some(&1));
+    assert!(body.object.objs.is_empty());
+
+    let (changed_food, _) = object_from_item_json("1037").unwrap();
+    changed_food.lock().unwrap().set("판매가격", 99_i64);
+    body.object.objs.push(changed_food);
+    body.object.inv_stack.insert("1037".into(), 2);
+    let mixed_destroy = storage
+        .execute("소각", &mut body, "탕수육 3", None, None, None)
+        .unwrap();
+    assert_eq!(
+        mixed_destroy.0,
+        vec!["당신이 \x1b[36m탕수육\x1b[37m 3개를 소각해버립니다."]
+    );
+    assert!(!body.object.inv_stack.contains_key("1037"));
+    assert!(body.object.objs.is_empty());
 
     let _ = std::fs::remove_file(format!("data/user/{self_name}.json"));
     let mut world = get_world_state().write().unwrap();
@@ -902,21 +916,14 @@ fn decompose_uses_first_python_merchant_and_preserves_item_ansi_and_shard_bug() 
     assert_eq!(sends.len(), 2);
     assert_eq!(sends[0].0, observer);
     assert_eq!(
-            sends[0].1,
-            format!(
-                "{}\r\n\x1b[1m{player}\x1b[0;37m{} \x1b[35m자빛검\x1b[0;37m 1개를 분해합니다.\r\n\r\n\x1b[0;37;40m[ 61/71, 8/9 ] ",
-                RAW_USER_MESSAGE_PREFIX,
-                han_iga(&player)
-            )
-        );
-    assert_eq!(
-        body.object
-            .objs
-            .iter()
-            .filter(|item| { item.lock().is_ok_and(|item| item.getName() == "강철조각") })
-            .count(),
-        3
+        sends[0].1,
+        format!(
+            "{}\r\n\x1b[1m{player}\x1b[0;37m{} \x1b[35m자빛검\x1b[0;37m 1개를 분해합니다.\r\n\r\n\x1b[0;37;40m[ 61/71, 8/9 ] ",
+            RAW_USER_MESSAGE_PREFIX,
+            han_iga(&player)
+        )
     );
+    assert_eq!(body.object.inv_stack.get("강철조각"), Some(&3));
     assert!(body
         .object
         .objs
@@ -1134,6 +1141,62 @@ fn give_commands_preserve_python_lookup_self_and_admin_grant_requests() {
         }) if name == "청옥패"
     ));
 
+    let (modified_throwing, _) = object_from_item_json("비황석").unwrap();
+    modified_throwing.lock().unwrap().set("급습위력", 81_i64);
+    body.object.objs.push(modified_throwing);
+    body.object.inv_stack.insert("비황석".into(), 1);
+    let numbered_counted_item = storage
+        .execute("줘", &mut body, "전달대상별칭 2비황석", None, None, None)
+        .unwrap();
+    assert!(matches!(
+        numbered_counted_item.1,
+        Some(CommandResult::GiveToPlayer {
+            give_item: None,
+            give_item_stack: Some((ref key, 1)),
+            bypass_item_limits: false,
+            ..
+        }) if key == "비황석"
+    ));
+
+    let admin_numbered_counted_item = storage
+        .execute("줘줘", &mut body, "전달대상별칭 2비황석", None, None, None)
+        .unwrap();
+    assert!(matches!(
+        admin_numbered_counted_item.1,
+        Some(CommandResult::GiveToPlayer {
+            give_item: None,
+            give_item_stack: Some((ref key, 1)),
+            bypass_item_limits: true,
+            ..
+        }) if key == "비황석"
+    ));
+
+    let mixed_bulk = storage
+        .execute("줘", &mut body, "전달대상별칭 비황석 2", None, None, None)
+        .unwrap();
+    assert!(matches!(
+        mixed_bulk.1,
+        Some(CommandResult::GiveToPlayer {
+            give_item: Some((ref name, 1, 1)),
+            give_item_stack: Some((ref key, 1)),
+            bypass_item_limits: false,
+            ..
+        }) if name == "비황석" && key == "비황석"
+    ));
+
+    let admin_mixed_bulk = storage
+        .execute("줘줘", &mut body, "전달대상별칭 비황석 2", None, None, None)
+        .unwrap();
+    assert!(matches!(
+        admin_mixed_bulk.1,
+        Some(CommandResult::GiveToPlayer {
+            give_item: Some((ref name, 1, 1)),
+            give_item_stack: Some((ref key, 1)),
+            bypass_item_limits: true,
+            ..
+        }) if name == "비황석" && key == "비황석"
+    ));
+
     let mut world = get_world_state().write().unwrap();
     world.remove_player_position(&giver);
     world.remove_player_position(&target);
@@ -1271,12 +1334,12 @@ fn install_command_creates_reloadable_box_and_python_success_text() {
     assert_eq!(sends.len(), 1);
     assert_eq!(sends[0].0, observer);
     assert_eq!(
-            sends[0].1,
-            format!(
-                "{}\r\n\x1b[1m{player_name}\x1b[0;37m가 \x1b[0;36m시험보관함\x1b[37m을 설치합니다.\r\n\r\n\x1b[0;37;40m[ 41/52, 6/7 ] ",
-                RAW_USER_MESSAGE_PREFIX,
-            )
-        );
+        sends[0].1,
+        format!(
+            "{}\r\n\x1b[1m{player_name}\x1b[0;37m가 \x1b[0;36m시험보관함\x1b[37m을 설치합니다.\r\n\r\n\x1b[0;37;40m[ 41/52, 6/7 ] ",
+            RAW_USER_MESSAGE_PREFIX,
+        )
+    );
     assert!(body.object.objs.is_empty());
     let box_path = std::path::Path::new("data/box").join(format!("{player_name}_시험보관함.json"));
     assert!(

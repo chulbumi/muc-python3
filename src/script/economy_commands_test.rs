@@ -36,7 +36,8 @@ fn shop_commands_match_python_valid_quantity_and_item_name_format() {
     let bought = storage
         .execute("구입", &mut body, "수박모자 0개", None, None, None)
         .unwrap();
-    assert_eq!(body.object.objs.len(), 1);
+    assert_eq!(body.object.inv_stack.get("361"), Some(&1));
+    assert!(body.object.objs.is_empty());
     assert_eq!(body.get_int("은전"), 91);
     assert_eq!(
         bought.0.join("\r\n"),
@@ -69,7 +70,7 @@ fn shop_commands_match_python_valid_quantity_and_item_name_format() {
     let auto_bought = storage
         .execute("구입", &mut body, "체력약", None, None, None)
         .unwrap();
-    assert_eq!(body.object.objs.len(), 3);
+    assert_eq!(body.object.inv_stack.get("361"), Some(&3));
     assert_eq!(body.get_int("은전"), 73);
     assert_eq!(
         auto_bought.0.join("\r\n"),
@@ -272,7 +273,8 @@ fn purchase_keeps_python_find_merchant_dead_mob_behavior() {
         vec!["당신이 \x1b[0;36m수박모자\x1b[37m 1개를 은전 9개에 구입합니다."]
     );
     assert_eq!(body.get_int("은전"), 91);
-    assert_eq!(body.object.objs.len(), 1);
+    assert_eq!(body.object.inv_stack.get("361"), Some(&1));
+    assert!(body.object.objs.is_empty());
 
     let _ = std::fs::remove_file(format!("data/user/{player}.json"));
     let mut world = get_world_state().write().unwrap();
@@ -331,6 +333,26 @@ fn selling_skips_equipped_items_for_order_and_rejects_protected_stack_templates(
     assert!(body.object.objs[0].lock().unwrap().getBool("inUse"));
     assert_eq!(body.object.objs[1].lock().unwrap().getInt("판매가격"), 100);
 
+    let (changed_hat, _) = super::object_from_item_json("361").unwrap();
+    changed_hat.lock().unwrap().set("판매가격", 100_i64);
+    body.object.objs.push(changed_hat);
+    body.object.inv_stack.insert("361".into(), 2);
+    let before_mixed_sale = body.get_int("은전");
+    let mixed_sale = storage
+        .execute("판매", &mut body, "수박모자 3", None, None, None)
+        .unwrap();
+    assert_eq!(
+        mixed_sale.0,
+        vec!["당신이 \x1b[0;36m수박모자\x1b[37m 3개를 은전 46개에 판매합니다."]
+    );
+    assert_eq!(body.get_int("은전"), before_mixed_sale + 46);
+    assert!(!body.object.inv_stack.contains_key("361"));
+    assert!(!body
+        .object
+        .objs
+        .iter()
+        .any(|item| { item.lock().is_ok_and(|item| item.getName() == "수박모자") }));
+
     body.object.inv_stack.insert("토령시".into(), 1);
     let protected = storage
         .execute("판매", &mut body, "토령시", None, None, None)
@@ -350,12 +372,8 @@ fn selling_skips_equipped_items_for_order_and_rejects_protected_stack_templates(
         2,
         "Python batch sale traverses every individual item"
     );
-    assert!(body.object.inv_stack.is_empty());
-    assert!(body
-        .object
-        .objs
-        .iter()
-        .any(|item| { item.lock().is_ok_and(|item| item.getName() == "토령시") }));
+    assert_eq!(body.object.inv_stack.get("토령시"), Some(&1));
+    assert!(!body.object.inv_stack.contains_key("361"));
     assert!(body
         .object
         .objs
@@ -639,7 +657,9 @@ fn receive_from_self_named_guard_preserves_python_aliased_silver_updates() {
         .unwrap();
     assert_eq!(
         output.0,
-        vec!["당신이 은전 200개를 표국무사에게 수령합니다.\r\n현재까지 수령한 기부금 총액은 은전 \x1b[1m200\x1b[0;37m개 입니다."]
+        vec![
+            "당신이 은전 200개를 표국무사에게 수령합니다.\r\n현재까지 수령한 기부금 총액은 은전 \x1b[1m200\x1b[0;37m개 입니다."
+        ]
     );
     assert_eq!(body.get_int("은전"), 500);
     assert_eq!(body.get_int("수령액"), 200);
@@ -747,12 +767,12 @@ fn insurance_query_and_deposit_match_python_agent_order_prefix_and_ansi() {
         .execute("조회", &mut body, "", None, None, None)
         .unwrap();
     assert_eq!(
-            queried.0,
-            vec![format!(
-                "당신의 보험료 총액은 은전 \x1b[1m5\x1b[0;37m개이며\r\n보험 혜택은 \x1b[1m{}\x1b[0m\x1b[40m\x1b[37m번 받으실 수 있습니다.\r\n보험혜택이 적용되는 금액은 은전 \x1b[1m{threshold}\x1b[0;37m개 이상이며\r\n한번의 출장 처리시엔 은전 \x1b[1m{trip}\x1b[0;37m개가 소요됩니다.",
-                if threshold > 0 { 5 / threshold } else { 0 }
-            )]
-        );
+        queried.0,
+        vec![format!(
+            "당신의 보험료 총액은 은전 \x1b[1m5\x1b[0;37m개이며\r\n보험 혜택은 \x1b[1m{}\x1b[0m\x1b[40m\x1b[37m번 받으실 수 있습니다.\r\n보험혜택이 적용되는 금액은 은전 \x1b[1m{threshold}\x1b[0;37m개 이상이며\r\n한번의 출장 처리시엔 은전 \x1b[1m{trip}\x1b[0;37m개가 소요됩니다.",
+            if threshold > 0 { 5 / threshold } else { 0 }
+        )]
+    );
 
     let invalid = storage
         .execute("입금", &mut body, "   ", None, None, None)
@@ -765,12 +785,16 @@ fn insurance_query_and_deposit_match_python_agent_order_prefix_and_ansi() {
     assert_eq!(body.get_int("은전"), 20);
     assert_eq!(body.get_int("보험료"), premium);
     assert_eq!(
-            prefixed.0,
-            vec![format!(
-                "당신이 은전 10개를 표국무사에게 입금합니다.\r\n\r\n당신의 보험료 총액은 은전 \x1b[1m{premium}\x1b[0;37m개이며\r\n보험 혜택은 \x1b[1m{}\x1b[0m\x1b[40m\x1b[37m번 받으실 수 있습니다.",
-                if threshold > 0 { premium / threshold } else { 0 }
-            )]
-        );
+        prefixed.0,
+        vec![format!(
+            "당신이 은전 10개를 표국무사에게 입금합니다.\r\n\r\n당신의 보험료 총액은 은전 \x1b[1m{premium}\x1b[0;37m개이며\r\n보험 혜택은 \x1b[1m{}\x1b[0m\x1b[40m\x1b[37m번 받으실 수 있습니다.",
+            if threshold > 0 {
+                premium / threshold
+            } else {
+                0
+            }
+        )]
+    );
 
     let underscored = storage
         .execute("입금", &mut body, "1_0", None, None, None)
@@ -825,9 +849,11 @@ fn donation_command_requires_guard_then_clamps_to_carried_silver_like_python() {
         "same Python object subtracts then adds"
     );
     assert_eq!(
-            self_donation.0,
-            vec!["당신이 은전 10개를 표국무사에게 기탁합니다.\r\n현재까지 모여진 기부금 총액은 은전 \x1b[1m50\x1b[0;37m개 입니다."]
-        );
+        self_donation.0,
+        vec![
+            "당신이 은전 10개를 표국무사에게 기탁합니다.\r\n현재까지 모여진 기부금 총액은 은전 \x1b[1m50\x1b[0;37m개 입니다."
+        ]
+    );
     body.set("반응이름", "");
 
     let receiver_name = format!("기부표두사용자-{}", std::process::id());
@@ -853,9 +879,11 @@ fn donation_command_requires_guard_then_clamps_to_carried_silver_like_python() {
     assert_eq!(body.get_int("은전"), 40);
     assert_eq!(receiver.get_int("은전"), 15);
     assert_eq!(
-            player_donation.0,
-            vec!["당신이 은전 10개를 표국무사에게 기탁합니다.\r\n현재까지 모여진 기부금 총액은 은전 \x1b[1m15\x1b[0;37m개 입니다."]
-        );
+        player_donation.0,
+        vec![
+            "당신이 은전 10개를 표국무사에게 기탁합니다.\r\n현재까지 모여진 기부금 총액은 은전 \x1b[1m15\x1b[0;37m개 입니다."
+        ]
+    );
     let player_receipt = storage
         .execute("수령", &mut body, "5", None, None, None)
         .unwrap();
@@ -863,9 +891,11 @@ fn donation_command_requires_guard_then_clamps_to_carried_silver_like_python() {
     assert_eq!(body.get_int("수령액"), 5);
     assert_eq!(receiver.get_int("은전"), 10);
     assert_eq!(
-            player_receipt.0,
-            vec!["당신이 은전 5개를 표국무사에게 수령합니다.\r\n현재까지 수령한 기부금 총액은 은전 \x1b[1m5\x1b[0;37m개 입니다."]
-        );
+        player_receipt.0,
+        vec![
+            "당신이 은전 5개를 표국무사에게 수령합니다.\r\n현재까지 수령한 기부금 총액은 은전 \x1b[1m5\x1b[0;37m개 입니다."
+        ]
+    );
     clear_cast_room_players();
     set_precomputed_room_view_players(HashMap::new());
     get_world_state()
@@ -902,9 +932,11 @@ fn donation_command_requires_guard_then_clamps_to_carried_silver_like_python() {
         .execute("기부", &mut body, "10", None, None, None)
         .unwrap();
     assert_eq!(
-            item_donation.0,
-            vec!["당신이 은전 10개를 표국무사에게 기탁합니다.\r\n현재까지 모여진 기부금 총액은 은전 \x1b[1m17\x1b[0;37m개 입니다."]
-        );
+        item_donation.0,
+        vec![
+            "당신이 은전 10개를 표국무사에게 기탁합니다.\r\n현재까지 모여진 기부금 총액은 은전 \x1b[1m17\x1b[0;37m개 입니다."
+        ]
+    );
     assert_eq!(body.get_int("은전"), 40);
     assert_eq!(sign.lock().unwrap().getInt("은전"), 17);
     let saved_sign: serde_json::Value =
@@ -971,9 +1003,11 @@ fn donation_command_requires_guard_then_clamps_to_carried_silver_like_python() {
         .execute("기부", &mut body, "10개", None, None, None)
         .unwrap();
     assert_eq!(
-            numeric_prefix.0,
-            vec!["당신이 은전 10개를 표국무사에게 기탁합니다.\r\n현재까지 모여진 기부금 총액은 은전 \x1b[1m110\x1b[0;37m개 입니다."]
-        );
+        numeric_prefix.0,
+        vec![
+            "당신이 은전 10개를 표국무사에게 기탁합니다.\r\n현재까지 모여진 기부금 총액은 은전 \x1b[1m110\x1b[0;37m개 입니다."
+        ]
+    );
     assert_eq!(body.get_int("은전"), 40);
 
     let donated = storage
@@ -981,9 +1015,11 @@ fn donation_command_requires_guard_then_clamps_to_carried_silver_like_python() {
         .unwrap();
     assert_eq!(body.get_int("은전"), 0);
     assert_eq!(
-            donated.0,
-            vec!["당신이 은전 40개를 표국무사에게 기탁합니다.\r\n현재까지 모여진 기부금 총액은 은전 \x1b[1m150\x1b[0;37m개 입니다."]
-        );
+        donated.0,
+        vec![
+            "당신이 은전 40개를 표국무사에게 기탁합니다.\r\n현재까지 모여진 기부금 총액은 은전 \x1b[1m150\x1b[0;37m개 입니다."
+        ]
+    );
     assert_eq!(
         get_world_state()
             .read()

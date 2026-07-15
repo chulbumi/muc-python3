@@ -1,13 +1,11 @@
-//! Python `Player.objs` inventory persistence compatibility.
+//! Inventory persistence and legacy Python record compatibility.
 //!
-//! The authoritative Python runtime has no stack inventory. Every owned item
-//! is an individual `Item` in `Player.objs`; `Player.save()` writes that list
-//! to the `아이템` JSON array, and `Player.load()` calls `insert()` for every
-//! array element (therefore reversing the JSON array in memory).  Older Rust
-//! builds introduced `Object::inv_stack` and `소지품_수량`.  The helpers in
-//! this module expand that lossy representation back into individual objects
-//! at the persistence boundary.  A mixed `objs`/`inv_stack` acquisition order
-//! cannot be reconstructed after it has already been compressed.
+//! Pristine copies of an item template stay counted in `inv_stack` both at
+//! runtime and in save files. An extended, strengthened, UUID-bearing,
+//! equipped, unique, or otherwise changed item stays as an individual object
+//! and is stored with only its `변경` fields and any template fields listed in
+//! `제거`. Legacy Python item records, the short-lived full `속성` shape, and
+//! old Rust `소지품_수량` files remain readable.
 
 use crate::object::{Object, Value};
 use crate::player::Body;
@@ -97,6 +95,22 @@ fn plain_value_to_json(value: &Value) -> JsonValue {
     }
 }
 
+/// `Object::get` returns a scalar default for a missing attribute.  Some
+/// legacy mutation helpers materialize that default into `attr` (most notably
+/// `고유번호 = ""`) even though the observable item state did not change.
+/// Do not persist such entries as deltas merely because the HashMap now has a
+/// key the template omits.
+fn is_missing_attribute_default(value: &JsonValue) -> bool {
+    match value {
+        JsonValue::Null => true,
+        JsonValue::Bool(value) => !value,
+        JsonValue::Number(value) => value.as_i64() == Some(0) || value.as_f64() == Some(0.0),
+        JsonValue::String(value) => value.is_empty(),
+        JsonValue::Array(value) => value.is_empty(),
+        JsonValue::Object(value) => value.is_empty(),
+    }
+}
+
 pub(crate) fn item_field_to_json(item: &Object, field: &str) -> JsonValue {
     let value = item.get(field);
     let marked_array = item.temp.contains_key(&json_array_marker(field));
@@ -134,6 +148,136 @@ pub(crate) fn item_attributes_to_json(item: &Object) -> JsonValue {
     JsonValue::Object(attributes)
 }
 
+/// True when an inventory object has no persistent or nested state beyond its
+/// item JSON template and can therefore live in `inv_stack` at runtime.
+pub(crate) fn is_pristine_template_object(item: &Object) -> bool {
+    let index = item.getString("인덱스");
+    if index.is_empty()
+        || !super::is_stackable(&index)
+        || !item.objs.is_empty()
+        || item.inv_stack.values().any(|count| *count > 0)
+    {
+        return false;
+    }
+    super::object_from_item_json(&index)
+        .and_then(|(template, _)| {
+            template
+                .lock()
+                .ok()
+                .map(|template| item_attributes_to_json(item) == item_attributes_to_json(&template))
+        })
+        .unwrap_or(false)
+}
+
+fn is_single_item_template(key: &str) -> bool {
+    super::object_from_item_json(key)
+        .and_then(|(item, _)| {
+            item.lock()
+                .ok()
+                .map(|item| item.checkAttr("아이템속성", "단일아이템"))
+        })
+        .unwrap_or(false)
+}
+
+pub(crate) fn inventory_contains_index(inventory: &Object, key: &str) -> bool {
+    inventory.inv_stack.get(key).copied().unwrap_or(0) > 0
+        || inventory.objs.iter().any(|item| {
+            item.lock()
+                .ok()
+                .is_some_and(|item| item.getString("인덱스") == key)
+        })
+}
+
+pub(crate) fn can_accept_object(inventory: &Object, item: &Object) -> bool {
+    let key = item.getString("인덱스");
+    !item.checkAttr("아이템속성", "단일아이템")
+        || key.is_empty()
+        || !inventory_contains_index(inventory, &key)
+}
+
+/// Insert an acquired item while preserving the runtime representation.
+/// Returns false only when accepting it would duplicate a `단일아이템`.
+pub(crate) fn store_acquired_object(
+    inventory: &mut Object,
+    item: Arc<Mutex<Object>>,
+    prepend: bool,
+) -> bool {
+    if item
+        .lock()
+        .ok()
+        .is_some_and(|item| !can_accept_object(inventory, &item))
+    {
+        return false;
+    }
+    if absorb_pristine_object(inventory, &item) {
+        return true;
+    }
+    if prepend {
+        inventory.objs.insert(0, item);
+    } else {
+        inventory.objs.push(item);
+    }
+    true
+}
+
+pub(crate) fn add_pristine_count(inventory: &mut Object, key: &str, count: i64) -> bool {
+    if key.is_empty() || count <= 0 || !super::is_stackable(key) {
+        return false;
+    }
+    *inventory.inv_stack.entry(key.to_string()).or_insert(0) += count;
+    true
+}
+
+pub(crate) fn remove_pristine_count(inventory: &mut Object, key: &str, count: i64) -> bool {
+    if key.is_empty() || count <= 0 {
+        return false;
+    }
+    let have = inventory.inv_stack.get(key).copied().unwrap_or(0);
+    if have < count {
+        return false;
+    }
+    if have == count {
+        inventory.inv_stack.remove(key);
+    } else {
+        inventory.inv_stack.insert(key.to_string(), have - count);
+    }
+    true
+}
+
+/// Store an acquired pristine object as a count. Changed/unique objects stay
+/// as objects and preserve their identity.
+pub(crate) fn absorb_pristine_object(inventory: &mut Object, item: &Arc<Mutex<Object>>) -> bool {
+    let key = item
+        .lock()
+        .ok()
+        .filter(|item| is_pristine_template_object(item))
+        .map(|item| item.getString("인덱스"));
+    key.is_some_and(|key| add_pristine_count(inventory, &key, 1))
+}
+
+/// Split exactly one pristine count into an object for a stateful operation
+/// such as equipping, strengthening, event mutation, or putting it in a
+/// legacy object-only container.
+pub(crate) fn materialize_one(
+    inventory: &mut Object,
+    key: &str,
+    prepend: bool,
+) -> Option<Arc<Mutex<Object>>> {
+    if !remove_pristine_count(inventory, key, 1) {
+        return None;
+    }
+    let Some((item, _)) = super::object_from_item_json(key) else {
+        *inventory.inv_stack.entry(key.to_string()).or_insert(0) += 1;
+        return None;
+    };
+    if prepend {
+        inventory.objs.insert(0, item.clone());
+    } else {
+        inventory.objs.push(item.clone());
+    }
+    Some(item)
+}
+
 /// Python `대여` performs `item.attr = itm["attr"]` on a deep-cloned item.
 /// Replace the complete persistent map (while retaining Rust's internal item
 /// index, which corresponds to Python's separate `item.index` field) and
@@ -154,11 +298,13 @@ pub(crate) fn replace_item_attributes_from_json(item: &mut Object, attrs: &JsonV
     }
 }
 
+#[cfg(test)]
 fn nonempty(value: &Value) -> bool {
     !matches!(value, Value::String(value) if value.is_empty())
 }
 
 /// Build the exact item record shape written by Python `Player.save()`.
+#[cfg(test)]
 pub(super) fn python_item_record(item: &Object, now: f64) -> Option<JsonValue> {
     let index = item.getString("인덱스");
     if index.is_empty() {
@@ -206,18 +352,85 @@ pub(super) fn python_item_record(item: &Object, now: f64) -> Option<JsonValue> {
     Some(JsonValue::Object(record))
 }
 
-/// Serialize current runtime inventory order. `materialize_stacks_for_save`
-/// must have succeeded before this is called.
-pub(super) fn python_inventory_records(body: &Body, now: f64) -> Vec<JsonValue> {
-    body.object
-        .objs
-        .iter()
-        .filter_map(|item| {
-            item.lock()
-                .ok()
-                .and_then(|item| python_item_record(&item, now))
-        })
-        .collect()
+/// Compact pristine template copies while retaining complete state for every
+/// object that differs from its item JSON template.
+pub(crate) fn compact_object_records(inventory: &Object) -> Vec<JsonValue> {
+    let mut records = Vec::<JsonValue>::new();
+    let mut pristine_positions = std::collections::HashMap::<String, usize>::new();
+    let mut template_attributes = std::collections::HashMap::<String, Option<JsonValue>>::new();
+
+    let mut runtime_stacks = positive_stack_entries(&inventory.inv_stack);
+    for (index, count) in runtime_stacks.drain(..) {
+        let position = records.len();
+        records.push(serde_json::json!({"인덱스": index, "수량": count}));
+        pristine_positions.insert(index, position);
+    }
+
+    for item in &inventory.objs {
+        let Ok(item) = item.lock() else { continue };
+        let index = item.getString("인덱스");
+        if index.is_empty() {
+            continue;
+        }
+        let current = item_attributes_to_json(&item);
+        let template = template_attributes.entry(index.clone()).or_insert_with(|| {
+            super::object_from_item_json(&index).and_then(|(template, _)| {
+                template
+                    .lock()
+                    .ok()
+                    .map(|template| item_attributes_to_json(&template))
+            })
+        });
+        if template.as_ref() == Some(&current) && is_pristine_template_object(&item) {
+            if let Some(position) = pristine_positions.get(&index).copied() {
+                if let Some(record) = records.get_mut(position).and_then(JsonValue::as_object_mut) {
+                    let count = record.get("수량").and_then(JsonValue::as_i64).unwrap_or(1);
+                    record.insert("수량".into(), JsonValue::Number((count + 1).into()));
+                }
+            } else {
+                let position = records.len();
+                records.push(serde_json::json!({"인덱스": index, "수량": 1}));
+                pristine_positions.insert(index, position);
+            }
+            continue;
+        }
+
+        let current_map = current.as_object().cloned().unwrap_or_default();
+        let template_map = template
+            .as_ref()
+            .and_then(JsonValue::as_object)
+            .cloned()
+            .unwrap_or_default();
+        let changed = current_map
+            .iter()
+            .filter(|(field, value)| match template_map.get(*field) {
+                Some(template_value) => template_value != *value,
+                None => !is_missing_attribute_default(value),
+            })
+            .map(|(field, value)| (field.clone(), value.clone()))
+            .collect::<JsonMap<_, _>>();
+        let removed = template_map
+            .keys()
+            .filter(|field| !current_map.contains_key(*field))
+            .cloned()
+            .map(JsonValue::String)
+            .collect::<Vec<_>>();
+        let mut record = JsonMap::new();
+        record.insert("인덱스".into(), JsonValue::String(index));
+        record.insert("수량".into(), JsonValue::Number(1.into()));
+        if !changed.is_empty() {
+            record.insert("변경".into(), JsonValue::Object(changed));
+        }
+        if !removed.is_empty() {
+            record.insert("제거".into(), JsonValue::Array(removed));
+        }
+        records.push(JsonValue::Object(record));
+    }
+    records
+}
+
+pub(super) fn compact_inventory_records(body: &Body) -> Vec<JsonValue> {
+    compact_object_records(&body.object)
 }
 
 fn item_index(record: &JsonMap<String, JsonValue>) -> Option<String> {
@@ -239,128 +452,150 @@ fn item_records(root: &JsonMap<String, JsonValue>) -> Vec<&JsonMap<String, JsonV
     }
 }
 
-/// Load Python `아이템` records. Calling `insert(0, item)` rather than push is
-/// observable: it exactly mirrors `Player.load()` and reverses JSON order.
+fn is_compact_pristine_record(record: &JsonMap<String, JsonValue>) -> bool {
+    record
+        .keys()
+        .all(|field| matches!(field.as_str(), "인덱스" | "수량"))
+}
+
+/// Load Python `아이템` records. Exact `{인덱스, 수량}` records remain counted
+/// at runtime without constructing one object per copy. Stateful records still
+/// call `insert(0, item)`, exactly mirroring `Player.load()`'s reversed order.
 pub(super) fn load_python_inventory(body: &mut Body, root: &JsonMap<String, JsonValue>) {
     reset_body_derived_state(body);
     body.object.objs.clear();
+    body.object.inv_stack.clear();
+    let mut loaded_single_items = std::collections::HashSet::<String>::new();
     for record in item_records(root) {
         let Some(index) = item_index(record) else {
             continue;
         };
-        let Some((item, _)) = super::object_from_item_json(&index) else {
+        let single_item = is_single_item_template(&index);
+        if single_item && !loaded_single_items.insert(index.clone()) {
             continue;
-        };
-        let mut equipped_stats = None;
-        if let Ok(mut item) = item.lock() {
-            for field in [
-                "이름",
-                "반응이름",
-                "고유번호",
-                "공격력",
-                "방어력",
-                "기량",
-                "아이템속성",
-                "옵션",
-                "확장 이름",
-                "체력",
-            ] {
-                if let Some(value) = record.get(field) {
-                    // Player.load converts a legacy string reaction name into
-                    // a one-element list before assigning it to the Item.
-                    if field == "반응이름" {
-                        if let JsonValue::String(value) = value {
-                            set_item_json_field(
-                                &mut item,
-                                field,
-                                &JsonValue::Array(vec![JsonValue::String(value.clone())]),
-                            );
-                            continue;
+        }
+        let count = record
+            .get("수량")
+            .and_then(JsonValue::as_i64)
+            .unwrap_or(1)
+            .clamp(1, 100_000);
+        let count = if single_item { 1 } else { count };
+        if !single_item && is_compact_pristine_record(record) && super::is_stackable(&index) {
+            *body.object.inv_stack.entry(index).or_insert(0) += count;
+            continue;
+        }
+        for _ in 0..count {
+            let has_delta = record.get("변경").and_then(JsonValue::as_object).is_some()
+                || record.get("제거").and_then(JsonValue::as_array).is_some();
+            let item = if let Some((item, _)) = super::object_from_item_json(&index) {
+                item
+            } else if record.get("속성").and_then(JsonValue::as_object).is_some() || has_delta {
+                let mut item = Object::new();
+                item.set("인덱스", index.clone());
+                Arc::new(Mutex::new(item))
+            } else {
+                continue;
+            };
+            let mut equipped_stats = None;
+            if let Ok(mut item) = item.lock() {
+                if let Some(attributes) = record.get("속성") {
+                    replace_item_attributes_from_json(&mut item, attributes);
+                } else if has_delta {
+                    if let Some(removed) = record.get("제거").and_then(JsonValue::as_array) {
+                        for field in removed.iter().filter_map(JsonValue::as_str) {
+                            if field != "인덱스" {
+                                item.attr.remove(field);
+                                item.temp.remove(&json_array_marker(field));
+                            }
                         }
                     }
-                    set_item_json_field(&mut item, field, value);
+                    if let Some(changed) = record.get("변경").and_then(JsonValue::as_object) {
+                        for (field, value) in changed {
+                            if field != "인덱스" {
+                                set_item_json_field(&mut item, field, value);
+                            }
+                        }
+                    }
+                } else {
+                    for field in [
+                        "이름",
+                        "반응이름",
+                        "고유번호",
+                        "공격력",
+                        "방어력",
+                        "기량",
+                        "아이템속성",
+                        "옵션",
+                        "확장 이름",
+                        "체력",
+                    ] {
+                        if let Some(value) = record.get(field) {
+                            if field == "반응이름" {
+                                if let JsonValue::String(value) = value {
+                                    set_item_json_field(
+                                        &mut item,
+                                        field,
+                                        &JsonValue::Array(vec![JsonValue::String(value.clone())]),
+                                    );
+                                    continue;
+                                }
+                            }
+                            set_item_json_field(&mut item, field, value);
+                        }
+                    }
+                    if record.contains_key("상태") {
+                        item.set("inUse", 1_i64);
+                    }
+                }
+                if item.getBool("inUse") {
+                    equipped_stats = Some((
+                        item.getInt("방어력") as i32,
+                        item.getInt("공격력") as i32,
+                        item.getString("종류") == "무기",
+                        (record.contains_key("속성") || has_delta || record.contains_key("옵션"))
+                            .then(|| item.get_option())
+                            .flatten(),
+                    ));
                 }
             }
-            // Python checks only for key presence and retains the template's
-            // 계층; it does not copy the JSON 상태 value into 계층.
-            if record.contains_key("상태") {
-                item.set("inUse", 1_i64);
-                equipped_stats = Some((
-                    item.getInt("방어력") as i32,
-                    item.getInt("공격력") as i32,
-                    item.getString("종류") == "무기",
-                    // Python applies options here only when the persisted
-                    // record itself contains 옵션, not merely when the item
-                    // template has a default option.
-                    record
-                        .contains_key("옵션")
-                        .then(|| item.get_option())
-                        .flatten(),
-                ));
-            }
-            // Python deliberately ignores the saved 단일아이템 `시간` field.
-        }
 
-        if let Some((armor, attack, is_weapon, options)) = equipped_stats {
-            body.armor += armor;
-            body.attpower += attack;
-            if is_weapon {
-                body.weapon_item = Some(Arc::downgrade(&item));
-            }
-            if let Some(options) = options {
-                for (name, value) in options {
-                    let value = value as i32;
-                    match name.as_str() {
-                        "힘" => body._str += value,
-                        "민첩성" => body._dex += value,
-                        "맷집" => body._arm += value,
-                        "체력" => body._maxhp += value,
-                        "내공" => body._maxmp += value,
-                        "필살" => body._critical += value,
-                        "운" => body._critical_chance += value,
-                        "회피" => body._miss += value,
-                        "명중" => body._hit += value,
-                        "경험치" => body._exp += value,
-                        "마법발견" => body._magic_chance += value,
-                        _ => {}
+            if let Some((armor, attack, is_weapon, options)) = equipped_stats {
+                body.armor += armor;
+                body.attpower += attack;
+                if is_weapon {
+                    body.weapon_item = Some(Arc::downgrade(&item));
+                }
+                if let Some(options) = options {
+                    for (name, value) in options {
+                        let value = value as i32;
+                        match name.as_str() {
+                            "힘" => body._str += value,
+                            "민첩성" => body._dex += value,
+                            "맷집" => body._arm += value,
+                            "체력" => body._maxhp += value,
+                            "내공" => body._maxmp += value,
+                            "필살" => body._critical += value,
+                            "운" => body._critical_chance += value,
+                            "회피" => body._miss += value,
+                            "명중" => body._hit += value,
+                            "경험치" => body._exp += value,
+                            "마법발견" => body._magic_chance += value,
+                            _ => {}
+                        }
                     }
                 }
             }
+            let stack_key = item
+                .lock()
+                .ok()
+                .filter(|item| !item.getBool("inUse") && is_pristine_template_object(item))
+                .map(|item| item.getString("인덱스"));
+            if let Some(stack_key) = stack_key {
+                *body.object.inv_stack.entry(stack_key).or_insert(0) += 1;
+            } else {
+                body.object.objs.insert(0, item);
+            }
         }
-        body.object.objs.insert(0, item);
-    }
-}
-
-fn expanded_stack_objects(
-    entries: &[(String, i64)],
-) -> Result<Vec<Arc<Mutex<Object>>>, Vec<String>> {
-    let mut expanded = Vec::new();
-    let mut missing = Vec::new();
-    for (key, count) in entries {
-        if *count <= 0 {
-            continue;
-        }
-        let Some((template, _)) = super::object_from_item_json(key) else {
-            missing.push(key.clone());
-            continue;
-        };
-        for _ in 0..*count {
-            let cloned = match template.lock() {
-                Ok(template) => Arc::new(Mutex::new(template.deepclone())),
-                Err(_) => {
-                    missing.push(key.clone());
-                    break;
-                }
-            };
-            expanded.push(cloned);
-        }
-    }
-    if missing.is_empty() {
-        Ok(expanded)
-    } else {
-        missing.sort();
-        missing.dedup();
-        Err(missing)
     }
 }
 
@@ -374,21 +609,123 @@ fn positive_stack_entries(stack: &std::collections::HashMap<String, i64>) -> Vec
     entries
 }
 
-/// Convert any runtime-created Rust stack into Python item objects before a
-/// save or an order-sensitive inventory command. New acquisitions belong at
-/// the front because Python uses `ob.insert(item)`. With more than one legacy
-/// stack key their original interleaving is already unknowable; sorted keys
-/// provide only a deterministic migration, not a claim of recovered order.
-pub(crate) fn materialize_stacks_for_save(body: &mut Body) -> Result<(), Vec<String>> {
-    let entries = positive_stack_entries(&body.object.inv_stack);
-    if entries.is_empty() {
-        body.object.inv_stack.retain(|_, count| *count > 0);
-        return Ok(());
+/// Resolve a displayed name only among keys that are actually present in a
+/// counted inventory. This avoids choosing an unrelated template when two
+/// item definitions share the same name or reaction alias.
+pub(crate) fn find_counted_item_key(
+    stack: &std::collections::HashMap<String, i64>,
+    name: &str,
+) -> Option<String> {
+    counted_item_at(stack, name, 1).map(|(key, _)| key)
+}
+
+/// Return every positive counted group matching a displayed name or reaction
+/// alias in the same deterministic order used by [`counted_item_at`].
+pub(crate) fn counted_item_keys(
+    stack: &std::collections::HashMap<String, i64>,
+    name: &str,
+) -> Vec<String> {
+    let keys = positive_stack_entries(stack)
+        .into_iter()
+        .map(|(key, _)| key)
+        .collect::<Vec<_>>();
+    let mut result = Vec::new();
+    for exact_name in [true, false] {
+        for key in &keys {
+            let Some((item, _)) = super::object_from_item_json(key) else {
+                continue;
+            };
+            let matches = item.lock().ok().is_some_and(|item| {
+                if exact_name {
+                    item.getName() == name
+                } else {
+                    item.getName() != name
+                        && super::reaction_names(&item.getString("반응이름"))
+                            .iter()
+                            .any(|alias| alias == name)
+                }
+            });
+            if matches {
+                result.push(key.clone());
+            }
+        }
     }
-    let mut expanded = expanded_stack_objects(&entries)?;
-    expanded.append(&mut body.object.objs);
-    body.object.objs = expanded;
-    body.object.inv_stack.clear();
+    result
+}
+
+/// Resolve a one-based occurrence across all counted template groups that
+/// match a display name or reaction alias. Exact display names precede aliases,
+/// and keys are stable-sorted inside each class.
+pub(crate) fn counted_item_at(
+    stack: &std::collections::HashMap<String, i64>,
+    name: &str,
+    order: i64,
+) -> Option<(String, i64)> {
+    if order < 1 {
+        return None;
+    }
+    let keys = counted_item_keys(stack, name);
+    let mut remaining = order;
+    for key in keys {
+        let count = stack.get(&key).copied().unwrap_or(0).max(0);
+        if remaining <= count {
+            return Some((key, remaining));
+        }
+        remaining -= count;
+    }
+    None
+}
+
+/// Normalize old runtime state before save: valid pristine items stay counted,
+/// old stacks of identity-bearing items become objects, and pristine objects
+/// created by legacy paths are folded back into counts.
+pub(crate) fn materialize_stacks_for_save(body: &mut Body) -> Result<(), Vec<String>> {
+    body.object.inv_stack.retain(|_, count| *count > 0);
+    let non_stackable = positive_stack_entries(&body.object.inv_stack)
+        .into_iter()
+        .filter(|(key, _)| !super::is_stackable(key))
+        .collect::<Vec<_>>();
+    for (key, count) in non_stackable {
+        let Some((template, _)) = super::object_from_item_json(&key) else {
+            continue;
+        };
+        body.object.inv_stack.remove(&key);
+        let count = if is_single_item_template(&key) {
+            i64::from(!inventory_contains_index(&body.object, &key))
+        } else {
+            count
+        };
+        for _ in 0..count {
+            let item = template
+                .lock()
+                .ok()
+                .map(|template| Arc::new(Mutex::new(template.deepclone())));
+            if let Some(item) = item {
+                body.object.objs.push(item);
+            }
+        }
+    }
+    let pristine_objects = body
+        .object
+        .objs
+        .iter()
+        .filter(|item| {
+            item.lock()
+                .ok()
+                .is_some_and(|item| is_pristine_template_object(&item))
+        })
+        .cloned()
+        .collect::<Vec<_>>();
+    for item in pristine_objects {
+        let key = item
+            .lock()
+            .ok()
+            .map(|item| item.getString("인덱스"))
+            .unwrap_or_default();
+        if add_pristine_count(&mut body.object, &key, 1) {
+            body.object.remove(&item);
+        }
+    }
     Ok(())
 }
 
@@ -398,7 +735,6 @@ pub(crate) fn materialize_stacks_for_save(body: &mut Body) -> Result<(), Vec<Str
 /// The original mixed acquisition order was never stored and cannot be
 /// reconstructed.
 pub(super) fn load_legacy_stacks(body: &mut Body, root: &JsonMap<String, JsonValue>) {
-    body.object.inv_stack.clear();
     let Some(stack) = root.get("소지품_수량").and_then(JsonValue::as_object) else {
         return;
     };
@@ -410,12 +746,24 @@ pub(super) fn load_legacy_stacks(body: &mut Body, root: &JsonMap<String, JsonVal
     entries.sort_by(|left, right| left.0.cmp(&right.0));
 
     for (key, count) in entries {
-        match expanded_stack_objects(&[(key.clone(), count)]) {
-            Ok(mut expanded) => body.object.objs.append(&mut expanded),
-            Err(_) => {
-                // Do not silently destroy an unknown legacy key. It remains
-                // unreadable by Python, and a later save will fail preflight.
-                body.object.inv_stack.insert(key, count);
+        if super::is_stackable(&key) {
+            *body.object.inv_stack.entry(key).or_insert(0) += count;
+            continue;
+        }
+        let Some((template, _)) = super::object_from_item_json(&key) else {
+            body.object.inv_stack.insert(key, count);
+            continue;
+        };
+        let count = if is_single_item_template(&key) {
+            i64::from(!inventory_contains_index(&body.object, &key))
+        } else {
+            count
+        };
+        for _ in 0..count {
+            if let Ok(template) = template.lock() {
+                body.object
+                    .objs
+                    .push(Arc::new(Mutex::new(template.deepclone())));
             }
         }
     }
@@ -478,7 +826,7 @@ mod tests {
     }
 
     #[test]
-    fn authoritative_python_source_has_only_individual_item_records() {
+    fn authoritative_python_source_reads_compact_records_but_keeps_legacy_save_shape() {
         let player = include_str!("../../objs/player.py");
         let save = player
             .split("    def save(self, mode = True):")
@@ -495,6 +843,9 @@ mod tests {
             .next()
             .unwrap();
         assert!(load.contains("if type(items) == dict:"));
+        assert!(load.contains("item.get('수량', 1)"));
+        assert!(load.contains("item.get('변경', {})"));
+        assert!(load.contains("item.get('제거', [])"));
         assert!(load.contains("self.insert(obj)"));
         assert!(!load.contains("소지품_수량"));
     }
@@ -541,7 +892,124 @@ mod tests {
     }
 
     #[test]
-    fn legacy_stack_materializes_as_individual_objects_without_losing_count() {
+    fn pristine_consumables_compact_and_modified_items_keep_only_template_delta() {
+        let mut body = Body::new();
+        for _ in 0..2 {
+            let (item, _) = super::super::object_from_item_json("비황석").unwrap();
+            body.object.objs.push(item);
+        }
+        let (modified, _) = super::super::object_from_item_json("비황석").unwrap();
+        {
+            let mut modified = modified.lock().unwrap();
+            modified.set("고유번호", "암기-uuid-1");
+            modified.attr.remove("판매가격");
+        }
+        body.object.objs.push(modified);
+
+        let records = compact_inventory_records(&body);
+        assert_eq!(records.len(), 2);
+        assert_eq!(
+            records[0],
+            serde_json::json!({"인덱스": "비황석", "수량": 2})
+        );
+        assert_eq!(records[1]["인덱스"], "비황석");
+        assert_eq!(records[1]["수량"], 1);
+        assert_eq!(
+            records[1]["변경"],
+            serde_json::json!({"고유번호": "암기-uuid-1"})
+        );
+        assert_eq!(records[1]["제거"], serde_json::json!(["판매가격"]));
+
+        let root = serde_json::json!({"아이템": records});
+        let mut loaded = Body::new();
+        load_python_inventory(&mut loaded, root.as_object().unwrap());
+        assert_eq!(loaded.object.objs.len(), 1);
+        assert_eq!(loaded.object.inv_stack.get("비황석"), Some(&2));
+        assert_eq!(
+            loaded
+                .object
+                .objs
+                .iter()
+                .filter(|item| item.lock().unwrap().getString("고유번호") == "암기-uuid-1")
+                .count(),
+            1
+        );
+        let modified = loaded
+            .object
+            .objs
+            .iter()
+            .find(|item| item.lock().unwrap().getString("고유번호") == "암기-uuid-1")
+            .unwrap()
+            .lock()
+            .unwrap();
+        assert!(!modified.attr.contains_key("판매가격"));
+    }
+
+    #[test]
+    fn template_missing_scalar_defaults_are_not_persisted_as_changes() {
+        let mut body = Body::new();
+        let (item, _) = super::super::object_from_item_json("비황석").unwrap();
+        {
+            let mut item = item.lock().unwrap();
+            item.set("고유번호", "");
+            item.set("사용횟수", 0_i64);
+            item.set("확장 이름", "빙백");
+        }
+        body.object.objs.push(item);
+
+        let records = compact_inventory_records(&body);
+
+        assert_eq!(records.len(), 1);
+        assert_eq!(records[0]["변경"], serde_json::json!({"확장 이름": "빙백"}));
+    }
+
+    #[test]
+    fn compact_pristine_load_keeps_large_quantity_without_runtime_objects() {
+        let root = serde_json::json!({
+            "아이템": [{"인덱스": "비황석", "수량": 50}]
+        });
+        let mut body = Body::new();
+
+        load_python_inventory(&mut body, root.as_object().unwrap());
+
+        assert!(body.object.objs.is_empty());
+        assert_eq!(body.object.inv_stack.get("비황석"), Some(&50));
+    }
+
+    #[test]
+    fn counted_occurrence_does_not_count_exact_name_again_as_its_alias() {
+        let stack = std::collections::HashMap::from([("비황석".to_string(), 2)]);
+        assert_eq!(
+            counted_item_at(&stack, "비황석", 2),
+            Some(("비황석".to_string(), 2))
+        );
+        assert_eq!(counted_item_at(&stack, "비황석", 3), None);
+    }
+
+    #[test]
+    fn delta_quantity_loads_as_individual_stateful_objects() {
+        let root = serde_json::json!({
+            "아이템": [{
+                "인덱스": "비황석",
+                "수량": 2,
+                "변경": {"확장 이름": "빙백"}
+            }]
+        });
+        let mut body = Body::new();
+
+        load_python_inventory(&mut body, root.as_object().unwrap());
+
+        assert_eq!(body.object.objs.len(), 2);
+        assert!(body.object.inv_stack.is_empty());
+        assert!(body
+            .object
+            .objs
+            .iter()
+            .all(|item| { item.lock().unwrap().getString("확장 이름") == "빙백" }));
+    }
+
+    #[test]
+    fn legacy_stack_and_pristine_objects_compact_into_runtime_counts() {
         let mut body = Body::new();
         let (existing, _) = super::super::object_from_item_json("1002").unwrap();
         body.object.objs.push(existing);
@@ -549,11 +1017,10 @@ mod tests {
         body.object.inv_stack.insert("1000".to_string(), 3);
 
         materialize_stacks_for_save(&mut body).unwrap();
-        assert!(body.object.inv_stack.is_empty());
-        assert_eq!(
-            inventory_indexes(&body),
-            ["1000", "1000", "1000", "1001", "1001", "1002"]
-        );
+        assert!(body.object.objs.is_empty());
+        assert_eq!(body.object.inv_stack.get("1000"), Some(&3));
+        assert_eq!(body.object.inv_stack.get("1001"), Some(&2));
+        assert_eq!(body.object.inv_stack.get("1002"), Some(&1));
     }
 
     #[test]
@@ -568,11 +1035,11 @@ mod tests {
         let mut body = Body::new();
         load_python_inventory(&mut body, root.as_object().unwrap());
         load_legacy_stacks(&mut body, root.as_object().unwrap());
-        assert_eq!(
-            inventory_indexes(&body),
-            ["1001", "1000", "1002", "1002", "1003"]
-        );
-        assert!(body.object.inv_stack.is_empty());
+        assert!(body.object.objs.is_empty());
+        assert_eq!(body.object.inv_stack.get("1000"), Some(&1));
+        assert_eq!(body.object.inv_stack.get("1001"), Some(&1));
+        assert_eq!(body.object.inv_stack.get("1002"), Some(&2));
+        assert_eq!(body.object.inv_stack.get("1003"), Some(&1));
     }
 
     #[test]
@@ -581,7 +1048,8 @@ mod tests {
         let mut body = Body::new();
         load_legacy_stacks(&mut body, root.as_object().unwrap());
         assert_eq!(body.object.inv_stack.get("존재하지않는키"), Some(&2));
-        assert!(materialize_stacks_for_save(&mut body).is_err());
+        assert!(materialize_stacks_for_save(&mut body).is_ok());
+        assert_eq!(body.object.inv_stack.get("존재하지않는키"), Some(&2));
     }
 
     #[test]
@@ -615,18 +1083,17 @@ mod tests {
             .as_array()
             .unwrap()
             .iter()
-            .map(|item| item["이름"].as_str().unwrap())
+            .map(|item| item["변경"]["이름"].as_str().unwrap())
             .collect::<Vec<_>>();
         assert_eq!(names, ["셋째", "둘째", "첫째"]);
         assert_eq!(
-            saved["아이템"][2]["반응이름"],
+            saved["아이템"][2]["변경"]["반응이름"],
             serde_json::json!(["첫반응"])
         );
         assert_eq!(
-            saved["아이템"][1]["옵션"],
+            saved["아이템"][1]["변경"]["옵션"],
             serde_json::json!(["힘 3", "명중 4"])
         );
-        assert!(saved["아이템"][0]["시간"].as_f64().is_some());
 
         // A Python load of the just-saved array also prepends every item. A
         // second Rust load therefore returns to the original A/B/C order.
@@ -641,7 +1108,7 @@ mod tests {
     }
 
     #[test]
-    fn legacy_stack_save_expands_to_python_item_records_in_temp_file() {
+    fn legacy_stack_save_keeps_runtime_counts_and_writes_compact_records() {
         let path = temp_json_path("legacy_expand");
         let mut body = Body::new();
         body.set("이름", "레거시확장");
@@ -656,15 +1123,30 @@ mod tests {
         let saved: JsonValue =
             serde_json::from_str(&std::fs::read_to_string(&path).unwrap()).unwrap();
         assert!(saved.get("소지품_수량").is_none());
-        let indexes = saved["아이템"]
-            .as_array()
-            .unwrap()
-            .iter()
-            .map(|item| item["인덱스"].as_str().unwrap())
-            .collect::<Vec<_>>();
-        assert_eq!(indexes, ["1000", "1000", "1002"]);
-        assert!(body.object.inv_stack.is_empty());
+        let items = saved["아이템"].as_array().unwrap();
+        assert_eq!(items.len(), 2);
+        assert_eq!(items[0], serde_json::json!({"인덱스": "1000", "수량": 2}));
+        assert_eq!(items[1], serde_json::json!({"인덱스": "1002", "수량": 1}));
+        assert_eq!(body.object.inv_stack.get("1000"), Some(&2));
+        assert_eq!(body.object.inv_stack.get("1002"), Some(&1));
         let _ = std::fs::remove_file(path);
+    }
+
+    #[test]
+    fn duplicate_single_item_records_load_as_exactly_one_unique_object() {
+        let root = serde_json::json!({
+            "아이템": [
+                {"인덱스": "64", "수량": 3},
+                {"인덱스": "64"}
+            ],
+            "소지품_수량": {"64": 2}
+        });
+        let mut body = Body::new();
+        load_python_inventory(&mut body, root.as_object().unwrap());
+        load_legacy_stacks(&mut body, root.as_object().unwrap());
+
+        assert_eq!(inventory_indexes(&body), ["64"]);
+        assert!(!body.object.inv_stack.contains_key("64"));
     }
 
     #[test]

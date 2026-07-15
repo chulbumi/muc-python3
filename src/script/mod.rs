@@ -16,8 +16,11 @@ pub(crate) use cast::skill_up_python;
 pub(crate) mod combat_commands;
 mod drop_item;
 mod fixture;
-mod inventory_compat;
+pub(crate) use fixture::{try_fixture_event, visible_fixture_short_lines};
+pub(crate) mod inventory_compat;
 pub(crate) use inventory_compat::mark_item_field_as_json_array;
+mod item_event;
+pub(crate) use item_event::try_item_event;
 mod movement;
 mod party;
 mod requests;
@@ -141,7 +144,7 @@ use crate::world::guild::{
 };
 use crate::world::rank::{rank_clear, rank_get_all, rank_get_num, rank_read, rank_write};
 use crate::world::{
-    format_exits_long, format_room_header, get_world_state, MobInstance, PlayerPosition,
+    format_exits_long, format_room_header, get_world_state, Fixture, MobInstance, PlayerPosition,
     RawMobData, RoomObjectRef, WorldState,
 };
 use std::time::{Duration, Instant};
@@ -2409,24 +2412,52 @@ fn python_set_admin_target(body: &mut Body, target: &str, key: &str, raw: &str) 
     }
 
     // Python falls back from env.findObjName() to the player's inventory.
-    for object in &body.object.objs {
-        let Ok(mut object) = object.lock() else {
-            continue;
-        };
-        if object.getName() != target
-            && !object
+    let inventory_object = body.object.objs.iter().find_map(|object| {
+        let item = object.lock().ok()?;
+        (item.getName() == target
+            || item
                 .getString("반응이름")
                 .split("\r\n")
-                .any(|alias| alias == target)
-        {
-            continue;
-        }
+                .any(|alias| alias == target))
+        .then(|| object.clone())
+    });
+    if let Some(object_arc) = inventory_object {
+        let Ok(mut object) = object_arc.lock() else {
+            return "missing".into();
+        };
         let value = match python_coerce_attribute(object.attr.get(key), raw) {
             Ok(value) => value,
             Err(()) => return "invalid".into(),
         };
         object.set(key, value);
+        drop(object);
+        restore_pristine_inventory_object(body, &object_arc);
         return "ok".into();
+    }
+    if let Some(stack_key) = inventory_compat::find_counted_item_key(&body.object.inv_stack, target)
+    {
+        if body.object.inv_stack.get(&stack_key).copied().unwrap_or(0) > 0 {
+            let Some(object_arc) =
+                inventory_compat::materialize_one(&mut body.object, &stack_key, true)
+            else {
+                return "missing".into();
+            };
+            let Ok(mut object) = object_arc.lock() else {
+                return "missing".into();
+            };
+            let value = match python_coerce_attribute(object.attr.get(key), raw) {
+                Ok(value) => value,
+                Err(()) => {
+                    drop(object);
+                    restore_pristine_inventory_object(body, &object_arc);
+                    return "invalid".into();
+                }
+            };
+            object.set(key, value);
+            drop(object);
+            restore_pristine_inventory_object(body, &object_arc);
+            return "ok".into();
+        }
     }
     "missing".into()
 }
@@ -2449,46 +2480,10 @@ fn destroy_inventory_for_command(
 ) -> rhai::Map {
     let order = order.max(1) as usize;
     let count = count.clamp(1, 100) as usize;
-    if break_mode {
-        // Python has only individual Item objects. Expand transient Rust
-        // stacks so 부셔 can apply 출력안함/부수지못함/inUse and order rules
-        // to every item exactly like the Python inventory loop.
-        let _ = inventory_compat::materialize_stacks_for_save(body);
-    }
-    if !break_mode && order == 1 {
-        if let Some(key) = find_item_key_by_name(wanted) {
-            if is_stackable(&key) {
-                let have = *body.object.inv_stack.get(&key).unwrap_or(&0);
-                let removed = (count as i64).clamp(0, have);
-                if removed > 0 {
-                    let (name, post) = object_from_item_json(&key)
-                        .and_then(|(item, _)| {
-                            item.lock().ok().map(|item| {
-                                let name = item.getName();
-                                let post = item_han_obj(&item);
-                                (name, post)
-                            })
-                        })
-                        .unwrap_or_else(|| (wanted.to_string(), wanted.to_string()));
-                    if let Some(value) = body.object.inv_stack.get_mut(&key) {
-                        *value -= removed;
-                        if *value <= 0 {
-                            body.object.inv_stack.remove(&key);
-                        }
-                    }
-                    let _ = save_body_to_json(body, &format!("data/user/{}.json", body.get_name()));
-                    let mut result = destroy_item_result("ok", name, removed);
-                    result.insert("post".into(), Dynamic::from(post));
-                    return result;
-                }
-            }
-        }
-    }
-
     let mut matched = 0usize;
     let mut selected: Vec<Arc<Mutex<Object>>> = Vec::new();
     let mut last_name = String::new();
-    let mut last_ansi = String::new();
+    let mut last_post = String::new();
     for item in &body.object.objs {
         let Ok(object) = item.lock() else { continue };
         let aliases = reaction_names(&object.getString("반응이름"));
@@ -2510,13 +2505,65 @@ fn destroy_inventory_for_command(
             continue;
         }
         last_name = object.getName();
-        last_ansi = object.getString("안시");
+        last_post = item_han_obj(&object);
         selected.push(item.clone());
         if selected.len() >= count {
             break;
         }
     }
-    if selected.is_empty() {
+
+    // Runtime counts follow the individual objects. A numbered occurrence
+    // beyond the objects therefore starts inside the counted groups; a bulk
+    // command beginning in the object list may continue into those groups.
+    let mut stack_removals = Vec::<(String, i64)>::new();
+    let mut remaining_count = count.saturating_sub(selected.len()) as i64;
+    let mut stack_order = if order > matched {
+        order.saturating_sub(matched) as i64
+    } else {
+        1
+    };
+    if remaining_count > 0 {
+        for key in inventory_compat::counted_item_keys(&body.object.inv_stack, wanted) {
+            let have = body.object.inv_stack.get(&key).copied().unwrap_or(0).max(0);
+            if have == 0 {
+                continue;
+            }
+            let Some((template, _)) = object_from_item_json(&key) else {
+                continue;
+            };
+            let Ok(template) = template.lock() else {
+                continue;
+            };
+            if break_mode && template.checkAttr("아이템속성", "출력안함") {
+                continue;
+            }
+            if stack_order > have {
+                stack_order -= have;
+                continue;
+            }
+            if break_mode && template.checkAttr("아이템속성", "부수지못함") {
+                if selected.is_empty() && stack_removals.is_empty() {
+                    return destroy_item_result("unbreakable", String::new(), 0);
+                }
+                stack_order = 1;
+                continue;
+            }
+            let available = have.saturating_sub(stack_order - 1);
+            let take = remaining_count.min(available);
+            if take > 0 {
+                last_name = template.getName();
+                last_post = item_han_obj(&template);
+                stack_removals.push((key, take));
+                remaining_count -= take;
+            }
+            stack_order = 1;
+            if remaining_count == 0 {
+                break;
+            }
+        }
+    }
+
+    if selected.is_empty() && stack_removals.is_empty() {
         return destroy_item_result("missing", String::new(), 0);
     }
     for item in &selected {
@@ -2530,18 +2577,15 @@ fn destroy_inventory_for_command(
         }
         body.object.remove(item);
     }
-    let removed = selected.len() as i64;
+    let mut removed = selected.len() as i64;
+    for (key, count) in stack_removals {
+        if inventory_compat::remove_pristine_count(&mut body.object, &key, count) {
+            removed += count;
+        }
+    }
     let _ = save_body_to_json(body, &format!("data/user/{}.json", body.get_name()));
     let mut result = destroy_item_result("ok", last_name.clone(), removed);
-    let name_a = if last_ansi.is_empty() {
-        format!("\x1b[0;36m{last_name}\x1b[37m")
-    } else {
-        format!("{last_ansi}{last_name}\x1b[0;37m")
-    };
-    result.insert(
-        "post".into(),
-        Dynamic::from(format!("{name_a}{}", han_eul(&last_name))),
-    );
+    result.insert("post".into(), Dynamic::from(last_post));
     result
 }
 
@@ -3251,13 +3295,13 @@ fn save_body_to_json_with_timestamp_mode(
         uso.insert(k.clone(), value_to_serde_json(v));
     }
 
-    // Python owns one ordered list of individual Item objects. Convert any
-    // legacy Rust-only stack before serializing; unknown keys fail preflight
-    // rather than disappearing from the save file.
+    // Pristine template-equal items remain counted at runtime and are saved by
+    // index and quantity. Stateful items stay as individual objects and save
+    // only the attributes that differ from their template.
     if inventory_compat::materialize_stacks_for_save(body).is_err() {
         return false;
     }
-    let items = inventory_compat::python_inventory_records(body, save_time);
+    let items = inventory_compat::compact_inventory_records(body);
 
     // Python player.py reads the historical `최고체력` key while newer Rust
     // state commonly uses `최대체력`; emit both aliases so either runtime can
@@ -3327,7 +3371,8 @@ fn save_body_to_json_with_timestamp_mode(
     std::fs::write(path, serde_json::to_string_pretty(&j).unwrap_or_default()).is_ok()
 }
 
-/// data/user/{이름}.json 에서 Body 복원. attr, objs, inv_stack.
+/// data/user/{이름}.json 에서 Body 복원. 원본과 같은 압축 아이템은 런타임에서도
+/// 인덱스별 수량으로 유지하고, 상태가 다른 아이템만 개별 객체로 복원한다.
 /// 파일 없거나 실패 시 false. 성공 시 true.
 pub fn load_body_from_json(body: &mut Body, path: &str) -> bool {
     let content = match std::fs::read_to_string(path) {
@@ -3653,8 +3698,8 @@ fn get_item_desc1(key: &str) -> String {
         .to_string()
 }
 
-/// 아이템 인덱스(스택)가 누적 가능한지. 무기/방어구·개별인스턴스 아니면 true.
-fn is_stackable(key: &str) -> bool {
+/// 아이템 인덱스가 동일 원본 수량으로 누적 가능한지.
+pub(crate) fn is_stackable(key: &str) -> bool {
     let path = format!("data/item/{}.json", key);
     let content = match std::fs::read_to_string(&path) {
         Ok(c) => c,
@@ -3668,55 +3713,78 @@ fn is_stackable(key: &str) -> bool {
         Some(o) => o,
         None => return false,
     };
-    let kind = info.get("종류").and_then(|v| v.as_str()).unwrap_or("기타");
-    if kind == "무기" || kind == "방어구" {
+    // 호위는 생성 직후부터 각자의 체력과 전투 상태를 가지므로 같은
+    // 템플릿이라도 독립 인스턴스다.
+    if info.get("종류").and_then(|value| value.as_str()) == Some("호위") {
         return false;
     }
     let attrs = info.get("아이템속성");
     if let Some(serde_json::Value::Array(arr)) = attrs {
         for v in arr {
-            if v.as_str() == Some("개별인스턴스") {
+            if matches!(v.as_str(), Some("개별인스턴스" | "단일아이템")) {
                 return false;
             }
         }
     } else if let Some(serde_json::Value::String(s)) = attrs {
-        if s.contains("개별인스턴스") {
+        if s.contains("개별인스턴스") || s.contains("단일아이템") {
             return false;
         }
     }
     true
 }
 
-/// 이름 또는 반응이름으로 아이템 인덱스(키) 찾기. data/item/*.json 검색.
-fn find_item_key_by_name(name: &str) -> Option<String> {
-    if name.is_empty() {
-        return None;
+/// Return an inventory object for an operation that mutates one item. Pristine
+/// counted items are split only when no existing individual object matches.
+fn inventory_object_for_mutation(
+    body: &mut Body,
+    name: &str,
+    order: usize,
+) -> Option<Arc<Mutex<Object>>> {
+    if let Some(item) = body.object.findObjInven(name, order.max(1)) {
+        return Some(item);
     }
-    let dir = std::path::Path::new("data/item");
-    let read_dir = match std::fs::read_dir(dir) {
-        Ok(d) => d,
-        Err(_) => return None,
-    };
-    for e in read_dir.flatten() {
-        let p = e.path();
-        if p.extension().is_none_or(|e| e != "json") {
-            continue;
-        }
-        let key = p
-            .file_stem()
-            .and_then(|s| s.to_str())
-            .unwrap_or("")
-            .to_string();
-        if let Some((iname, rn, _, _)) = get_item_info(&key) {
-            if iname == name {
-                return Some(key);
-            }
-            if !rn.is_empty() && rn.split_whitespace().any(|s| s == name) {
-                return Some(key);
-            }
-        }
+    let individual = body
+        .object
+        .objs
+        .iter()
+        .filter(|item| {
+            item.lock().is_ok_and(|item| {
+                !item.getBool("inUse")
+                    && (item.getName() == name || item.getString("반응이름").contains(name))
+            })
+        })
+        .count();
+    let remaining = order.max(1).saturating_sub(individual) as i64;
+    let (key, _) = inventory_compat::counted_item_at(&body.object.inv_stack, name, remaining)?;
+    inventory_compat::materialize_one(&mut body.object, &key, true)
+}
+
+fn restore_pristine_inventory_object(body: &mut Body, item: &Arc<Mutex<Object>>) {
+    if inventory_compat::absorb_pristine_object(&mut body.object, item) {
+        body.object.remove(item);
     }
-    None
+}
+
+fn inventory_exact_name_count(body: &Body, name: &str) -> i64 {
+    let individual = body
+        .object
+        .objs
+        .iter()
+        .filter(|item| item.lock().is_ok_and(|item| item.getName() == name))
+        .count() as i64;
+    let counted = body
+        .object
+        .inv_stack
+        .iter()
+        .filter_map(|(key, count)| {
+            object_from_item_json(key).and_then(|(item, _)| {
+                item.lock()
+                    .ok()
+                    .and_then(|item| (item.getName() == name).then_some(*count))
+            })
+        })
+        .sum::<i64>();
+    individual.saturating_add(counted)
 }
 
 fn item_catalog() -> rhai::Array {
@@ -4613,6 +4681,7 @@ pub fn build_room_lines(
         };
         let room_name_formatted = format_room_header(&room_ref.display_name);
         let exits_str = format_exits_long(&room_ref);
+        let fixture_lines = visible_fixture_short_lines(&world, &pos.zone, &pos.room);
         // Python viewMapData traverses Room.objs including ACT_DEATH corpses;
         // get_mobs_in_room intentionally filters to living targets only.
         let mut mobs = world.mob_cache.get_all_mobs_in_room(&pos.zone, &pos.room);
@@ -4709,6 +4778,10 @@ pub fn build_room_lines(
         out.push_str("\r\n\r\n");
         out.push_str(&room_ref.description.join("\r\n"));
         out.push_str("\r\n");
+        if !fixture_lines.is_empty() {
+            out.push_str(&fixture_lines.join("\r\n"));
+            out.push_str("\r\n");
+        }
         out.push_str(&exits_str);
         if !installed_boxes.is_empty() {
             out.push_str("\r\n☞ ");
@@ -5159,6 +5232,7 @@ fn look_at_target(
     viewer_name: &str,
     target_line: &str,
     other_player_descs: &HashMap<String, String>,
+    selected_fixture: &mut Option<Fixture>,
 ) -> (Vec<String>, Option<(String, String)>) {
     let not_found = (
         vec!["☞ 당신의 안광으로는 그런것을 볼수 없다네".to_string()],
@@ -5182,6 +5256,25 @@ fn look_at_target(
     if !name.is_empty() {
         if let Some(obj) = body.object.findObjInven(&name, order) {
             return (item_view(&obj), None);
+        }
+        let individual = body
+            .object
+            .objs
+            .iter()
+            .filter(|item| {
+                item.lock().is_ok_and(|item| {
+                    !item.getBool("inUse")
+                        && (item.getName() == name || item.getString("반응이름").contains(&name))
+                })
+            })
+            .count();
+        let remaining = order.saturating_sub(individual) as i64;
+        if let Some((key, _)) =
+            inventory_compat::counted_item_at(&body.object.inv_stack, &name, remaining)
+        {
+            if let Some((item, _)) = object_from_item_json(&key) {
+                return (item_view(&item), None);
+            }
         }
     }
 
@@ -5381,7 +5474,13 @@ fn look_at_target(
                         .get_fixture(id)
                         .map(|fixture| {
                             let (exact, prefixes) = fixture.match_counts(&name);
-                            if exact { 2 } else if prefixes > 0 { 1 } else { 0 }
+                            if exact {
+                                1
+                            } else if prefixes > 0 {
+                                2
+                            } else {
+                                0
+                            }
                         })
                         .unwrap_or(0);
                     if python_room_match_selected(
@@ -5390,7 +5489,8 @@ fn look_at_target(
                         &mut ordered_prefix,
                         order,
                     ) {
-                        return not_found;
+                        *selected_fixture = world.get_fixture(id).cloned();
+                        return (Vec::new(), None);
                     }
                 }
             }
@@ -6154,10 +6254,9 @@ pub fn create_engine_with_body_and_output(
         move |_ob: &mut rhai::Map, key: &str| -> String {
             let body = unsafe { &mut *body_ptr };
             if let Some((arc, name)) = object_from_item_json(key) {
-                // Python Object.insert() prepends newly created items.  This
-                // order is observable by numbered inventory lookup and by
-                // subsequent commands such as 줘/버려.
-                body.object.objs.insert(0, arc);
+                if !inventory_compat::store_acquired_object(&mut body.object, arc, true) {
+                    return String::new();
+                }
                 let path = format!("data/user/{}.json", body.get_name());
                 let _ = save_body_to_json(body, &path);
                 name
@@ -6182,7 +6281,9 @@ pub fn create_engine_with_body_and_output(
                 None => return 0,
             };
             // 스택 아이템: inv_stack에서 빼서 room_inv_stack으로
-            if let Some(ref key) = find_item_key_by_name(name) {
+            if let Some(ref key) =
+                inventory_compat::find_counted_item_key(&body.object.inv_stack, name)
+            {
                 if is_stackable(key) {
                     // A compact entry without its authoritative item JSON
                     // cannot be reconstructed as Python Item objects. Keep it
@@ -6285,9 +6386,9 @@ pub fn create_engine_with_body_and_output(
             };
             let mut taken = 0usize;
             // 스택: room_inv_stack에서 가져와 body.inv_stack에
-            if let Some(ref key) = find_item_key_by_name(name) {
-                if is_stackable(key) {
-                    let room_stack = w.get_room_objs_stack_mut(&zone, &room);
+            {
+                let room_stack = w.get_room_objs_stack_mut(&zone, &room);
+                if let Some(ref key) = inventory_compat::find_counted_item_key(room_stack, name) {
                     let have = *room_stack.get(key).unwrap_or(&0);
                     let take_cnt = (count as i64).min(have).max(0) as usize;
                     if take_cnt > 0 {
@@ -6317,9 +6418,12 @@ pub fn create_engine_with_body_and_output(
                 };
                 if matches {
                     let arc = room_list.remove(i);
-                    // Python 가져.py calls ob.insert(obj): every acquired
-                    // object is prepended, preserving identity.
-                    body.object.objs.insert(0, arc.clone());
+                    if !inventory_compat::store_acquired_object(&mut body.object, arc.clone(), true)
+                    {
+                        room_list.insert(i, arc);
+                        i += 1;
+                        continue;
+                    }
                     removed_floor_items.push(arc);
                     taken += 1;
                 } else {
@@ -6395,6 +6499,12 @@ pub fn create_engine_with_body_and_output(
                         index += 1;
                         continue;
                     }
+                    if floor[index].lock().ok().is_some_and(|item| {
+                        !inventory_compat::can_accept_object(&body.object, &item)
+                    }) {
+                        index += 1;
+                        continue;
+                    }
                     if body.get_item_weight().saturating_add(weight) > max_weight {
                         blocked = "too_heavy";
                         break;
@@ -6404,7 +6514,12 @@ pub fn create_engine_with_body_and_output(
                         break;
                     }
                     let item = floor.remove(index);
-                    body.object.objs.insert(0, item.clone());
+                    let accepted = inventory_compat::store_acquired_object(
+                        &mut body.object,
+                        item.clone(),
+                        true,
+                    );
+                    debug_assert!(accepted);
                     if !oneitem_index.is_empty()
                         && item
                             .lock()
@@ -6488,6 +6603,14 @@ pub fn create_engine_with_body_and_output(
             if body.get_item_count() > max_items {
                 break;
             }
+            if floor[index]
+                .lock()
+                .ok()
+                .is_some_and(|item| !inventory_compat::can_accept_object(&body.object, &item))
+            {
+                index += 1;
+                continue;
+            }
             let item = floor.remove(index);
             if let Ok(item_value) = item.lock() {
                 if item_value.checkAttr("아이템속성", "단일아이템") {
@@ -6497,7 +6620,9 @@ pub fn create_engine_with_body_and_output(
                     }
                 }
             }
-            body.object.objs.insert(0, item.clone());
+            let accepted =
+                inventory_compat::store_acquired_object(&mut body.object, item.clone(), true);
+            debug_assert!(accepted);
             removed.push(item);
             if let Some(group) = groups.iter_mut().find(|group| group.0 == name) {
                 group.2 += 1;
@@ -6530,61 +6655,10 @@ pub fn create_engine_with_body_and_output(
         "item_destroy",
         move |_ob: &mut rhai::Map, name: &str, order: i64, count: i64| -> i64 {
             let body = unsafe { &mut *body_ptr };
-            let order = order.max(1) as usize;
-            let count = count.clamp(1, 100) as usize;
-            // 스택: inv_stack에서 제거
-            if order == 1 {
-                if let Some(ref key) = find_item_key_by_name(name) {
-                    if is_stackable(key) {
-                        let have = *body.object.inv_stack.get(key).unwrap_or(&0);
-                        let destroy_cnt = (count as i64).clamp(0, have);
-                        if destroy_cnt > 0 {
-                            let should_remove = {
-                                let r = body.object.inv_stack.get_mut(key).unwrap();
-                                *r -= destroy_cnt;
-                                *r <= 0
-                            };
-                            if should_remove {
-                                body.object.inv_stack.remove(key);
-                            }
-                            let path = format!("data/user/{}.json", body.get_name());
-                            let _ = save_body_to_json(body, &path);
-                            return destroy_cnt;
-                        }
-                    }
-                }
-            }
-            // 비스택: objs에서 제거
-            let mut n = 0usize;
-            let mut to_remove: Vec<Arc<Mutex<Object>>> = Vec::new();
-            for obj in &body.object.objs {
-                if let Ok(o) = obj.lock() {
-                    let ok = o.getName() == name
-                        || (!o.getString("반응이름").is_empty()
-                            && o.getString("반응이름").contains(name));
-                    if !ok || o.getBool("inUse") {
-                        continue;
-                    }
-                    n += 1;
-                    if n < order {
-                        continue;
-                    }
-                    drop(o);
-                    to_remove.push(obj.clone());
-                    if to_remove.len() >= count {
-                        break;
-                    }
-                }
-            }
-            let len = to_remove.len();
-            for arc in to_remove {
-                body.object.remove(&arc);
-            }
-            if len > 0 {
-                let path = format!("data/user/{}.json", body.get_name());
-                let _ = save_body_to_json(body, &path);
-            }
-            len as i64
+            destroy_inventory_for_command(body, name, order, count, false)
+                .get("count")
+                .and_then(|value| value.as_int().ok())
+                .unwrap_or(0)
         },
     );
     let body_ptr_destroy_detail = body_ptr;
@@ -6697,9 +6771,19 @@ pub fn create_engine_with_body_and_output(
                 }
                 body.object.remove(&arc);
             }
-            for _ in 0..shards {
-                if let Some((arc, _)) = object_from_item_json("강철조각") {
-                    body.object.append(arc);
+            if shards > 0 {
+                if is_stackable("강철조각") {
+                    *body
+                        .object
+                        .inv_stack
+                        .entry("강철조각".to_string())
+                        .or_insert(0) += shards;
+                } else {
+                    for _ in 0..shards {
+                        if let Some((arc, _)) = object_from_item_json("강철조각") {
+                            body.object.append(arc);
+                        }
+                    }
                 }
             }
             if shards > 0 {
@@ -6896,6 +6980,32 @@ pub fn create_engine_with_body_and_output(
                     result.push(Dynamic::from(saved));
                 }
             }
+            let mut stack_keys = body.object.inv_stack.keys().cloned().collect::<Vec<_>>();
+            stack_keys.sort();
+            for key in stack_keys {
+                let count = body.object.inv_stack.get(&key).copied().unwrap_or(0);
+                let Some((item, _)) = object_from_item_json(&key) else {
+                    continue;
+                };
+                let Ok(item) = item.lock() else { continue };
+                let kind = item.getString("종류");
+                if (kind != "방어구" && kind != "무기")
+                    || !reaction_names(&item.getString("반응이름"))
+                        .iter()
+                        .any(|name| name == set_name)
+                {
+                    continue;
+                }
+                let name = item.getName();
+                for _ in 0..count {
+                    let order = orders.entry(name.clone()).or_insert(0);
+                    *order += 1;
+                    let mut saved = rhai::Map::new();
+                    saved.insert("name".into(), Dynamic::from(name.clone()));
+                    saved.insert("order".into(), Dynamic::from(*order));
+                    result.push(Dynamic::from(saved));
+                }
+            }
             result
         },
     );
@@ -6906,7 +7016,7 @@ pub fn create_engine_with_body_and_output(
         move |_ob: &mut rhai::Map, item_selector: &str, option_name: &str, value: i64| -> String {
             let body = unsafe { &mut *body_ptr_set_option };
             let (name, order) = crate::command::CommandParser::parse_name_order(item_selector);
-            let Some(arc) = body.object.findObjInven(&name, order) else {
+            let Some(arc) = inventory_object_for_mutation(body, &name, order) else {
                 return "no_item".into();
             };
             if let Ok(mut item) = arc.lock() {
@@ -6947,13 +7057,17 @@ pub fn create_engine_with_body_and_output(
         move |_ob: &mut rhai::Map, item_selector: &str| -> String {
             let body = unsafe { &mut *body_ptr_clear_magic };
             let (name, order) = crate::command::CommandParser::parse_name_order(item_selector);
-            let Some(arc) = body.object.findObjInven(&name, order) else {
+            let Some(arc) = inventory_object_for_mutation(body, &name, order) else {
                 return "no_item".into();
             };
             let Ok(mut item) = arc.lock() else {
                 return "no_item".into();
             };
             if !item.attr.contains_key("옵션") {
+                drop(item);
+                if inventory_compat::absorb_pristine_object(&mut body.object, &arc) {
+                    body.object.remove(&arc);
+                }
                 return "no_option".into();
             }
             let option = item.getString("옵션");
@@ -6977,7 +7091,7 @@ pub fn create_engine_with_body_and_output(
                 return "no_item".into();
             };
             let (name, order) = crate::command::CommandParser::parse_name_order(first);
-            let Some(arc) = body.object.findObjInven(&name, order) else {
+            let Some(arc) = inventory_object_for_mutation(body, &name, order) else {
                 return "no_item".into();
             };
             let Ok(mut item) = arc.lock() else {
@@ -7731,13 +7845,37 @@ pub fn create_engine_with_body_and_output(
                         .objs
                         .iter()
                         .filter(|item| item.lock().is_ok_and(|item| herb(&item)))
-                        .count() as i64;
+                        .count() as i64
+                        + body
+                            .object
+                            .inv_stack
+                            .iter()
+                            .filter_map(|(key, count)| {
+                                object_from_item_json(key).and_then(|(item, _)| {
+                                    item.lock()
+                                        .ok()
+                                        .and_then(|item| herb(&item).then_some(*count))
+                                })
+                            })
+                            .sum::<i64>();
                     let named_count = |wanted: &str| {
                         body.object
                             .objs
                             .iter()
                             .filter(|item| item.lock().is_ok_and(|item| item.getName() == wanted))
                             .count() as i64
+                            + body
+                                .object
+                                .inv_stack
+                                .iter()
+                                .filter_map(|(key, count)| {
+                                    object_from_item_json(key).and_then(|(item, _)| {
+                                        item.lock().ok().and_then(|item| {
+                                            (item.getName() == wanted).then_some(*count)
+                                        })
+                                    })
+                                })
+                                .sum::<i64>()
                     };
                     let mut consume_name = String::new();
                     let mut consume_count = 0i64;
@@ -7789,6 +7927,37 @@ pub fn create_engine_with_body_and_output(
                     }
                     for item in materials {
                         body.object.remove(&item);
+                    }
+                    let mut remaining = consume_count.saturating_sub(removed);
+                    if remaining > 0 {
+                        let mut stack_keys =
+                            body.object.inv_stack.keys().cloned().collect::<Vec<_>>();
+                        stack_keys.sort();
+                        for key in stack_keys {
+                            if remaining == 0 {
+                                break;
+                            }
+                            let matches = object_from_item_json(&key).is_some_and(|(item, _)| {
+                                item.lock().is_ok_and(|item| {
+                                    if consume_name == "약초" {
+                                        herb(&item)
+                                    } else {
+                                        item.getName() == consume_name
+                                    }
+                                })
+                            });
+                            if !matches {
+                                continue;
+                            }
+                            let have = body.object.inv_stack.get(&key).copied().unwrap_or(0);
+                            let take = remaining.min(have);
+                            let _ = inventory_compat::remove_pristine_count(
+                                &mut body.object,
+                                &key,
+                                take,
+                            );
+                            remaining -= take;
+                        }
                     }
                     body.object.objs.insert(0, guard_template);
                     let path = format!("data/user/{}.json", body.get_name());
@@ -7867,77 +8036,15 @@ pub fn create_engine_with_body_and_output(
             let order = order.max(1) as usize;
             let count = count.clamp(1, 100) as usize;
             let percent = percent.max(0);
-            // 스택: order==1일 때 inv_stack에서 판매
-            if order == 1 {
-                if let Some(ref key) = find_item_key_by_name(name) {
-                    if is_stackable(key) {
-                        let have = *body.object.inv_stack.get(key).unwrap_or(&0);
-                        let sell_cnt = (count as i64).clamp(0, have);
-                        if sell_cnt > 0 {
-                            if let Some((iname, _, base_price, _)) = get_item_info(key) {
-                                let Some((template, _)) = object_from_item_json(key) else {
-                                    return vec![
-                                        Dynamic::from(0_i64),
-                                        Dynamic::from(0_i64),
-                                        Dynamic::from(String::new()),
-                                        Dynamic::from("no_item"),
-                                        Dynamic::from(String::new()),
-                                    ];
-                                };
-                                let template = template.lock().unwrap();
-                                if template.checkAttr("아이템속성", "출력안함") {
-                                    return vec![
-                                        Dynamic::from(0_i64),
-                                        Dynamic::from(0_i64),
-                                        Dynamic::from(String::new()),
-                                        Dynamic::from("no_item"),
-                                        Dynamic::from(String::new()),
-                                    ];
-                                }
-                                if template.checkAttr("아이템속성", "팔지못함") {
-                                    return vec![
-                                        Dynamic::from(0_i64),
-                                        Dynamic::from(0_i64),
-                                        Dynamic::from(String::new()),
-                                        Dynamic::from("cant_sell"),
-                                        Dynamic::from(String::new()),
-                                    ];
-                                }
-                                let ansi = template.getString("안시");
-                                let post_name = if ansi.is_empty() {
-                                    format!("\x1b[0;36m{}\x1b[37m", template.getName())
-                                } else {
-                                    format!("{}{}\x1b[0;37m", ansi, template.getName())
-                                };
-                                let mut unit = (base_price * percent) / 100;
-                                if let Some(options) = template.get_option() {
-                                    unit = (unit as f64 * (options.len() as f64 * 1.3)) as i64;
-                                }
-                                drop(template);
-                                let total = unit * sell_cnt;
-                                let should_remove = {
-                                    let r = body.object.inv_stack.get_mut(key).unwrap();
-                                    *r -= sell_cnt;
-                                    *r <= 0
-                                };
-                                if should_remove {
-                                    body.object.inv_stack.remove(key);
-                                }
-                                body.set("은전", body.get_int("은전") + total);
-                                let path = format!("data/user/{}.json", body.get_name());
-                                let _ = save_body_to_json(body, &path);
-                                return vec![
-                                    Dynamic::from(sell_cnt),
-                                    Dynamic::from(total),
-                                    Dynamic::from(iname),
-                                    Dynamic::from(""),
-                                    Dynamic::from(post_name),
-                                ];
-                            }
-                        }
-                    }
-                }
-            }
+            let error = |kind: &str| {
+                vec![
+                    Dynamic::from(0_i64),
+                    Dynamic::from(0_i64),
+                    Dynamic::from(String::new()),
+                    Dynamic::from(kind.to_string()),
+                    Dynamic::from(String::new()),
+                ]
+            };
             let matches = |object: &Object, wanted: &str| {
                 object.getName() == wanted || object.getString("반응이름").contains(wanted)
             };
@@ -7951,45 +8058,25 @@ pub fn create_engine_with_body_and_output(
                 })
                 .cloned()
                 .collect();
-            let Some(first) = matching.get(order - 1).cloned() else {
-                return vec![
-                    Dynamic::from(0_i64),
-                    Dynamic::from(0_i64),
-                    Dynamic::from(String::new()),
-                    Dynamic::from("no_item"),
-                    Dynamic::from(String::new()),
-                ];
-            };
-            {
-                let first = first.lock().unwrap();
-                if first.getBool("inUse") || first.checkAttr("아이템속성", "출력안함") {
-                    return vec![
-                        Dynamic::from(0_i64),
-                        Dynamic::from(0_i64),
-                        Dynamic::from(String::new()),
-                        Dynamic::from("no_item"),
-                        Dynamic::from(String::new()),
-                    ];
-                }
-                if first.checkAttr("아이템속성", "팔지못함") {
-                    return vec![
-                        Dynamic::from(0_i64),
-                        Dynamic::from(0_i64),
-                        Dynamic::from(String::new()),
-                        Dynamic::from("cant_sell"),
-                        Dynamic::from(String::new()),
-                    ];
-                }
-            }
-            let mut to_remove: Vec<Arc<Mutex<Object>>> = vec![first];
+            let requested = if order == 1 { count } else { 1 };
+            let mut to_remove: Vec<Arc<Mutex<Object>>> = Vec::new();
+            let mut stack_removals = Vec::<(String, i64)>::new();
             let mut total = 0i64;
             let mut display_name = String::new();
             let mut post_name = String::new();
-            let mut processed = 0usize;
-            while processed < to_remove.len() && processed < count {
-                let current = to_remove[processed].clone();
-                {
+            let mut remaining = requested;
+
+            if order <= matching.len() {
+                for current in matching.iter().skip(order - 1).take(remaining) {
                     let o = current.lock().unwrap();
+                    if to_remove.is_empty() {
+                        if o.checkAttr("아이템속성", "출력안함") {
+                            return error("no_item");
+                        }
+                        if o.checkAttr("아이템속성", "팔지못함") {
+                            return error("cant_sell");
+                        }
+                    }
                     let mut price = (o.getInt("판매가격") * percent) / 100;
                     if let Some(options) = o.get_option() {
                         price = (price as f64 * (options.len() as f64 * 1.3)) as i64;
@@ -8004,21 +8091,64 @@ pub fn create_engine_with_body_and_output(
                             format!("{}{}\x1b[0;37m", ansi, display_name)
                         };
                     }
+                    drop(o);
+                    to_remove.push(current.clone());
+                    remaining -= 1;
                 }
-                processed += 1;
-                if order != 1 || processed >= count {
-                    break;
+            }
+
+            let mut stack_order = if order > matching.len() {
+                order.saturating_sub(matching.len()) as i64
+            } else {
+                1
+            };
+            if remaining > 0 {
+                for key in inventory_compat::counted_item_keys(&body.object.inv_stack, name) {
+                    let have = body.object.inv_stack.get(&key).copied().unwrap_or(0).max(0);
+                    if stack_order > have {
+                        stack_order -= have;
+                        continue;
+                    }
+                    let Some((template, _)) = object_from_item_json(&key) else {
+                        continue;
+                    };
+                    let template = template.lock().unwrap();
+                    if to_remove.is_empty() && stack_removals.is_empty() {
+                        if template.checkAttr("아이템속성", "출력안함") {
+                            return error("no_item");
+                        }
+                        if template.checkAttr("아이템속성", "팔지못함") {
+                            return error("cant_sell");
+                        }
+                    }
+                    let available = have.saturating_sub(stack_order - 1);
+                    let take = (remaining as i64).min(available);
+                    if take > 0 {
+                        let mut price = (template.getInt("판매가격") * percent) / 100;
+                        if let Some(options) = template.get_option() {
+                            price = (price as f64 * (options.len() as f64 * 1.3)) as i64;
+                        }
+                        total += price.saturating_mul(take);
+                        if display_name.is_empty() {
+                            display_name = template.getName();
+                            let ansi = template.getString("안시");
+                            post_name = if ansi.is_empty() {
+                                format!("\x1b[0;36m{}\x1b[37m", display_name)
+                            } else {
+                                format!("{}{}\x1b[0;37m", ansi, display_name)
+                            };
+                        }
+                        stack_removals.push((key, take));
+                        remaining -= take as usize;
+                    }
+                    stack_order = 1;
+                    if remaining == 0 {
+                        break;
+                    }
                 }
-                let next = body.object.objs.iter().find(|candidate| {
-                    !to_remove
-                        .iter()
-                        .any(|selected| Arc::ptr_eq(selected, candidate))
-                        && candidate
-                            .lock()
-                            .is_ok_and(|item| !item.getBool("inUse") && matches(&item, name))
-                });
-                let Some(next) = next else { break };
-                to_remove.push(next.clone());
+            }
+            if to_remove.is_empty() && stack_removals.is_empty() {
+                return error("no_item");
             }
             for arc in &to_remove {
                 if let Ok(item) = arc.lock() {
@@ -8031,11 +8161,17 @@ pub fn create_engine_with_body_and_output(
                 }
                 body.object.remove(arc);
             }
+            let mut sold = to_remove.len() as i64;
+            for (key, count) in stack_removals {
+                if inventory_compat::remove_pristine_count(&mut body.object, &key, count) {
+                    sold += count;
+                }
+            }
             body.set("은전", body.get_int("은전") + total);
             let path = format!("data/user/{}.json", body.get_name());
             let _ = save_body_to_json(body, &path);
             vec![
-                Dynamic::from(to_remove.len() as i64),
+                Dynamic::from(sold),
                 Dynamic::from(total),
                 Dynamic::from(display_name),
                 Dynamic::from(String::new()),
@@ -8050,10 +8186,6 @@ pub fn create_engine_with_body_and_output(
         move |_ob: &mut rhai::Map, mode: &str, percent: i64| -> rhai::Array {
             let body = unsafe { &mut *body_ptr_sell_all };
             let percent = percent.max(0);
-            // Python owns one ordered list of Item objects. Expand any
-            // transient Rust stack before an order-sensitive batch sale so
-            // `모두` applies the same hidden/inUse/팔지못함 filters.
-            let _ = inventory_compat::materialize_stacks_for_save(body);
             let inventory = body.object.objs.clone();
             let mut sold = rhai::Array::new();
             let mut total = 0_i64;
@@ -8112,6 +8244,60 @@ pub fn create_engine_with_body_and_output(
                 event.insert("post".into(), Dynamic::from(post));
                 event.insert("price".into(), Dynamic::from(price));
                 sold.push(Dynamic::from(event));
+            }
+            let mut stack_keys = body.object.inv_stack.keys().cloned().collect::<Vec<_>>();
+            stack_keys.sort();
+            for key in stack_keys {
+                let quantity = body.object.inv_stack.get(&key).copied().unwrap_or(0);
+                if quantity <= 0 {
+                    continue;
+                }
+                let Some((template, _)) = object_from_item_json(&key) else {
+                    continue;
+                };
+                let Some((name, post, price, selected)) = template.lock().ok().map(|item| {
+                    let kind = item.getString("종류");
+                    let equipment = kind == "방어구" || kind == "무기";
+                    let option_count = item.get_option().map(|value| value.len()).unwrap_or(0);
+                    let selected = !item.checkAttr("아이템속성", "출력안함")
+                        && !item.checkAttr("아이템속성", "팔지못함")
+                        && match mode {
+                            "속성0" => equipment && item.getString("옵션").is_empty(),
+                            "속성1" => equipment && option_count <= 2,
+                            "속성2" => equipment && option_count <= 3,
+                            "속성3" => equipment && option_count <= 4,
+                            "일반" => equipment && option_count == 0,
+                            "장비" => equipment,
+                            "모두" => true,
+                            _ => false,
+                        };
+                    let mut price = (item.getInt("판매가격") * percent) / 100;
+                    if let Some(options) = item.get_option() {
+                        price = (price as f64 * (options.len() as f64 * 1.2)) as i64;
+                    }
+                    let name = item.getName();
+                    let ansi = item.getString("안시");
+                    let post = if ansi.is_empty() {
+                        format!("\x1b[0;36m{name}\x1b[37m")
+                    } else {
+                        format!("{ansi}{name}\x1b[0;37m")
+                    };
+                    (name, post, price, selected)
+                }) else {
+                    continue;
+                };
+                if !selected {
+                    continue;
+                }
+                body.object.inv_stack.remove(&key);
+                total = total.saturating_add(price.saturating_mul(quantity));
+                for _ in 0..quantity {
+                    let mut event = rhai::Map::new();
+                    event.insert("name".into(), Dynamic::from(name.clone()));
+                    event.insert("post".into(), Dynamic::from(post.clone()));
+                    event.insert("price".into(), Dynamic::from(price));
+                    sold.push(Dynamic::from(event));
+                }
             }
             if !sold.is_empty() {
                 body.set("은전", body.get_int("은전").saturating_add(total));
@@ -8186,8 +8372,15 @@ pub fn create_engine_with_body_and_output(
                 .unwrap_or_default();
             let world = get_world_state().read().unwrap();
             let other = get_other_map_ft.as_ref().map(|f| f()).unwrap_or_default();
-            let (lines, to_target) =
-                look_at_target(unsafe { &*body_ptr_ft }, &world, &viewer_name, line, &other);
+            let mut selected_fixture = None;
+            let (lines, to_target) = look_at_target(
+                unsafe { &*body_ptr_ft },
+                &world,
+                &viewer_name,
+                line,
+                &other,
+                &mut selected_fixture,
+            );
             let (err, lines_out) = if lines.len() == 1 {
                 if lines[0].contains("위치 정보가 없습니다") {
                     ("no_position".to_string(), vec![])
@@ -8200,10 +8393,23 @@ pub fn create_engine_with_body_and_output(
                 (String::new(), lines)
             };
             let is_player_target = to_target.is_some();
-            let found = is_player_target || (!lines_out.is_empty() && err.is_empty());
+            let found = is_player_target
+                || selected_fixture.is_some()
+                || (!lines_out.is_empty() && err.is_empty());
             let mut m = rhai::Map::new();
             m.insert("found".into(), Dynamic::from(found));
             m.insert("player".into(), Dynamic::from(is_player_target));
+            m.insert(
+                "fixture_target".into(),
+                Dynamic::from(selected_fixture.is_some()),
+            );
+            m.insert(
+                "fixture".into(),
+                selected_fixture
+                    .as_ref()
+                    .map(fixture::fixture_to_dynamic)
+                    .unwrap_or_else(|| Dynamic::from(rhai::Map::new())),
+            );
             m.insert("err".into(), Dynamic::from(err));
             m.insert(
                 "lines".into(),
@@ -9694,18 +9900,40 @@ pub fn create_engine_with_body_and_output(
                 body.set(key, v);
                 return true;
             }
-            for arc in &body.object.objs {
-                if let Ok(o) = arc.lock() {
-                    if o.getName() == target
-                        || (!o.getString("반응이름").is_empty()
-                            && o.getString("반응이름").contains(target))
-                    {
-                        drop(o);
-                        if let Ok(mut obj) = arc.lock() {
-                            obj.set(key, v);
-                        }
-                        return true;
-                    }
+            let inventory_object = body.object.objs.iter().find_map(|arc| {
+                let object = arc.lock().ok()?;
+                (object.getName() == target
+                    || (!object.getString("반응이름").is_empty()
+                        && object.getString("반응이름").contains(target)))
+                .then(|| arc.clone())
+            });
+            if let Some(object_arc) = inventory_object {
+                let changed = if let Ok(mut object) = object_arc.lock() {
+                    object.set(key, v.clone());
+                    true
+                } else {
+                    false
+                };
+                restore_pristine_inventory_object(body, &object_arc);
+                return changed;
+            }
+            if let Some(stack_key) =
+                inventory_compat::find_counted_item_key(&body.object.inv_stack, target)
+            {
+                let Some(object_arc) =
+                    inventory_compat::materialize_one(&mut body.object, &stack_key, true)
+                else {
+                    return false;
+                };
+                let changed = if let Ok(mut object) = object_arc.lock() {
+                    object.set(key, v.clone());
+                    true
+                } else {
+                    false
+                };
+                restore_pristine_inventory_object(body, &object_arc);
+                if changed {
+                    return true;
                 }
             }
             if let Some((zone, room)) = get_world_state().read().ok().and_then(|w| {
@@ -10112,8 +10340,7 @@ pub fn create_engine_with_body_and_output(
                     .ok()
                     .and_then(|mut world| {
                         let fixture = world.get_fixture_mut(id)?;
-                        let Some(serde_json::Value::String(raw)) =
-                            fixture.attribute(key).cloned()
+                        let Some(serde_json::Value::String(raw)) = fixture.attribute(key).cloned()
                         else {
                             return Some(if fixture.attribute(key).is_some() {
                                 "not_value".to_string()
@@ -10132,10 +10359,8 @@ pub fn create_engine_with_body_and_output(
                         if kept.is_empty() {
                             fixture.attributes.remove(key);
                         } else {
-                            fixture.set_attribute(
-                                key,
-                                serde_json::Value::String(kept.join("\r\n")),
-                            );
+                            fixture
+                                .set_attribute(key, serde_json::Value::String(kept.join("\r\n")));
                         }
                         Some("ok".to_string())
                     })
@@ -11234,40 +11459,70 @@ pub fn create_engine_with_body_and_output(
             let body = unsafe { &*body_ptr_gi };
             let order = order.max(1) as usize;
             let cnt = if order > 1 { 1i64 } else { count.clamp(1, 50) };
-            // 스택: inv_stack에서
-            if let Some(ref key) = find_item_key_by_name(item_name) {
-                if is_stackable(key) {
-                    let have = *body.object.inv_stack.get(key).unwrap_or(&0);
-                    if have >= cnt {
-                        if let Ok(mut s) = spec_gi.lock() {
-                            *s = Some(CommandResult::GiveToPlayer {
-                                target_name: target.to_string(),
-                                giver_name: body.get_name(),
-                                give_silver: None,
-                                give_gold: None,
-                                give_item: None,
-                                give_item_stack: Some((key.clone(), cnt)),
-                                deduct_from_giver: true,
-                                bypass_item_limits: false,
-                            });
-                        }
-                        return String::new();
-                    }
-                }
-            }
-            // 비스택: findObjInven
             let cnt_u = cnt as usize;
-            if body.object.findObjInven(item_name, order).is_none() {
+            let individual = body
+                .object
+                .objs
+                .iter()
+                .filter(|item| {
+                    item.lock().is_ok_and(|item| {
+                        !item.getBool("inUse")
+                            && !inventory_compat::python_item_field_contains(
+                                &item,
+                                "아이템속성",
+                                "출력안함",
+                            )
+                            && (item.getName() == item_name
+                                || inventory_compat::python_item_field_contains(
+                                    &item,
+                                    "반응이름",
+                                    item_name,
+                                ))
+                    })
+                })
+                .count();
+            let object_count = if order <= individual {
+                cnt_u.min(individual.saturating_sub(order - 1))
+            } else {
+                0
+            };
+            let stack_needed = cnt.saturating_sub(object_count as i64);
+            let stack_order = if order > individual {
+                order.saturating_sub(individual) as i64
+            } else {
+                1
+            };
+            let give_stack = if stack_needed > 0 {
+                inventory_compat::counted_item_at(&body.object.inv_stack, item_name, stack_order)
+                    .and_then(|(key, offset)| {
+                        let have = body.object.inv_stack.get(&key).copied().unwrap_or(0);
+                        let available = have.saturating_sub(offset - 1);
+                        let moved = stack_needed.min(available);
+                        (moved > 0).then_some((key, moved))
+                    })
+            } else {
+                None
+            };
+            if object_count == 0 && give_stack.is_none() {
                 return "no_item".to_string();
             }
+            let requested_objects = if order <= individual && give_stack.is_none() {
+                cnt_u
+            } else {
+                object_count
+            };
             if let Ok(mut s) = spec_gi.lock() {
                 *s = Some(CommandResult::GiveToPlayer {
                     target_name: target.to_string(),
                     giver_name: body.get_name(),
                     give_silver: None,
                     give_gold: None,
-                    give_item: Some((item_name.to_string(), order, cnt_u)),
-                    give_item_stack: None,
+                    give_item: (requested_objects > 0).then_some((
+                        item_name.to_string(),
+                        order,
+                        requested_objects,
+                    )),
+                    give_item_stack: give_stack,
                     deduct_from_giver: true,
                     bypass_item_limits: false,
                 });
@@ -11292,17 +11547,64 @@ pub fn create_engine_with_body_and_output(
             } else {
                 count.clamp(1, 100) as usize
             };
-            if body.object.findObjInven(item_name, order).is_none() {
+            let individual = body
+                .object
+                .objs
+                .iter()
+                .filter(|item| {
+                    item.lock().is_ok_and(|item| {
+                        !item.getBool("inUse")
+                            && (item.getName() == item_name
+                                || inventory_compat::python_item_field_contains(
+                                    &item,
+                                    "반응이름",
+                                    item_name,
+                                ))
+                    })
+                })
+                .count();
+            let object_count = if order <= individual {
+                count.min(individual.saturating_sub(order - 1))
+            } else {
+                0
+            };
+            let stack_needed = count.saturating_sub(object_count) as i64;
+            let stack_order = if order > individual {
+                order.saturating_sub(individual) as i64
+            } else {
+                1
+            };
+            let give_stack = if stack_needed > 0 {
+                inventory_compat::counted_item_at(&body.object.inv_stack, item_name, stack_order)
+                    .and_then(|(key, offset)| {
+                        let have = body.object.inv_stack.get(&key).copied().unwrap_or(0);
+                        let available = have.saturating_sub(offset - 1);
+                        let moved = stack_needed.min(available);
+                        (moved > 0).then_some((key, moved))
+                    })
+            } else {
+                None
+            };
+            if object_count == 0 && give_stack.is_none() {
                 return "no_item".into();
             }
+            let requested_objects = if order <= individual && give_stack.is_none() {
+                count
+            } else {
+                object_count
+            };
             if let Ok(mut result) = spec_admin_give_item.lock() {
                 *result = Some(CommandResult::GiveToPlayer {
                     target_name: target.to_string(),
                     giver_name: body.get_name(),
                     give_silver: None,
                     give_gold: None,
-                    give_item: Some((item_name.to_string(), order, count)),
-                    give_item_stack: None,
+                    give_item: (requested_objects > 0).then_some((
+                        item_name.to_string(),
+                        order,
+                        requested_objects,
+                    )),
+                    give_item_stack: give_stack,
                     deduct_from_giver: true,
                     bypass_item_limits: true,
                 });
@@ -11345,6 +11647,25 @@ pub fn create_engine_with_body_and_output(
                 );
                 return result;
             }
+            let remaining = order.max(1).saturating_sub(matched);
+            if let Some((key, _)) =
+                inventory_compat::counted_item_at(&body.object.inv_stack, name, remaining)
+            {
+                if remaining > 0 {
+                    if let Some((item, _)) = object_from_item_json(&key) {
+                        if let Ok(item) = item.lock() {
+                            let actual = item.getName();
+                            result.insert("found".into(), Dynamic::from(true));
+                            result.insert("name".into(), Dynamic::from(actual.clone()));
+                            result.insert(
+                                "post".into(),
+                                Dynamic::from(format!("{}{}", actual, han_eul(&actual))),
+                            );
+                            return result;
+                        }
+                    }
+                }
+            }
             result.insert("found".into(), Dynamic::from(false));
             result.insert("name".into(), Dynamic::from(String::new()));
             result.insert("post".into(), Dynamic::from(String::new()));
@@ -11362,7 +11683,26 @@ pub fn create_engine_with_body_and_output(
             result.insert("name".into(), Dynamic::from(String::new()));
             result.insert("script".into(), Dynamic::from(String::new()));
             result.insert("post".into(), Dynamic::from(String::new()));
-            let Some(item) = body.object.findObjInven(name, order.max(1) as usize) else {
+            let wanted_order = order.max(1) as usize;
+            let item = body.object.findObjInven(name, wanted_order).or_else(|| {
+                let individual = body
+                    .object
+                    .objs
+                    .iter()
+                    .filter(|item| {
+                        item.lock().is_ok_and(|item| {
+                            !item.getBool("inUse")
+                                && (item.getName() == name
+                                    || item.getString("반응이름").contains(name))
+                        })
+                    })
+                    .count();
+                let remaining = wanted_order.saturating_sub(individual) as i64;
+                let (key, _) =
+                    inventory_compat::counted_item_at(&body.object.inv_stack, name, remaining)?;
+                object_from_item_json(&key).map(|(item, _)| item)
+            });
+            let Some(item) = item else {
                 return Dynamic::from(result);
             };
             let Ok(item) = item.lock() else {
@@ -11399,9 +11739,34 @@ pub fn create_engine_with_body_and_output(
             }
             let order = order.max(1) as usize;
             let body = unsafe { &mut *body_ptr_equip };
+            let mut stack_key = None;
             let arc = match body.object.findObjInven(name, order) {
                 Some(a) => a,
-                None => return "no_item".to_string(),
+                None => {
+                    let individual = body
+                        .object
+                        .objs
+                        .iter()
+                        .filter(|item| {
+                            item.lock().is_ok_and(|item| {
+                                !item.getBool("inUse")
+                                    && (item.getName() == name
+                                        || item.getString("반응이름").contains(name))
+                            })
+                        })
+                        .count();
+                    let remaining = order.saturating_sub(individual) as i64;
+                    let Some((key, _)) =
+                        inventory_compat::counted_item_at(&body.object.inv_stack, name, remaining)
+                    else {
+                        return "no_item".to_string();
+                    };
+                    let Some((item, _)) = object_from_item_json(&key) else {
+                        return "no_item".to_string();
+                    };
+                    stack_key = Some(key);
+                    item
+                }
             };
             // 아이템의 모든 속성 수집
             let (kind, slot, stats, mastery_required) = {
@@ -11431,6 +11796,12 @@ pub fn create_engine_with_body_and_output(
             if slot_used && !slot.is_empty() {
                 return "slot_used".to_string();
             }
+            if let Some(key) = stack_key {
+                if !inventory_compat::remove_pristine_count(&mut body.object, &key, 1) {
+                    return "no_item".to_string();
+                }
+                body.object.objs.insert(0, arc.clone());
+            }
             {
                 let mut o = arc.lock().unwrap();
                 o.set("inUse", 1i64);
@@ -11452,6 +11823,26 @@ pub fn create_engine_with_body_and_output(
         "item_equip_all",
         move |_ob: &mut rhai::Map| -> rhai::Array {
             let body = unsafe { &mut *body_ptr_equip_all };
+            let stack_keys = body
+                .object
+                .inv_stack
+                .iter()
+                .filter(|(_, count)| **count > 0)
+                .filter_map(|(key, _)| {
+                    let (item, _) = object_from_item_json(key)?;
+                    let equippable = item.lock().ok().is_some_and(|item| {
+                        matches!(item.getString("종류").as_str(), "무기" | "방어구")
+                    });
+                    equippable.then_some(key.clone())
+                })
+                .collect::<Vec<_>>();
+            let mut materialized = Vec::new();
+            for key in stack_keys {
+                if let Some(item) = inventory_compat::materialize_one(&mut body.object, &key, false)
+                {
+                    materialized.push(item);
+                }
+            }
             let inventory = body.object.objs.clone();
             let mut equipped = rhai::Array::new();
             for arc in inventory {
@@ -11520,6 +11911,12 @@ pub fn create_engine_with_body_and_output(
                 event.insert("script".into(), Dynamic::from(script));
                 equipped.push(Dynamic::from(event));
             }
+            for item in materialized {
+                let unused = item.lock().ok().is_some_and(|item| !item.getBool("inUse"));
+                if unused && inventory_compat::absorb_pristine_object(&mut body.object, &item) {
+                    body.object.remove(&item);
+                }
+            }
             equipped
         },
     );
@@ -11549,7 +11946,7 @@ pub fn create_engine_with_body_and_output(
             // 아이템의 모든 속성 수집 및 해제 처리
             let (is_weapon, stats, post) = {
                 let mut o = arc.lock().unwrap();
-                o.set("inUse", 0i64);
+                o.attr.remove("inUse");
                 let w = o.getString("종류") == "무기";
                 let stats = equipment_stats(&o);
                 let post = item_han_obj(&o);
@@ -11571,6 +11968,9 @@ pub fn create_engine_with_body_and_output(
             body._magic_chance = (body._magic_chance - stats.magic_chance).max(0);
             if is_weapon {
                 body.weapon_item = None;
+            }
+            if inventory_compat::absorb_pristine_object(&mut body.object, &arc) {
+                body.object.remove(&arc);
             }
             result.insert("err".into(), Dynamic::from(""));
             result.insert("post".into(), Dynamic::from(post));
@@ -11599,12 +11999,17 @@ pub fn create_engine_with_body_and_output(
                 })
                 .collect::<rhai::Array>();
             body.unwear_all();
+            for item in body.object.objs.clone() {
+                if inventory_compat::absorb_pristine_object(&mut body.object, &item) {
+                    body.object.remove(&item);
+                }
+            }
             items
         },
     );
 
     // item_use_consumable(ob, name, order): 소비성 아이템 사용.
-    // 먼저 inv_stack에서 찾고(개수 관리), 없으면 objs에서 찾음.
+    // 상태 객체를 먼저 세고, 그 뒤의 원본 동일 아이템은 수량에서 직접 차감한다.
     // {err: ""|"usage"|"bad_state"|"no_item"|"not_consumable", name}. 오류 메시지는 Rhai에서.
     let body_ptr_cons = body_ptr;
     engine.register_fn(
@@ -11623,87 +12028,115 @@ pub fn create_engine_with_body_and_output(
                 return Dynamic::from(m);
             }
 
-            // 1단계: inv_stack에서 아이템 찾기 (개수로 관리되는 소비성 아이템)
-            if let Some(key) = find_item_key_by_name(name) {
-                if is_stackable(&key) {
-                    let have = *body.object.inv_stack.get(&key).unwrap_or(&0);
-                    if have > 0 {
-                        // A Python inventory always contains the actual Item,
-                        // so 종류—not nonzero healing—decides whether it can
-                        // be eaten. This matters for 백사주 and other food
-                        // whose only effect is 내공증진.
-                        let Some((template, _)) = object_from_item_json(&key) else {
-                            m.insert("err".into(), Dynamic::from("not_consumable".to_string()));
-                            m.insert("name".into(), Dynamic::from(String::new()));
-                            return Dynamic::from(m);
-                        };
-                        let (item_name, hp, mp, script, ansi, mut max_mp_gain, continuous) = {
-                            let item = template.lock().unwrap();
-                            if item.getString("종류") != "먹는것" {
+            let order = order.max(1) as usize;
+            let object_item = body.object.findObjInven(name, order);
+            let individual = body
+                .object
+                .objs
+                .iter()
+                .filter(|item| {
+                    item.lock().is_ok_and(|item| {
+                        !item.getBool("inUse")
+                            && (item.getName() == name || item.getString("반응이름").contains(name))
+                    })
+                })
+                .count();
+
+            // 상태 객체 뒤에서 선택된 원본 동일 소비품은 객체화하지 않는다.
+            if object_item.is_none() {
+                if let Some((key, _)) = inventory_compat::counted_item_at(
+                    &body.object.inv_stack,
+                    name,
+                    order.saturating_sub(individual) as i64,
+                ) {
+                    if is_stackable(&key) {
+                        let have = *body.object.inv_stack.get(&key).unwrap_or(&0);
+                        if have > 0 {
+                            // A Python inventory always contains the actual Item,
+                            // so 종류—not nonzero healing—decides whether it can
+                            // be eaten. This matters for 백사주 and other food
+                            // whose only effect is 내공증진.
+                            let Some((template, _)) = object_from_item_json(&key) else {
                                 m.insert("err".into(), Dynamic::from("not_consumable".to_string()));
                                 m.insert("name".into(), Dynamic::from(String::new()));
                                 return Dynamic::from(m);
-                            }
-                            (
-                                item.getName(),
-                                item.getInt("체력"),
-                                item.getInt("내공"),
-                                item.getString("사용스크립"),
-                                item.getString("안시"),
-                                item.getInt("내공증진"),
-                                item.checkAttr("아이템속성", "내공계속증진"),
-                            )
-                        };
+                            };
+                            let (item_name, hp, mp, script, ansi, mut max_mp_gain, continuous) = {
+                                let item = template.lock().unwrap();
+                                if item.getString("종류") != "먹는것" {
+                                    m.insert(
+                                        "err".into(),
+                                        Dynamic::from("not_consumable".to_string()),
+                                    );
+                                    m.insert("name".into(), Dynamic::from(String::new()));
+                                    return Dynamic::from(m);
+                                }
+                                (
+                                    item.getName(),
+                                    item.getInt("체력"),
+                                    item.getInt("내공"),
+                                    item.getString("사용스크립"),
+                                    item.getString("안시"),
+                                    item.getInt("내공증진"),
+                                    item.checkAttr("아이템속성", "내공계속증진"),
+                                )
+                            };
 
-                        // HP/MP 회복 적용
-                        let max_hp = body.get_max_hp();
-                        let max_mp = body.get_max_mp();
-                        let cur_hp = body.get_hp();
-                        let cur_mp = body.get_mp();
-                        let new_hp = (cur_hp + hp).min(max_hp);
-                        let new_mp = (cur_mp + mp).min(max_mp);
-                        body.set("체력", new_hp);
-                        body.set("내공", new_mp);
-                        if max_mp_gain != 0 {
-                            if !continuous {
-                                if body.object.checkAttr("내공증진아이템리스트", &item_name)
-                                {
-                                    max_mp_gain = 0;
+                            // HP/MP 회복 적용
+                            let max_hp = body.get_max_hp();
+                            let max_mp = body.get_max_mp();
+                            let cur_hp = body.get_hp();
+                            let cur_mp = body.get_mp();
+                            let new_hp = (cur_hp + hp).min(max_hp);
+                            let new_mp = (cur_mp + mp).min(max_mp);
+                            body.set("체력", new_hp);
+                            body.set("내공", new_mp);
+                            if max_mp_gain != 0 {
+                                if !continuous {
+                                    if body.object.checkAttr("내공증진아이템리스트", &item_name)
+                                    {
+                                        max_mp_gain = 0;
+                                    } else {
+                                        body.object.setAttr("내공증진아이템리스트", &item_name);
+                                        body.set(
+                                            "최고내공",
+                                            body.get_int("최고내공") + max_mp_gain,
+                                        );
+                                    }
                                 } else {
-                                    body.object.setAttr("내공증진아이템리스트", &item_name);
                                     body.set("최고내공", body.get_int("최고내공") + max_mp_gain);
                                 }
-                            } else {
-                                body.set("최고내공", body.get_int("최고내공") + max_mp_gain);
                             }
+
+                            // 개수 차감
+                            if have <= 1 {
+                                body.object.inv_stack.remove(&key);
+                            } else {
+                                *body.object.inv_stack.get_mut(&key).unwrap() -= 1;
+                            }
+
+                            // 저장
+                            let path = format!("data/user/{}.json", body.get_name());
+                            let _ = save_body_to_json(body, &path);
+
+                            m.insert("err".into(), Dynamic::from(String::new()));
+                            m.insert("name".into(), Dynamic::from(item_name.clone()));
+                            m.insert("hp".into(), Dynamic::from(hp));
+                            m.insert("script".into(), Dynamic::from(script));
+                            m.insert("ansi".into(), Dynamic::from(ansi));
+                            m.insert("max_mp_gain".into(), Dynamic::from(max_mp_gain));
+                            m.insert(
+                                "remaining".into(),
+                                Dynamic::from(inventory_exact_name_count(body, &item_name)),
+                            );
+                            return Dynamic::from(m);
                         }
-
-                        // 개수 차감
-                        if have <= 1 {
-                            body.object.inv_stack.remove(&key);
-                        } else {
-                            *body.object.inv_stack.get_mut(&key).unwrap() -= 1;
-                        }
-
-                        // 저장
-                        let path = format!("data/user/{}.json", body.get_name());
-                        let _ = save_body_to_json(body, &path);
-
-                        m.insert("err".into(), Dynamic::from(String::new()));
-                        m.insert("name".into(), Dynamic::from(item_name));
-                        m.insert("hp".into(), Dynamic::from(hp));
-                        m.insert("script".into(), Dynamic::from(script));
-                        m.insert("ansi".into(), Dynamic::from(ansi));
-                        m.insert("max_mp_gain".into(), Dynamic::from(max_mp_gain));
-                        m.insert("remaining".into(), Dynamic::from((have - 1).max(0)));
-                        return Dynamic::from(m);
                     }
                 }
             }
 
-            // 2단계: objs에서 아이템 찾기 (기존 방식 - 개별 인스턴스)
-            let order = order.max(1) as usize;
-            let arc = match body.object.findObjInven(name, order) {
+            // 상태가 다른 개별 아이템은 해당 객체만 소비한다.
+            let arc = match object_item {
                 Some(a) => a,
                 None => {
                     m.insert("err".into(), Dynamic::from("no_item".to_string()));
@@ -11753,12 +12186,7 @@ pub fn create_engine_with_body_and_output(
             body.object
                 .objs
                 .retain(|x| !std::sync::Arc::ptr_eq(x, &arc));
-            let remaining = body
-                .object
-                .objs
-                .iter()
-                .filter(|item| item.lock().is_ok_and(|item| item.getName() == item_name))
-                .count() as i64;
+            let remaining = inventory_exact_name_count(body, &item_name);
             let path = format!("data/user/{}.json", body.get_name());
             let _ = save_body_to_json(body, &path);
             m.insert("err".into(), Dynamic::from(String::new()));
@@ -14035,7 +14463,9 @@ pub fn create_engine_with_body_and_output(
             let mut give_stack: Option<(String, i64)> = None;
             let mut give_non_stack: Option<(String, usize, usize)> = None;
 
-            if let Some(ref key) = find_item_key_by_name(item_name) {
+            if let Some(ref key) =
+                inventory_compat::find_counted_item_key(&body.object.inv_stack, item_name)
+            {
                 if is_stackable(key) {
                     let have = *body.object.inv_stack.get(key).unwrap_or(&0);
                     if have > 0 {
@@ -14593,6 +15023,21 @@ pub fn create_engine_with_body_and_output(
                     }
                 }
             }
+            if let Some(key) =
+                inventory_compat::find_counted_item_key(&body.object.inv_stack, obj_name)
+            {
+                if body.object.inv_stack.get(&key).copied().unwrap_or(0) > 0 {
+                    if let Some((item, _)) = object_from_item_json(&key) {
+                        if let Ok(item) = item.lock() {
+                            let mut obj_data = rhai::Map::new();
+                            obj_data.insert("이름".into(), Dynamic::from(item.getName()));
+                            obj_data.insert("표시".into(), Dynamic::from(item.getNameA()));
+                            obj_data.insert("종류".into(), Dynamic::from(item.getString("종류")));
+                            return Dynamic::from(obj_data);
+                        }
+                    }
+                }
+            }
             Dynamic::UNIT
         },
     );
@@ -14681,7 +15126,7 @@ pub fn create_engine_with_body_and_output(
             {
                 return "persist_failed".into();
             }
-            body.object.objs.push(item);
+            let _ = inventory_compat::store_acquired_object(&mut body.object, item, false);
             let path = format!("data/user/{}.json", body.get_name());
             let _ = save_body_to_json(body, &path);
             "ok".into()
@@ -14779,32 +15224,59 @@ pub fn create_engine_with_body_and_output(
             let catalog_path = book_catalog_path(body);
             let order = order.max(1) as usize;
             let mut matched = 0usize;
-            let Some((pos, key, name, attributes)) =
-                body.object.objs.iter().enumerate().find_map(|(i, arc)| {
-                    let obj = arc.lock().ok()?;
-                    if obj.getBool("inUse")
-                        || (obj.getName() != item_name
-                            && !inventory_compat::python_item_field_contains(
-                                &obj,
-                                "반응이름",
-                                item_name,
-                            ))
-                    {
-                        return None;
-                    }
-                    matched += 1;
-                    (matched == order).then(|| {
-                        let attributes = inventory_compat::item_attributes_to_json(&obj)
-                            .as_object()
-                            .cloned()
-                            .unwrap_or_default();
-                        (i, obj.getString("인덱스"), obj.getName(), attributes)
-                    })
+            let selected = body.object.objs.iter().find_map(|item| {
+                let object = item.lock().ok()?;
+                if object.getBool("inUse")
+                    || (object.getName() != item_name
+                        && !inventory_compat::python_item_field_contains(
+                            &object,
+                            "반응이름",
+                            item_name,
+                        ))
+                {
+                    return None;
+                }
+                matched += 1;
+                (matched == order).then(|| item.clone())
+            });
+            let selected = match selected {
+                Some(selected) => selected,
+                None => {
+                    let remaining = order.saturating_sub(matched) as i64;
+                    let Some((key, _)) = inventory_compat::counted_item_at(
+                        &body.object.inv_stack,
+                        item_name,
+                        remaining,
+                    ) else {
+                        return "no_item".into();
+                    };
+                    let Some(selected) =
+                        inventory_compat::materialize_one(&mut body.object, &key, true)
+                    else {
+                        return "no_item".into();
+                    };
+                    selected
+                }
+            };
+            let Some((pos, key, name, attributes)) = body
+                .object
+                .objs
+                .iter()
+                .position(|item| Arc::ptr_eq(item, &selected))
+                .and_then(|pos| {
+                    let obj = selected.lock().ok()?;
+                    let attributes = inventory_compat::item_attributes_to_json(&obj)
+                        .as_object()
+                        .cloned()
+                        .unwrap_or_default();
+                    Some((pos, obj.getString("인덱스"), obj.getName(), attributes))
                 })
             else {
+                restore_pristine_inventory_object(body, &selected);
                 return "no_item".into();
             };
             if key.is_empty() {
+                restore_pristine_inventory_object(body, &selected);
                 return "cannot_register".into();
             }
             let Some((kind, cannot_give, item_id)) = body.object.objs[pos].lock().ok().map(|o| {
@@ -14814,14 +15286,17 @@ pub fn create_engine_with_body_and_output(
                     o.getString("고유번호"),
                 )
             }) else {
+                restore_pristine_inventory_object(body, &selected);
                 return "cannot_register".into();
             };
             if kind != "무기" || cannot_give || !item_id.is_empty() {
+                restore_pristine_inventory_object(body, &selected);
                 return "cannot_register".into();
             }
             if crate::book::register_item(&catalog_path, &key, &name, &body.get_name(), attributes)
                 .is_err()
             {
+                restore_pristine_inventory_object(body, &selected);
                 return "cannot_register".into();
             }
             body.object.objs.remove(pos);
@@ -14932,7 +15407,7 @@ pub fn create_engine_with_body_and_output(
                 );
                 obj.set("고유번호", "");
             }
-            body.object.objs.push(item);
+            let _ = inventory_compat::store_acquired_object(&mut body.object, item, false);
             let path = format!("data/user/{}.json", body.get_name());
             let _ = save_body_to_json(body, &path);
             "ok".into()
@@ -15132,6 +15607,14 @@ pub fn create_engine_with_body_and_output(
                         .iter()
                         .find(|item| item.lock().is_ok_and(|object| matches(&object)))
                         .cloned()
+                })
+                .or_else(|| {
+                    if selected.is_some() {
+                        return None;
+                    }
+                    let key =
+                        inventory_compat::find_counted_item_key(&body.object.inv_stack, line)?;
+                    object_from_item_json(&key).map(|(item, _)| item)
                 });
             let Some(item) = item else {
                 return result("missing", String::new());
@@ -15166,14 +15649,22 @@ pub fn create_engine_with_body_and_output(
             let Some((zone, room)) = current_body_position(body) else {
                 return "permission".into();
             };
-            let Some((pos, item)) = body.object.objs.iter().enumerate().find_map(|(i, arc)| {
+            let selected = body.object.objs.iter().enumerate().find_map(|(i, arc)| {
                 let obj = arc.lock().ok()?;
                 (obj.getName() == item_name
                     || reaction_names(&obj.getString("반응이름"))
                         .iter()
                         .any(|alias| alias == item_name))
-                .then(|| (i, arc.clone()))
-            }) else {
+                .then(|| (Some(i), arc.clone(), None))
+            });
+            let selected = selected.or_else(|| {
+                let key =
+                    inventory_compat::find_counted_item_key(&body.object.inv_stack, item_name)?;
+                (body.object.inv_stack.get(&key).copied().unwrap_or(0) > 0)
+                    .then(|| object_from_item_json(&key).map(|(item, _)| (None, item, Some(key))))
+                    .flatten()
+            });
+            let Some((pos, item, stack_key)) = selected else {
                 return "missing".into();
             };
             let Ok(source) = item.lock() else {
@@ -15255,7 +15746,11 @@ pub fn create_engine_with_body_and_output(
                 &room,
                 std::sync::Arc::new(std::sync::Mutex::new(boxed)),
             );
-            body.object.objs.remove(pos);
+            if let Some(pos) = pos {
+                body.object.objs.remove(pos);
+            } else if let Some(stack_key) = stack_key {
+                let _ = inventory_compat::remove_pristine_count(&mut body.object, &stack_key, 1);
+            }
             let save_path = format!("data/user/{}.json", body.get_name());
             let _ = save_body_to_json(body, &save_path);
             String::new()
@@ -15290,7 +15785,9 @@ pub fn create_engine_with_body_and_output(
             let mut moved = false;
 
             // 스택 아이템 처리 (전체 수량 이동)
-            if let Some(ref key) = find_item_key_by_name(item_name) {
+            if let Some(ref key) =
+                inventory_compat::find_counted_item_key(&body.object.inv_stack, item_name)
+            {
                 if is_stackable(key) {
                     if let Some(&have) = body.object.inv_stack.get(key) {
                         if have > 0 && object_from_item_json(key).is_some() {
@@ -15382,6 +15879,24 @@ pub fn create_engine_with_body_and_output(
                             crate::object::Value::String(s) => return Dynamic::from(s),
                             crate::object::Value::Float(f) => return Dynamic::from(f),
                         }
+                    }
+                }
+            }
+
+            // 원본과 동일한 수량형 아이템은 객체화하지 않고 템플릿 속성을 읽는다.
+            if let Some(key) =
+                inventory_compat::find_counted_item_key(&body.object.inv_stack, obj_name)
+            {
+                if let Some((item, _)) = object_from_item_json(&key) {
+                    if let Ok(item) = item.lock() {
+                        if !item.attr.contains_key(attr) {
+                            return Dynamic::UNIT;
+                        }
+                        return match item.get(attr) {
+                            crate::object::Value::Int(n) => Dynamic::from_int(n),
+                            crate::object::Value::String(s) => Dynamic::from(s),
+                            crate::object::Value::Float(f) => Dynamic::from(f),
+                        };
                     }
                 }
             }
@@ -16826,6 +17341,29 @@ pub fn create_engine_with_body_and_output(
                         }
                     }
                 }
+                if !found {
+                    if let Some(key) =
+                        inventory_compat::find_counted_item_key(&body.object.inv_stack, target)
+                    {
+                        if body.object.inv_stack.get(&key).copied().unwrap_or(0) > 0 {
+                            if let Some((item, _)) = object_from_item_json(&key) {
+                                if let Ok(item) = item.lock() {
+                                    if !item.checkAttr("아이템속성", "출력안함") {
+                                        found = true;
+                                        attrs.extend(item.attr.iter().map(|(key, value)| {
+                                            let value = match value {
+                                                Value::Int(value) => value.to_string(),
+                                                Value::Float(value) => value.to_string(),
+                                                Value::String(value) => value.clone(),
+                                            };
+                                            (key.clone(), value)
+                                        }));
+                                    }
+                                }
+                            }
+                        }
+                    }
+                }
             }
             attrs.sort_by(|a, b| a.0.cmp(&b.0));
             let attrs = attrs
@@ -16880,9 +17418,9 @@ pub fn create_engine_with_body_and_output(
                         crate::world::RoomObjectRef::InstalledBox(ordinal) => installed
                             .get(ordinal)
                             .and_then(|object| object.lock().ok().map(|object| object.getName())),
-                        crate::world::RoomObjectRef::Fixture(id) => {
-                            world.get_fixture(id).map(|fixture| fixture.name().to_string())
-                        }
+                        crate::world::RoomObjectRef::Fixture(id) => world
+                            .get_fixture(id)
+                            .map(|fixture| fixture.name().to_string()),
                     };
                     if name.as_deref() == Some(wanted) {
                         matches += 1;
@@ -16906,60 +17444,10 @@ pub fn create_engine_with_body_and_output(
                 return 0;
             }
             let body = unsafe { &mut *body_ptr_dest };
-            let count = count.clamp(1, 100) as usize;
-
-            let mut destroyed = 0i64;
-
-            // 스택 아이템 파괴
-            if let Some(ref key) = find_item_key_by_name(item_name) {
-                if is_stackable(key) {
-                    let have = *body.object.inv_stack.get(key).unwrap_or(&0);
-                    let destroy_cnt = (count as i64).min(have).max(0);
-                    if destroy_cnt > 0 {
-                        let should_remove = {
-                            let r = body.object.inv_stack.get_mut(key).unwrap();
-                            *r -= destroy_cnt;
-                            *r <= 0
-                        };
-                        if should_remove {
-                            body.object.inv_stack.remove(key);
-                        }
-                        destroyed += destroy_cnt;
-                    }
-                }
-            }
-
-            // 비스택 아이템 파괴
-            if destroyed < count as i64 {
-                let mut to_remove: Vec<Arc<Mutex<Object>>> = Vec::new();
-                for obj in &body.object.objs {
-                    if let Ok(o) = obj.lock() {
-                        let ok = o.getName() == item_name
-                            || (!o.getString("반응이름").is_empty()
-                                && o.getString("반응이름").contains(item_name));
-                        if !ok || o.getBool("inUse") {
-                            continue;
-                        }
-                        drop(o);
-                        to_remove.push(obj.clone());
-                        destroyed += 1;
-                        if destroyed >= count as i64 {
-                            break;
-                        }
-                    }
-                }
-
-                for arc in to_remove {
-                    body.object.remove(&arc);
-                }
-            }
-
-            if destroyed > 0 {
-                let path = format!("data/user/{}.json", body.get_name());
-                let _ = save_body_to_json(body, &path);
-            }
-
-            destroyed
+            destroy_inventory_for_command(body, item_name, 1, count, false)
+                .get("count")
+                .and_then(|value| value.as_int().ok())
+                .unwrap_or(0)
         },
     );
 
@@ -17003,62 +17491,54 @@ pub fn create_engine_with_body_and_output(
                 return false;
             };
 
-            let mut given = false;
+            // Python inventory order is represented by stateful objects first
+            // and pristine counted copies after them. Preserve a changed or
+            // UUID-bearing first occurrence when handing one item to a mob.
+            let selected_object = body.object.objs.iter().find_map(|obj| {
+                let object = obj.lock().ok()?;
+                let matches = object.getName() == item_name
+                    || inventory_compat::python_item_field_contains(&object, "반응이름", item_name);
+                (matches && !object.getBool("inUse")).then(|| obj.clone())
+            });
 
-            // 스택 아이템 처리 (1개만 주기)
-            if let Some(ref key) = find_item_key_by_name(item_name) {
-                if is_stackable(key) {
-                    let have = *body.object.inv_stack.get(key).unwrap_or(&0);
-                    if have > 0 {
-                        let should_remove = {
-                            let r = body.object.inv_stack.get_mut(key).unwrap();
-                            *r -= 1;
-                            *r <= 0
-                        };
-                        if should_remove {
-                            body.object.inv_stack.remove(key);
-                        }
-                        if let Some((item, _)) = object_from_item_json(key) {
-                            if let Some(mob) = w
-                                .mob_cache
-                                .get_all_mobs_in_room_mut(&zone, &room)
-                                .and_then(|mobs| mobs.iter_mut().find(|m| m.mob_key == mob_key))
-                            {
-                                mob.inventory.push(item);
-                            }
-                        }
-                        given = true;
-                    }
+            let given = if let Some(item) = selected_object {
+                if let Some(mob) = w
+                    .mob_cache
+                    .get_all_mobs_in_room_mut(&zone, &room)
+                    .and_then(|mobs| mobs.iter_mut().find(|m| m.mob_key == mob_key))
+                {
+                    body.object.remove(&item);
+                    mob.inventory.push(item);
+                    true
+                } else {
+                    false
                 }
-            }
-
-            // 비스택 아이템 처리
-            if !given {
-                let mut to_remove: Vec<Arc<Mutex<Object>>> = Vec::new();
-                for obj in &body.object.objs {
-                    if let Ok(o) = obj.lock() {
-                        let ok = o.getName() == item_name
-                            || (!o.getString("반응이름").is_empty()
-                                && o.getString("반응이름").contains(item_name));
-                        if ok && !o.getBool("inUse") {
-                            drop(o);
-                            to_remove.push(obj.clone());
-                            break;
+            } else if let Some(key) =
+                inventory_compat::find_counted_item_key(&body.object.inv_stack, item_name)
+            {
+                let item = object_from_item_json(&key).map(|(item, _)| item);
+                if let Some(item) = item {
+                    if inventory_compat::remove_pristine_count(&mut body.object, &key, 1) {
+                        if let Some(mob) = w
+                            .mob_cache
+                            .get_all_mobs_in_room_mut(&zone, &room)
+                            .and_then(|mobs| mobs.iter_mut().find(|m| m.mob_key == mob_key))
+                        {
+                            mob.inventory.push(item);
+                            true
+                        } else {
+                            inventory_compat::add_pristine_count(&mut body.object, &key, 1);
+                            false
                         }
+                    } else {
+                        false
                     }
+                } else {
+                    false
                 }
-                for arc in to_remove {
-                    body.object.remove(&arc);
-                    if let Some(mob) = w
-                        .mob_cache
-                        .get_all_mobs_in_room_mut(&zone, &room)
-                        .and_then(|mobs| mobs.iter_mut().find(|m| m.mob_key == mob_key))
-                    {
-                        mob.inventory.push(arc);
-                    }
-                    given = true;
-                }
-            }
+            } else {
+                false
+            };
 
             if given {
                 drop(w);
@@ -18114,44 +18594,16 @@ pub fn create_engine_with_body_and_output(
             }
 
             let count = count.clamp(1, 100) as usize;
-            let _sold = 0usize;
             let mut total = 0i64;
-
-            // 스택 아이템 먼저 확인
-            if let Some(ref key) = find_item_key_by_name(item_name) {
-                if is_stackable(key) {
-                    if let Some((iname, _, base_price, _)) = get_item_info(key) {
-                        if iname == item_name {
-                            let have = *body.object.inv_stack.get(key).unwrap_or(&0);
-                            let sell_cnt = (count as i64).clamp(0, have);
-                            if sell_cnt > 0 {
-                                let unit = (base_price * buy_percent) / 100;
-                                total = unit * sell_cnt;
-                                let should_remove = {
-                                    let r = body.object.inv_stack.get_mut(key).unwrap();
-                                    *r -= sell_cnt;
-                                    *r <= 0
-                                };
-                                if should_remove {
-                                    body.object.inv_stack.remove(key);
-                                }
-                                body.set("은전", body.get_int("은전") + total);
-                                let path = format!("data/user/{}.json", body.get_name());
-                                let _ = save_body_to_json(body, &path);
-                                return String::new(); // 성공
-                            }
-                        }
-                    }
-                }
-            }
-
-            // 개별 아이템 확인
             let mut to_remove: Vec<Arc<Mutex<Object>>> = Vec::new();
+
+            // Stateful objects precede pristine counts in the runtime
+            // inventory order. A bulk legacy sale may continue into counts.
             for obj in &body.object.objs {
                 if let Ok(o) = obj.lock() {
                     let nm = o.getName();
-                    let rn = o.getString("반응이름");
-                    let match_ = nm == item_name || (!rn.is_empty() && rn.contains(item_name));
+                    let match_ = nm == item_name
+                        || inventory_compat::python_item_field_contains(&o, "반응이름", item_name);
                     if !match_ || o.getBool("inUse") || o.checkAttr("아이템속성", "출력안함")
                     {
                         continue;
@@ -18168,12 +18620,58 @@ pub fn create_engine_with_body_and_output(
                 }
             }
 
-            if to_remove.is_empty() {
+            let mut stack_removals = Vec::<(String, i64)>::new();
+            let mut remaining = count.saturating_sub(to_remove.len()) as i64;
+            if remaining > 0 {
+                for key in inventory_compat::counted_item_keys(&body.object.inv_stack, item_name) {
+                    let have = body.object.inv_stack.get(&key).copied().unwrap_or(0).max(0);
+                    if have == 0 {
+                        continue;
+                    }
+                    let Some((template, _)) = object_from_item_json(&key) else {
+                        continue;
+                    };
+                    let Ok(template) = template.lock() else {
+                        continue;
+                    };
+                    if template.checkAttr("아이템속성", "팔지못함") {
+                        if to_remove.is_empty() && stack_removals.is_empty() {
+                            return "cant_sell".to_string();
+                        }
+                        continue;
+                    }
+                    if template.checkAttr("아이템속성", "출력안함") {
+                        continue;
+                    }
+                    let sold = remaining.min(have);
+                    if sold > 0 {
+                        total += (template.getInt("판매가격") * buy_percent / 100) * sold;
+                        stack_removals.push((key, sold));
+                        remaining -= sold;
+                    }
+                    if remaining == 0 {
+                        break;
+                    }
+                }
+            }
+
+            if to_remove.is_empty() && stack_removals.is_empty() {
                 return "no_item".to_string();
             }
 
             for arc in &to_remove {
+                if let Ok(item) = arc.lock() {
+                    if item.checkAttr("아이템속성", "단일아이템") {
+                        let index = item.getString("인덱스");
+                        if !index.is_empty() {
+                            let _ = crate::oneitem::oneitem_destroy(&index);
+                        }
+                    }
+                }
                 body.object.remove(arc);
+            }
+            for (key, sold) in stack_removals {
+                let _ = inventory_compat::remove_pristine_count(&mut body.object, &key, sold);
             }
             body.set("은전", body.get_int("은전") + total);
 

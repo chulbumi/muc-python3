@@ -758,14 +758,18 @@ fn do_event_rhai_source(
     });
     engine.register_fn("clear_item_extension", move |name: &str| -> bool {
         let b = unsafe { &mut *body_ptr };
-        let Some(item) = body_item_named(b, name) else {
+        let Some(item_arc) = body_item_named_for_mutation(b, name) else {
             return false;
         };
-        let Ok(mut item) = item.lock() else {
+        let Ok(mut item) = item_arc.lock() else {
             return false;
         };
         let extension = item.getString("확장 이름");
         if extension.is_empty() {
+            drop(item);
+            if crate::script::inventory_compat::absorb_pristine_object(&mut b.object, &item_arc) {
+                b.object.remove(&item_arc);
+            }
             return false;
         }
         // Python `list.remove()` removes only the first matching alias.
@@ -792,7 +796,7 @@ fn do_event_rhai_source(
             if extension.is_empty() {
                 return false;
             }
-            let Some(item) = body_item_named(b, name) else {
+            let Some(item) = body_item_named_for_mutation(b, name) else {
                 return false;
             };
             let Ok(mut item) = item.lock() else {
@@ -835,15 +839,16 @@ fn do_event_rhai_source(
         if name == "은전" || name == "금전" {
             return b.get_int(name) >= count;
         }
-        b.object
+        let individual = b
+            .object
             .objs
             .iter()
             .filter(|item| {
                 item.lock()
                     .is_ok_and(|item| strip_event_ansi(&item.getName()) == name)
             })
-            .count() as i64
-            >= count
+            .count() as i64;
+        individual.saturating_add(body_stack_named_count(b, name)) >= count
     });
     // Python `$아이템확인! $변수:1` calls `checkItemName(name, cnt)` with
     // its default `checkInUse=False`; unlike `checkItemIndex`, that excludes
@@ -859,7 +864,8 @@ fn do_event_rhai_source(
             if name == "은전" || name == "금전" {
                 return b.get_int(name) >= count;
             }
-            b.object
+            let individual = b
+                .object
                 .objs
                 .iter()
                 .filter(|item| {
@@ -867,8 +873,8 @@ fn do_event_rhai_source(
                         !item.getBool("inUse") && strip_event_ansi(&item.getName()) == name
                     })
                 })
-                .count() as i64
-                >= count
+                .count() as i64;
+            individual.saturating_add(body_stack_named_count(b, name)) >= count
         },
     );
     engine.register_fn("item_use_count", move |name: &str| -> i64 {
@@ -881,7 +887,7 @@ fn do_event_rhai_source(
     });
     engine.register_fn("clear_item_options", move |name: &str| -> bool {
         let b = unsafe { &mut *body_ptr };
-        let Some(item) = body_item_named(b, name) else {
+        let Some(item) = body_item_named_for_mutation(b, name) else {
             return false;
         };
         let Ok(mut item) = item.lock() else {
@@ -902,7 +908,7 @@ fn do_event_rhai_source(
     });
     engine.register_fn("delete_item_named", move |name: &str| -> bool {
         let b = unsafe { &mut *body_ptr };
-        let Some(item) = body_item_named(b, name) else {
+        let Some(item) = body_item_named_for_mutation(b, name) else {
             return false;
         };
         // Python `$아이템삭제 $변수:1` is `self.remove(item)`, not a
@@ -922,6 +928,7 @@ fn do_event_rhai_source(
         let Some((item, _)) = object_from_item_json(&index) else {
             return false;
         };
+        let mut one_item_index = None;
         if let Ok(mut item_value) = item.lock() {
             let mut roll = |min: i64, max: i64| fastrand::i64(min..=max);
             let _ = crate::script::apply_item_magic_with_roll(
@@ -935,11 +942,15 @@ fn do_event_rhai_source(
             item_value.setAttr("아이템속성", "줄수없음");
             mark_item_field_as_json_array(&mut item_value, "아이템속성");
             if item_value.checkAttr("아이템속성", "단일아이템") {
-                let _ =
-                    crate::oneitem::oneitem_have(&item_value.getString("인덱스"), &b.get_name());
+                one_item_index = Some(item_value.getString("인덱스"));
             }
         }
-        b.object.objs.insert(0, item);
+        if !crate::script::inventory_compat::store_acquired_object(&mut b.object, item, true) {
+            return false;
+        }
+        if let Some(index) = one_item_index.filter(|index| !index.is_empty()) {
+            let _ = crate::oneitem::oneitem_have(&index, &b.get_name());
+        }
         true
     });
     engine.register_fn("get_body_text", move |key: &str| -> String {
@@ -972,6 +983,12 @@ fn do_event_rhai_source(
             b.object
                 .find_by_index(index)
                 .and_then(|item| item.lock().ok().map(|item| item.getInt("공격력")))
+                .or_else(|| {
+                    (b.object.inv_stack.get(index).copied().unwrap_or(0) > 0)
+                        .then(|| object_from_item_json(index))
+                        .flatten()
+                        .and_then(|(item, _)| item.lock().ok().map(|item| item.getInt("공격력")))
+                })
                 .is_some_and(|attack| attack < limit)
         },
     );
@@ -1771,8 +1788,9 @@ fn give_event_item_with_roll(
         } else {
             false
         };
-        body.object.objs.insert(0, arc);
-        if is_one_item {
+        let accepted =
+            crate::script::inventory_compat::store_acquired_object(&mut body.object, arc, true);
+        if accepted && is_one_item {
             let _ = crate::oneitem::oneitem_have(index, &body.get_name());
         }
     }
@@ -1866,10 +1884,62 @@ fn body_has_equipped_item_spec(body: &Body, spec: &str) -> bool {
 /// command selector: it scans inventory insertion order and compares the
 /// stripped display name exactly, while still seeing worn equipment.
 fn body_item_named(body: &Body, name: &str) -> Option<Arc<Mutex<Object>>> {
-    body.object.objs.iter().find_map(|item| {
+    body.object
+        .objs
+        .iter()
+        .find_map(|item| {
+            let item_name = item.lock().ok()?.getName();
+            (strip_event_ansi(&item_name) == name).then(|| item.clone())
+        })
+        .or_else(|| {
+            let mut keys = body.object.inv_stack.keys().cloned().collect::<Vec<_>>();
+            keys.sort();
+            keys.into_iter().find_map(|key| {
+                if body.object.inv_stack.get(&key).copied().unwrap_or(0) <= 0 {
+                    return None;
+                }
+                let (item, _) = object_from_item_json(&key)?;
+                let matches = item
+                    .lock()
+                    .ok()
+                    .is_some_and(|item| strip_event_ansi(&item.getName()) == name);
+                matches.then_some(item)
+            })
+        })
+}
+
+fn body_item_named_for_mutation(body: &mut Body, name: &str) -> Option<Arc<Mutex<Object>>> {
+    if let Some(item) = body.object.objs.iter().find_map(|item| {
         let item_name = item.lock().ok()?.getName();
         (strip_event_ansi(&item_name) == name).then(|| item.clone())
-    })
+    }) {
+        return Some(item);
+    }
+    let mut keys = body.object.inv_stack.keys().cloned().collect::<Vec<_>>();
+    keys.sort();
+    let key = keys.into_iter().find(|key| {
+        body.object.inv_stack.get(key).copied().unwrap_or(0) > 0
+            && object_from_item_json(key).is_some_and(|(item, _)| {
+                item.lock()
+                    .ok()
+                    .is_some_and(|item| strip_event_ansi(&item.getName()) == name)
+            })
+    })?;
+    crate::script::inventory_compat::materialize_one(&mut body.object, &key, true)
+}
+
+fn body_stack_named_count(body: &Body, name: &str) -> i64 {
+    body.object
+        .inv_stack
+        .iter()
+        .filter_map(|(key, count)| {
+            object_from_item_json(key).and_then(|(item, _)| {
+                item.lock()
+                    .ok()
+                    .and_then(|item| (strip_event_ansi(&item.getName()) == name).then_some(*count))
+            })
+        })
+        .sum()
 }
 
 /// Python's `[아이템사용횟수]` event placeholder: find the first unworn item
@@ -1883,6 +1953,20 @@ fn body_item_use_count(body: &Body, name: &str) -> i64 {
             let item = item.lock().ok()?;
             (!item.getBool("inUse") && strip_event_ansi(&item.getName()) == name)
                 .then(|| item.getName())
+        })
+        .or_else(|| {
+            let mut keys = body.object.inv_stack.keys().cloned().collect::<Vec<_>>();
+            keys.sort();
+            keys.into_iter().find_map(|key| {
+                if body.object.inv_stack.get(&key).copied().unwrap_or(0) <= 0 {
+                    return None;
+                }
+                object_from_item_json(&key).and_then(|(item, _)| {
+                    item.lock().ok().and_then(|item| {
+                        (strip_event_ansi(&item.getName()) == name).then(|| item.getName())
+                    })
+                })
+            })
         })
         .and_then(|raw_name| body.item_skill_map.get(&raw_name).copied())
         .map(i64::from)
@@ -1922,7 +2006,12 @@ fn item_skill_declarations(item: &Object) -> Vec<String> {
 /// Python `[배울무공이름갯수]`: count the selected unworn weapon's declared
 /// skills which are not learned and are compatible with the player's 성격.
 fn body_learnable_item_skill_count(body: &Body, name: &str) -> i64 {
-    let Some(item) = body.object.findObjInven(name, 1) else {
+    let item = body.object.findObjInven(name, 1).or_else(|| {
+        let key =
+            crate::script::inventory_compat::find_counted_item_key(&body.object.inv_stack, name)?;
+        object_from_item_json(&key).map(|(item, _)| item)
+    });
+    let Some(item) = item else {
         return 0;
     };
     let Ok(item) = item.lock() else {
@@ -2412,11 +2501,14 @@ mod tests {
 
     fn add_test_items(body: &mut Body, index: &str, count: usize) {
         for _ in 0..count {
-            body.object.objs.push(
-                crate::script::object_from_item_json(index)
-                    .unwrap_or_else(|| panic!("missing item fixture {index}"))
-                    .0,
-            );
+            let item = crate::script::object_from_item_json(index)
+                .unwrap_or_else(|| panic!("missing item fixture {index}"))
+                .0;
+            assert!(crate::script::inventory_compat::store_acquired_object(
+                &mut body.object,
+                item,
+                false,
+            ));
         }
     }
 
@@ -2460,9 +2552,9 @@ mod tests {
             &std::fs::read_to_string(lottery_path).expect("attribute reward save"),
         )
         .expect("valid attribute reward save");
-        assert!(lottery_save["아이템"][0]["옵션"].is_array());
+        assert!(lottery_save["아이템"][0]["변경"]["옵션"].is_array());
         assert_eq!(
-            lottery_save["아이템"][0]["아이템속성"],
+            lottery_save["아이템"][0]["변경"]["아이템속성"],
             serde_json::json!(["버리지못함", "줄수없음"])
         );
         let _ = std::fs::remove_file(lottery_path);
@@ -2470,12 +2562,8 @@ mod tests {
         let mut multiple = Body::new();
         multiple.set("레벨", 10_000);
         give_event_item_with_roll(&mut multiple, "31", 2, 0, &mut |_, high| high);
-        assert_eq!(multiple.object.objs.len(), 2);
-        assert!(multiple
-            .object
-            .objs
-            .iter()
-            .all(|item| { item.lock().unwrap().getString("옵션").is_empty() }));
+        assert_eq!(multiple.object.inv_stack.get("31"), Some(&2));
+        assert!(multiple.object.objs.is_empty());
 
         // Python Body.delItem deliberately permits event scripts to take a
         // balance below zero; it does not clamp 은전/금전.
@@ -2934,11 +3022,11 @@ fn event() {
         )
         .expect("valid engraved item save");
         assert_eq!(
-            engraved_save["아이템"][0]["반응이름"],
+            engraved_save["아이템"][0]["변경"]["반응이름"],
             serde_json::json!(["명왕검", "회귀명"])
         );
         assert_eq!(
-            engraved_save["아이템"][0]["아이템속성"],
+            engraved_save["아이템"][0]["변경"]["아이템속성"],
             serde_json::json!(["팔지못함"])
         );
         let _ = std::fs::remove_file(engrave_save_path);
@@ -3009,7 +3097,8 @@ fn event() {
         );
         assert!(output.iter().any(|line| line.contains("이름을 새겨")));
         assert_eq!(overlong.get_int("은전"), 0);
-        let item = overlong.object.objs[0].lock().unwrap();
+        let overlong_item = super::body_item_named(&overlong, "명왕검").unwrap();
+        let item = overlong_item.lock().unwrap();
         assert!(item.getString("확장 이름").is_empty());
         assert!(!item.checkAttr("반응이름", "회귀명"));
 
@@ -3021,7 +3110,9 @@ fn event() {
         overlong_erase.set("은전", 1_000_000_i64);
         add_test_items(&mut overlong_erase, "31", 1);
         {
-            let mut item = overlong_erase.object.objs[0].lock().unwrap();
+            let selected = super::body_item_named_for_mutation(&mut overlong_erase, "명왕검")
+                .expect("engraving must materialize one counted weapon");
+            let mut item = selected.lock().unwrap();
             item.set("확장 이름", "회귀명");
             item.setAttr("반응이름", "회귀명");
         }
@@ -3052,7 +3143,9 @@ fn event() {
         duplicate_alias.set("은전", 1_000_000_i64);
         add_test_items(&mut duplicate_alias, "31", 1);
         {
-            let mut item = duplicate_alias.object.objs[0].lock().unwrap();
+            let selected = super::body_item_named_for_mutation(&mut duplicate_alias, "명왕검")
+                .expect("alias mutation must materialize one counted weapon");
+            let mut item = selected.lock().unwrap();
             item.set("반응이름", "명왕검\n회귀명");
         }
         run_zone_event_source_with_words(
@@ -3754,17 +3847,8 @@ fn event() {
         assert_eq!(switched.get_string("성격"), "정파");
         assert!(!get_user_event(&switched, "정사전환이벤트").is_empty());
         assert!(!body_has_item_spec(&switched, "장문머리"));
-        assert_eq!(
-            switched
-                .object
-                .objs
-                .iter()
-                .filter(|item| item
-                    .lock()
-                    .is_ok_and(|item| item.getString("인덱스") == "합성11"))
-                .count(),
-            2
-        );
+        assert!(switched.object.objs.is_empty());
+        assert_eq!(switched.object.inv_stack.get("합성11"), Some(&2));
 
         // The source's first event check makes a repeat a message-only
         // branch; it must not toggle the restored 정파 state back to 사파.
@@ -4564,7 +4648,7 @@ fn event() {
                 event_script_paths(&path, &mut paths);
             }
         }
-        assert_eq!(paths.len(), 1_093, "all JSON event scripts must be audited");
+        assert_eq!(paths.len(), 1_095, "all JSON event scripts must be audited");
 
         const PREAMBLE: &str = r#"fn end_event() { throw #{ type: "event_complete" }; }"#;
         for path in paths {
@@ -5347,12 +5431,10 @@ fn event() {
                         let self_rendered =
                             crate::hangul::post_position1(&text.replace("[공]", "당신"));
                         assert!(
-                            source
-                                .lines()
-                                .any(|line| {
-                                    (line.contains("self_output(") && line.contains(text))
-                                        || line.contains(&self_rendered)
-                                }),
+                            source.lines().any(|line| {
+                                (line.contains("self_output(") && line.contains(text))
+                                    || line.contains(&self_rendered)
+                            }),
                             "{zone}/{script}: original $순위갱신 self output must render [공] as 당신"
                         );
                     }
@@ -6215,15 +6297,18 @@ fn event() {
         run_zone_event(&mut body, "낙양성", "복권맨_긁어_긁_복권.rhai", None);
 
         assert!(!body_has_item_spec(&body, "복권3"));
+        assert!(body.object.objs.is_empty());
         let items = body
             .object
-            .objs
+            .inv_stack
             .iter()
-            .map(|item| item.lock().unwrap().getString("인덱스"))
+            .filter(|(_, count)| **count > 0)
+            .map(|(key, count)| (key.as_str(), *count))
             .collect::<Vec<_>>();
         assert_eq!(items.len(), 1);
+        assert_eq!(items[0].1, 1);
         assert!(
-            candidates.contains(&items[0].as_str()),
+            candidates.contains(&items[0].0),
             "unexpected lottery herb index {:?}",
             items[0]
         );
@@ -9184,10 +9269,17 @@ fn event() {
         assert!(body_has_item_spec(&body, "yak12 1"));
 
         let storage = crate::script::ScriptStorage::default();
-        storage
+        let eaten = storage
             .execute("먹어", &mut body, "초혼단", None, None, None)
             .unwrap();
-        assert_eq!(body.get_int("최고내공"), 110);
+        assert_eq!(
+            body.get_int("최고내공"),
+            110,
+            "eat output={:?}, stacks={:?}, objects={}",
+            eaten.0,
+            body.object.inv_stack,
+            body.object.objs.len()
+        );
         assert!(!body_has_item_spec(&body, "yak12"));
 
         let mut world = crate::world::get_world_state().write().unwrap();
@@ -10402,6 +10494,7 @@ fn event() {
             assert!(!get_user_event(&body, next_state).is_empty());
             super::set_user_event(&mut body, next_state, "");
             body.object.objs.clear();
+            body.object.inv_stack.clear();
         }
         let path = "data/map/하북성/93.json";
         let json: serde_json::Value =

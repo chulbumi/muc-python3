@@ -2044,7 +2044,10 @@ mod tests {
             .unwrap();
         let repeat_sends = match repeat_special {
             Some(crate::command::CommandResult::OutputAndSendToUsers(_, sends)) => sends,
-            other => panic!("expected existing-fight room delivery, got {other:?}, output={repeat_output:?}, temp={:?}", body.temp()),
+            other => panic!(
+                "expected existing-fight room delivery, got {other:?}, output={repeat_output:?}, temp={:?}",
+                body.temp()
+            ),
         };
         assert_eq!(repeat_sends.len(), 1, "{repeat_sends:?}");
         assert_eq!(repeat_sends[0].0, "전투시전관전자");
@@ -2094,7 +2097,9 @@ mod tests {
             .unwrap();
         assert_eq!(
             denied,
-            vec!["☞ 지금은 \x1b[1m\x1b[31m살겁\x1b[0m\x1b[37m\x1b[40m을 일으키기에 부적합한 상황 이라네"]
+            vec![
+                "☞ 지금은 \x1b[1m\x1b[31m살겁\x1b[0m\x1b[37m\x1b[40m을 일으키기에 부적합한 상황 이라네"
+            ]
         );
         assert_eq!(caster.get_mp(), 1_000);
         assert!(super::super::combat_commands::pvp_target(&caster).is_none());

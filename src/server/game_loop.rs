@@ -417,7 +417,11 @@ impl GameLoop {
                                                     })
                                                 })
                                             {
-                                                player.body.object.insert(item);
+                                                let _ = crate::script::inventory_compat::store_acquired_object(
+                                                    &mut player.body.object,
+                                                    item,
+                                                    true,
+                                                );
                                             }
                                         }
                                     }
@@ -516,10 +520,11 @@ impl GameLoop {
                                             }
                                             let name = item.getString("이름");
                                             observer_loot.push(name.clone());
-                                            player
-                                                .body
-                                                .object
-                                                .insert(Arc::new(std::sync::Mutex::new(item)));
+                                            let _ = crate::script::inventory_compat::store_acquired_object(
+                                                &mut player.body.object,
+                                                Arc::new(std::sync::Mutex::new(item)),
+                                                true,
+                                            );
                                             crate::script::combat_commands::queue_combat_presentation_event(
                                                 &mut player.body,
                                                 serde_json::json!({ "kind": "loot", "item": name }),
@@ -554,10 +559,23 @@ impl GameLoop {
                                         {
                                             break;
                                         }
+                                        if item.lock().ok().is_some_and(|item| {
+                                            !crate::script::inventory_compat::can_accept_object(
+                                                &player.body.object,
+                                                &item,
+                                            )
+                                        }) {
+                                            break;
+                                        }
                                         let item = mob.inventory.remove(0);
                                         observer_loot.push(name.clone());
-                                        player.body.object.insert(item);
-                                        if one_item {
+                                        let accepted =
+                                            crate::script::inventory_compat::store_acquired_object(
+                                                &mut player.body.object,
+                                                item,
+                                                true,
+                                            );
+                                        if accepted && one_item {
                                             crate::oneitem::oneitem_have(&index, &contributor);
                                         }
                                         crate::script::combat_commands::queue_combat_presentation_event(
@@ -3789,10 +3807,8 @@ mod tests {
         let clients = broadcaster.clients.lock();
         let body = &clients[&addr(41169)].player.as_ref().unwrap().body;
         assert!(body.get_int("은전") > 0);
-        assert!(body.object.objs.iter().any(|item| {
-            item.lock()
-                .is_ok_and(|item| item.getString("인덱스") == "1")
-        }));
+        assert_eq!(body.object.inv_stack.get("1"), Some(&1));
+        assert!(body.object.objs.is_empty());
         drop(clients);
         let mut world = get_world_state().write().unwrap();
         world.remove_player_position(&contributor);

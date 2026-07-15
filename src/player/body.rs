@@ -1350,7 +1350,7 @@ impl Body {
         // Unmark all items as in use
         for obj in &self.object.objs {
             if let Ok(mut item) = obj.lock() {
-                item.set("inUse", 0);
+                item.attr.remove("inUse");
             }
         }
     }

@@ -16,6 +16,7 @@ use std::sync::{Arc, RwLock};
 
 use super::difficulty::{base_zone_name, difficulty_from_zone, DifficultyLevel};
 use super::event_binding::EventBindings;
+use super::fixture::{FixtureKind, FixturePlacement};
 
 /// Direction types for room exits. 파이썬 objs/room.sortExit·longExitStr와 동일(동서남북위아래 + 대각 4방향).
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
@@ -141,6 +142,8 @@ pub struct RawRoomData {
     pub installed_box_count: usize,
     /// Optional trigger-to-script bindings; execution is owned elsewhere.
     pub events: EventBindings,
+    /// Static interactive objects placed when the room is first activated.
+    pub fixture_placements: Vec<FixturePlacement>,
 }
 
 /// Room structure representing a game room
@@ -170,6 +173,8 @@ pub struct Room {
     pub installed_box_count: usize,
     /// Optional room-level scripts such as enter, search, or custom triggers.
     pub events: EventBindings,
+    /// Static fixture declarations loaded from this room's JSON data.
+    pub fixture_placements: Vec<FixturePlacement>,
     /// Last Python-compatible `Room.update()` time in Unix milliseconds.
     pub last_update_millis: i64,
     /// Level restriction (lower bound)
@@ -198,6 +203,7 @@ impl Room {
             items: Vec::new(),
             installed_box_count: 0,
             events: EventBindings::default(),
+            fixture_placements: Vec::new(),
             last_update_millis: 0,
             level_limit: 0,
             level_upper: 0,
@@ -499,6 +505,7 @@ impl RoomCache {
         room.mob_ids = raw.mob_ids.clone();
         room.installed_box_count = raw.installed_box_count;
         room.events = raw.events;
+        room.fixture_placements = raw.fixture_placements;
 
         // Parse exits (zone needed for same-zone "동 35" 형식)
         room.exits = self.parse_exits(&raw.exits, &raw.zone)?;
@@ -594,6 +601,38 @@ impl RoomCache {
             Some(JsonValue::String(value)) => value.chars().count(),
             _ => 0,
         };
+        let fixture_placements = map_info
+            .get("fixtures")
+            .or_else(|| map_info.get("고정물"))
+            .and_then(JsonValue::as_array)
+            .map(|values| {
+                values
+                    .iter()
+                    .filter_map(|value| {
+                        let object = value.as_object()?;
+                        let key = object.get("key")?.as_str()?.trim();
+                        let kind = object
+                            .get("kind")
+                            .and_then(JsonValue::as_str)
+                            .and_then(FixtureKind::parse)
+                            .unwrap_or(FixtureKind::Fixture);
+                        if key.is_empty() {
+                            return None;
+                        }
+                        let attributes = object
+                            .iter()
+                            .filter(|(field, _)| *field != "key" && *field != "kind")
+                            .map(|(field, value)| (field.clone(), value.clone()))
+                            .collect();
+                        Some(FixturePlacement {
+                            key: key.to_string(),
+                            kind,
+                            attributes,
+                        })
+                    })
+                    .collect()
+            })
+            .unwrap_or_default();
 
         Ok(RawRoomData {
             properties,
@@ -604,6 +643,7 @@ impl RoomCache {
             mob_ids,
             installed_box_count,
             events: EventBindings::from_json_map(map_info),
+            fixture_placements,
         })
     }
 

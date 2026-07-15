@@ -24,6 +24,17 @@ pub enum FixtureKind {
     Facility,
 }
 
+/// Static fixture declaration embedded in a room JSON document.
+///
+/// `key` is stable within one room and prevents duplicate placement when the
+/// room is entered repeatedly. All game-facing fields remain in `attributes`.
+#[derive(Debug, Clone, PartialEq)]
+pub struct FixturePlacement {
+    pub key: String,
+    pub kind: FixtureKind,
+    pub attributes: HashMap<String, JsonValue>,
+}
+
 impl FixtureKind {
     pub fn as_str(self) -> &'static str {
         match self {

@@ -265,7 +265,8 @@ assert player.save(False)
     );
     assert_eq!(body.item_skill_map.get("첫무기"), Some(&12));
     assert_eq!(body.get_string("설정상태"), "자동습득 1|전음거부 0");
-    assert_eq!(body.object.objs.len(), 1);
+    assert!(body.object.objs.is_empty());
+    assert_eq!(body.object.inv_stack.get("1000"), Some(&1));
     assert!(save_body_to_json_without_timestamp(
         &mut body,
         path.to_str().unwrap()
@@ -296,6 +297,63 @@ assert len(player.objs) == 1 and player.objs[0].index == '1000'
         "Python reload after Rust save failed:\nstdout={}\nstderr={}",
         String::from_utf8_lossy(&verified.stdout),
         String::from_utf8_lossy(&verified.stderr)
+    );
+    let _ = std::fs::remove_file(path);
+}
+
+#[test]
+fn actual_python_loader_expands_compact_counts_and_applies_template_deltas() {
+    let unique = format!(
+        "수량델타파이썬로드{}{}",
+        std::process::id(),
+        std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap()
+            .as_nanos()
+    );
+    let path = std::path::Path::new("data/user").join(format!("{unique}.json"));
+    let source = serde_json::json!({
+        "사용자오브젝트": {"이름": unique},
+        "아이템": [
+            {"인덱스": "1000", "수량": 3},
+            {
+                "인덱스": "1000",
+                "수량": 1,
+                "변경": {"이름": "수량검증약", "고유번호": "delta-1"},
+                "제거": ["판매가격"]
+            },
+            {"인덱스": "64", "수량": 3},
+            {"인덱스": "64", "수량": 2}
+        ]
+    });
+    std::fs::write(&path, serde_json::to_string_pretty(&source).unwrap()).unwrap();
+
+    let script = r#"
+import os
+from client import Player
+name = os.environ['MUC_COMPACT_ITEM_USER']
+player = Player()
+assert player.load(name)
+ordinary = [item for item in player.objs if item.index == '1000']
+unique = [item for item in player.objs if item.index == '64']
+assert len(ordinary) == 4
+assert len(unique) == 1
+changed = [item for item in ordinary if item.get('고유번호') == 'delta-1']
+assert len(changed) == 1
+assert changed[0].get('이름') == '수량검증약'
+assert '판매가격' not in changed[0].attr
+"#;
+    let output = std::process::Command::new("python3")
+        .arg("-c")
+        .arg(script)
+        .env("MUC_COMPACT_ITEM_USER", &unique)
+        .output()
+        .unwrap();
+    assert!(
+        output.status.success(),
+        "Python compact item load failed:\nstdout={}\nstderr={}",
+        String::from_utf8_lossy(&output.stdout),
+        String::from_utf8_lossy(&output.stderr)
     );
     let _ = std::fs::remove_file(path);
 }

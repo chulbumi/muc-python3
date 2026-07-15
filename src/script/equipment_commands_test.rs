@@ -287,21 +287,72 @@ fn unequip_uses_the_selected_items_real_name_ansi_particle_and_stats() {
         other => panic!("unexpected unequip result: {other:?}"),
     };
     assert_eq!(
-            sends,
-            vec![(
-                observer.clone(),
-                format!(
-                    "{}\r\n\x1b[1m{actor}\x1b[0;37m{} \x1b[36m\x1b[35mSword\x1b[0;37m을\x1b[37m 착용해제 합니다.\r\n\r\n\x1b[0;37;40m[ 71/81, 9/10 ] ",
-                    RAW_USER_MESSAGE_PREFIX,
-                    han_iga(&actor)
-                )
-            )]
-        );
+        sends,
+        vec![(
+            observer.clone(),
+            format!(
+                "{}\r\n\x1b[1m{actor}\x1b[0;37m{} \x1b[36m\x1b[35mSword\x1b[0;37m을\x1b[37m 착용해제 합니다.\r\n\r\n\x1b[0;37;40m[ 71/81, 9/10 ] ",
+                RAW_USER_MESSAGE_PREFIX,
+                han_iga(&actor)
+            )
+        )]
+    );
     let mut world = get_world_state().write().unwrap();
     world.remove_player_position(&actor);
     world.remove_player_position(&observer);
     set_precomputed_party_context(rhai::Map::new());
 }
+
+#[test]
+fn unequip_rejoins_a_pristine_materialized_item_to_its_counted_stack() {
+    let storage = ScriptStorage::default();
+    let mut body = Body::new();
+    body.object.inv_stack.insert("361".into(), 2);
+
+    storage
+        .execute("입어", &mut body, "수박모자", None, None, None)
+        .unwrap();
+    assert_eq!(body.object.inv_stack.get("361"), Some(&1));
+    assert_eq!(body.object.objs.len(), 1);
+    assert!(body.object.objs[0].lock().unwrap().getBool("inUse"));
+
+    storage
+        .execute("벗어", &mut body, "수박모자", None, None, None)
+        .unwrap();
+    assert_eq!(body.object.inv_stack.get("361"), Some(&2));
+    assert!(body.object.objs.is_empty());
+}
+
+#[test]
+fn numbered_equip_counts_stateful_objects_before_pristine_quantity() {
+    let storage = ScriptStorage::default();
+    let mut body = Body::new();
+    let (modified, _) = object_from_item_json("361").unwrap();
+    modified.lock().unwrap().set("판매가격", 99_i64);
+    body.object.objs.push(modified.clone());
+    body.object.inv_stack.insert("361".into(), 1);
+
+    let equipped = storage
+        .execute("입어", &mut body, "2수박모자", None, None, None)
+        .unwrap();
+
+    assert_eq!(equipped.0.len(), 1);
+    assert!(!body.object.inv_stack.contains_key("361"));
+    assert_eq!(body.object.objs.len(), 2);
+    assert!(body.object.objs.iter().any(|item| {
+        let item = item.lock().unwrap();
+        item.getBool("inUse") && item.getInt("판매가격") == 9
+    }));
+    assert!(!modified.lock().unwrap().getBool("inUse"));
+
+    storage
+        .execute("벗어", &mut body, "수박모자", None, None, None)
+        .unwrap();
+    assert_eq!(body.object.inv_stack.get("361"), Some(&1));
+    assert_eq!(body.object.objs.len(), 1);
+    assert!(Arc::ptr_eq(&body.object.objs[0], &modified));
+}
+
 #[test]
 fn all_mastery_item_list_matches_python_user_value_comparisons() {
     let suffix = std::process::id();

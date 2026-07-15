@@ -310,6 +310,37 @@ fn increment_group(groups: &mut Vec<TransferGroup>, details: &ItemDetails) {
     }
 }
 
+fn increment_group_count(groups: &mut Vec<TransferGroup>, details: &ItemDetails, count: i64) {
+    if count <= 0 {
+        return;
+    }
+    if let Some(group) = groups.iter_mut().find(|group| group.name == details.name) {
+        group.count += count;
+    } else {
+        groups.push(TransferGroup {
+            name: details.name.clone(),
+            particle_source: details.particle_source.clone(),
+            ansi: details.ansi.clone(),
+            count,
+        });
+    }
+}
+
+fn stack_details(key: &str) -> Option<ItemDetails> {
+    let (item, _) = super::object_from_item_json(key)?;
+    let item = item.lock().ok()?;
+    Some(item_details(&item))
+}
+
+fn inventory_unit_count(inventory: &Object) -> i64 {
+    inventory.objs.len() as i64
+        + inventory
+            .inv_stack
+            .values()
+            .filter(|count| **count > 0)
+            .sum::<i64>()
+}
+
 fn groups_to_dynamic(groups: Vec<TransferGroup>) -> rhai::Array {
     groups
         .into_iter()
@@ -510,34 +541,55 @@ where
                 .insert(BOX_LOAD_SUPPORTED_KEY.to_string(), Value::Int(0));
             return box_object;
         };
-        let Some(item) = load_item(&index) else {
-            continue;
-        };
-        let Ok(mut item_value) = item.lock() else {
-            box_object
-                .temp
-                .insert(BOX_LOAD_SUPPORTED_KEY.to_string(), Value::Int(0));
-            return box_object;
-        };
-        for field in [
-            "확장 이름",
-            "이름",
-            "고유번호",
-            "반응이름",
-            "공격력",
-            "방어력",
-            "기량",
-            "옵션",
-            "아이템속성",
-            "시간",
-        ] {
-            if let Some(value) = record.get(field) {
-                super::inventory_compat::set_item_json_field(&mut item_value, field, value);
+        let count = record
+            .get("수량")
+            .and_then(JsonValue::as_i64)
+            .unwrap_or(1)
+            .clamp(1, 100_000);
+        for _ in 0..count {
+            let Some(item) = load_item(&index) else {
+                continue;
+            };
+            let Ok(mut item_value) = item.lock() else {
+                box_object
+                    .temp
+                    .insert(BOX_LOAD_SUPPORTED_KEY.to_string(), Value::Int(0));
+                return box_object;
+            };
+            if let Some(removed) = record.get("제거").and_then(JsonValue::as_array) {
+                for field in removed.iter().filter_map(JsonValue::as_str) {
+                    if field != "인덱스" {
+                        item_value.attr.remove(field);
+                    }
+                }
             }
+            if let Some(changed) = record.get("변경").and_then(JsonValue::as_object) {
+                for (field, value) in changed {
+                    if field != "인덱스" {
+                        super::inventory_compat::set_item_json_field(&mut item_value, field, value);
+                    }
+                }
+            } else {
+                for field in [
+                    "확장 이름",
+                    "이름",
+                    "고유번호",
+                    "반응이름",
+                    "공격력",
+                    "방어력",
+                    "기량",
+                    "옵션",
+                    "아이템속성",
+                    "시간",
+                ] {
+                    if let Some(value) = record.get(field) {
+                        super::inventory_compat::set_item_json_field(&mut item_value, field, value);
+                    }
+                }
+            }
+            drop(item_value);
+            let _ = super::inventory_compat::store_acquired_object(&mut box_object, item, true);
         }
-        drop(item_value);
-        // Python Object.insert prepends every loaded record, reversing JSON.
-        box_object.insert(item);
     }
     box_object
 }
@@ -645,8 +697,8 @@ fn box_records(box_object: &Object) -> Option<Vec<JsonValue>> {
     box_object
         .objs
         .iter()
-        .map(|item| item.lock().ok().and_then(|item| box_item_record(&item)))
-        .collect()
+        .all(recordable_item)
+        .then(|| super::inventory_compat::compact_object_records(box_object))
 }
 
 fn recordable_item(item: &Arc<Mutex<Object>>) -> bool {
@@ -1091,7 +1143,11 @@ fn resolve_box(body: &Body, raw_name: &str) -> Result<Arc<Mutex<Object>>, Transf
                             .get_fixture(id)
                             .map(|fixture| {
                                 let (exact, prefixes) = fixture.match_counts(&query.name);
-                                if exact { 1 } else { prefixes as i64 }
+                                if exact {
+                                    1
+                                } else {
+                                    prefixes as i64
+                                }
                             })
                             .unwrap_or(0);
                         (count, None)
@@ -1198,6 +1254,27 @@ fn find_inventory_item(
     Ok(None)
 }
 
+fn count_inventory_items(
+    inventory: &[Arc<Mutex<Object>>],
+    name: &str,
+    skip_in_use: bool,
+    skip_hidden: bool,
+) -> Result<i64, TransferStatus> {
+    let mut found = 0_i64;
+    for item in inventory {
+        let item = item.lock().map_err(|_| TransferStatus::Unsupported)?;
+        if !matches_item_name(&item, name) {
+            continue;
+        }
+        let details = item_details(&item);
+        if (skip_in_use && details.in_use) || (skip_hidden && details.hidden) {
+            continue;
+        }
+        found += 1;
+    }
+    Ok(found)
+}
+
 fn selected_count(words: &[&str]) -> i64 {
     words
         .get(2)
@@ -1244,8 +1321,7 @@ fn plan_put_bulk(
 ) -> Result<(Vec<Arc<Mutex<Object>>>, Vec<TransferGroup>), TransferStatus> {
     let capacity = box_capacity(box_object).ok_or(TransferStatus::Unsupported)?;
     let public = box_is_public(box_object);
-    let mut box_count =
-        i64::try_from(box_object.objs.len()).map_err(|_| TransferStatus::Unsupported)?;
+    let mut box_count = inventory_unit_count(box_object);
     let mut selected = Vec::new();
     let mut groups = Vec::new();
 
@@ -1285,8 +1361,9 @@ fn put_bulk(
     oneitems: &mut dyn OneItemActions,
 ) -> TransferResult {
     let box_name = box_object.getName();
-    let (selected, groups) = match plan_put_bulk(body, box_object, mode) {
+    let (selected, mut groups) = match plan_put_bulk(body, box_object, mode) {
         Ok(value) => value,
+        Err(TransferStatus::Nothing) => (Vec::new(), Vec::new()),
         Err(status) => return TransferResult::for_box(status, box_name),
     };
 
@@ -1308,6 +1385,38 @@ fn put_bulk(
         if details.one_item {
             oneitems.keep(&details.index, &location);
         }
+    }
+    let Some(capacity) = box_capacity(box_object) else {
+        return TransferResult::for_box(TransferStatus::Unsupported, box_name);
+    };
+    let public = box_is_public(box_object);
+    let mut stack_keys = body.object.inv_stack.keys().cloned().collect::<Vec<_>>();
+    stack_keys.sort();
+    for key in stack_keys {
+        let have = body.object.inv_stack.get(&key).copied().unwrap_or(0);
+        let Some(details) = stack_details(&key) else {
+            continue;
+        };
+        if !mode.matches(&details)
+            || !box_accepts_kind(box_object, &details.kind)
+            || details.cannot_store
+            || (public && details.public_blocked)
+        {
+            continue;
+        }
+        let available = capacity.saturating_sub(inventory_unit_count(box_object));
+        if available <= 0 {
+            break;
+        }
+        let moved = have.min(available);
+        if super::inventory_compat::remove_pristine_count(&mut body.object, &key, moved)
+            && super::inventory_compat::add_pristine_count(box_object, &key, moved)
+        {
+            increment_group_count(&mut groups, &details, moved);
+        }
+    }
+    if groups.is_empty() {
+        return TransferResult::for_box(TransferStatus::Nothing, box_name);
     }
     let _ = save_box(box_object);
     TransferResult {
@@ -1425,7 +1534,57 @@ fn put_selected(
             Err(status) => return TransferResult::for_box(status, box_name),
         };
         if initial.is_none() {
-            return TransferResult::for_box(TransferStatus::ItemNotFound, box_name);
+            let object_count = match count_inventory_items(&inventory, &parsed_name, true, false) {
+                Ok(count) => count,
+                Err(status) => return TransferResult::for_box(status, box_name),
+            };
+            let remaining = parsed_order.max(1).saturating_sub(object_count);
+            let Some((key, offset)) = super::inventory_compat::counted_item_at(
+                &body.object.inv_stack,
+                &parsed_name,
+                remaining,
+            ) else {
+                return TransferResult::for_box(TransferStatus::ItemNotFound, box_name);
+            };
+            let have = body.object.inv_stack.get(&key).copied().unwrap_or(0);
+            let Some(details) = stack_details(&key) else {
+                return TransferResult::for_box(TransferStatus::Unsupported, box_name);
+            };
+            if !box_accepts_kind(box_object, &details.kind)
+                || details.cannot_store
+                || (box_is_public(box_object) && details.public_blocked)
+            {
+                return TransferResult::for_box(TransferStatus::CannotStore, box_name);
+            }
+            let Some(capacity) = box_capacity(box_object) else {
+                return TransferResult::for_box(TransferStatus::Unsupported, box_name);
+            };
+            let requested = if parsed_order > 1 {
+                1
+            } else {
+                selected_count(words).max(1)
+            };
+            let available = capacity.saturating_sub(inventory_unit_count(box_object));
+            if available <= 0 {
+                return TransferResult::for_box(TransferStatus::BoxFull, box_name);
+            }
+            let moved = requested
+                .min(have.saturating_sub(offset - 1))
+                .min(available);
+            if !super::inventory_compat::remove_pristine_count(&mut body.object, &key, moved)
+                || !super::inventory_compat::add_pristine_count(box_object, &key, moved)
+            {
+                return TransferResult::for_box(TransferStatus::Unsupported, box_name);
+            }
+            let _ = save_box(box_object);
+            let mut groups = Vec::new();
+            increment_group_count(&mut groups, &details, moved);
+            return TransferResult {
+                status: TransferStatus::Ok,
+                box_name: box_object.getName(),
+                money: 0,
+                groups,
+            };
         }
         fallback_item = true;
     }
@@ -1447,10 +1606,7 @@ fn put_selected(
     let Some(capacity) = box_capacity(box_object) else {
         return TransferResult::for_box(TransferStatus::Unsupported, box_name);
     };
-    let mut box_count = match i64::try_from(box_object.objs.len()) {
-        Ok(value) => value,
-        Err(_) => return TransferResult::for_box(TransferStatus::Unsupported, box_name),
-    };
+    let mut box_count = inventory_unit_count(box_object);
     let match_name = if fallback_item {
         parsed_name.as_str()
     } else {
@@ -1494,7 +1650,35 @@ fn put_selected(
             break;
         }
     }
-    if selected.is_empty() {
+    let mut stack_moves = Vec::<(String, i64)>::new();
+    let mut remaining = count.saturating_sub(selected.len() as i64);
+    if !fallback_item && remaining > 0 {
+        for key in super::inventory_compat::counted_item_keys(&body.object.inv_stack, match_name) {
+            if box_count >= capacity {
+                break;
+            }
+            let Some(details) = stack_details(&key) else {
+                continue;
+            };
+            if !box_accepts_kind(box_object, &details.kind) || details.cannot_store {
+                continue;
+            }
+            let have = body.object.inv_stack.get(&key).copied().unwrap_or(0);
+            let available = capacity.saturating_sub(box_count);
+            let moved = have.min(available).min(remaining);
+            if moved <= 0 {
+                continue;
+            }
+            increment_group_count(&mut groups, &details, moved);
+            stack_moves.push((key, moved));
+            box_count += moved;
+            remaining -= moved;
+            if remaining == 0 {
+                break;
+            }
+        }
+    }
+    if selected.is_empty() && stack_moves.is_empty() {
         return TransferResult::for_box(TransferStatus::Nothing, box_name);
     }
     if !can_save_after_put(box_object, &selected) {
@@ -1511,6 +1695,13 @@ fn put_selected(
         box_object.insert(item);
         if details.one_item {
             oneitems.keep(&details.index, &location);
+        }
+    }
+    for (key, count) in stack_moves {
+        if !super::inventory_compat::remove_pristine_count(&mut body.object, &key, count)
+            || !super::inventory_compat::add_pristine_count(box_object, &key, count)
+        {
+            return TransferResult::for_box(TransferStatus::Unsupported, box_name);
         }
     }
     let _ = save_box(box_object);
@@ -1610,6 +1801,26 @@ fn current_inventory_load(body: &Body) -> Result<(i64, i64), TransferStatus> {
             .ok_or(TransferStatus::Unsupported)?;
         count = count.checked_add(1).ok_or(TransferStatus::Unsupported)?;
     }
+    for (key, quantity) in &body.object.inv_stack {
+        if *quantity <= 0 {
+            continue;
+        }
+        let details = stack_details(key).ok_or(TransferStatus::Unsupported)?;
+        if details.hidden {
+            continue;
+        }
+        weight = weight
+            .checked_add(
+                details
+                    .weight
+                    .ok_or(TransferStatus::Unsupported)?
+                    .saturating_mul(*quantity),
+            )
+            .ok_or(TransferStatus::Unsupported)?;
+        count = count
+            .checked_add(*quantity)
+            .ok_or(TransferStatus::Unsupported)?;
+    }
     Ok((weight, count))
 }
 
@@ -1685,6 +1896,13 @@ fn apply_take(
     oneitems: &mut dyn OneItemActions,
 ) -> TransferResult {
     let owner = body.get_name();
+    if selected.iter().any(|item| {
+        item.lock()
+            .ok()
+            .is_some_and(|item| !super::inventory_compat::can_accept_object(&body.object, &item))
+    }) {
+        return TransferResult::for_box(TransferStatus::Unsupported, box_object.getName());
+    }
     if !can_save_after_take(box_object, &selected) {
         return TransferResult::for_box(TransferStatus::Unsupported, box_object.getName());
     }
@@ -1694,7 +1912,8 @@ fn apply_take(
             Err(status) => return TransferResult::for_box(status, box_object.getName()),
         };
         box_object.remove(&item);
-        body.object.insert(item);
+        let accepted = super::inventory_compat::store_acquired_object(&mut body.object, item, true);
+        debug_assert!(accepted);
         if details.one_item {
             oneitems.have(&details.index, &owner);
         }
@@ -1716,11 +1935,73 @@ fn take_bulk(
     oneitems: &mut dyn OneItemActions,
 ) -> TransferResult {
     let box_name = box_object.getName();
-    let (selected, groups) = match plan_take_bulk(body, box_object, mode, max_count) {
+    let (selected, mut groups) = match plan_take_bulk(body, box_object, mode, max_count) {
+        Ok(value) => value,
+        Err(TransferStatus::Nothing) => (Vec::new(), Vec::new()),
+        Err(status) => return TransferResult::for_box(status, box_name),
+    };
+    let owner = body.get_name();
+    if selected.iter().any(|item| {
+        item.lock()
+            .ok()
+            .is_some_and(|item| !super::inventory_compat::can_accept_object(&body.object, &item))
+    }) {
+        return TransferResult::for_box(TransferStatus::Unsupported, box_name);
+    }
+    for item in selected {
+        let details = match item_arc_details(&item) {
+            Ok(details) => details,
+            Err(status) => return TransferResult::for_box(status, box_name),
+        };
+        box_object.remove(&item);
+        let accepted = super::inventory_compat::store_acquired_object(&mut body.object, item, true);
+        debug_assert!(accepted);
+        if details.one_item {
+            oneitems.have(&details.index, &owner);
+        }
+    }
+    let (mut weight, mut count) = match current_inventory_load(body) {
         Ok(value) => value,
         Err(status) => return TransferResult::for_box(status, box_name),
     };
-    apply_take(body, box_object, selected, groups, oneitems)
+    let mut stack_keys = box_object.inv_stack.keys().cloned().collect::<Vec<_>>();
+    stack_keys.sort();
+    for key in stack_keys {
+        let have = box_object.inv_stack.get(&key).copied().unwrap_or(0);
+        let Some(details) = stack_details(&key) else {
+            continue;
+        };
+        if !mode.matches(&details) {
+            continue;
+        }
+        let mut moved = 0_i64;
+        while moved < have {
+            if can_take_candidate(body, &details, weight, count, max_count).is_err() {
+                break;
+            }
+            moved += 1;
+            if !details.hidden {
+                weight = weight.saturating_add(details.weight.unwrap_or(0));
+                count = count.saturating_add(1);
+            }
+        }
+        if moved > 0
+            && super::inventory_compat::remove_pristine_count(box_object, &key, moved)
+            && super::inventory_compat::add_pristine_count(&mut body.object, &key, moved)
+        {
+            increment_group_count(&mut groups, &details, moved);
+        }
+    }
+    if groups.is_empty() {
+        return TransferResult::for_box(TransferStatus::Nothing, box_name);
+    }
+    let _ = save_box(box_object);
+    TransferResult {
+        status: TransferStatus::Ok,
+        box_name: box_object.getName(),
+        money: 0,
+        groups,
+    }
 }
 
 fn take_single_preflight(
@@ -1745,11 +2026,14 @@ fn take_selected(
     let raw_name = words[1];
     let mut count = selected_count(words);
     let mut item: Option<Arc<Mutex<Object>>> = None;
+    let mut numeric_stack: Option<String> = None;
     let mut order = -1_i64;
 
     if python_is_digit_string(raw_name) {
         let index = parse_int_prefix(raw_name);
-        let length = match i64::try_from(box_object.objs.len()) {
+        let length = inventory_unit_count(box_object);
+        let object_length = box_object.objs.len();
+        let length = match i64::try_from(length) {
             Ok(value) => value,
             Err(_) => return TransferResult::for_box(TransferStatus::Unsupported, box_name),
         };
@@ -1761,16 +2045,55 @@ fn take_selected(
                 // Python evaluates box.objs[-1] and raises IndexError.
                 return TransferResult::for_box(TransferStatus::Unsupported, box_name);
             }
-            let vec_index = if index == 0 {
-                box_object.objs.len() - 1
+            let unit_index = if index == 0 {
+                usize::try_from(length - 1).unwrap_or(usize::MAX)
             } else {
                 usize::try_from(index - 1).unwrap_or(usize::MAX)
             };
-            item = box_object.objs.get(vec_index).cloned();
-            if item.is_some() {
+            if unit_index < object_length {
+                item = box_object.objs.get(unit_index).cloned();
                 order = 0;
+            } else {
+                let mut offset = unit_index.saturating_sub(object_length);
+                let mut stack_keys = box_object.inv_stack.keys().cloned().collect::<Vec<_>>();
+                stack_keys.sort();
+                for key in stack_keys {
+                    let quantity = box_object.inv_stack.get(&key).copied().unwrap_or(0).max(0);
+                    if offset < quantity as usize {
+                        numeric_stack = Some(key);
+                        break;
+                    }
+                    offset = offset.saturating_sub(quantity as usize);
+                }
             }
         }
+    }
+
+    if let Some(key) = numeric_stack {
+        let Some(details) = stack_details(&key) else {
+            return TransferResult::for_box(TransferStatus::Unsupported, box_name);
+        };
+        let (weight, current_count) = match current_inventory_load(body) {
+            Ok(value) => value,
+            Err(status) => return TransferResult::for_box(status, box_name),
+        };
+        if let Err(status) = can_take_candidate(body, &details, weight, current_count, max_count) {
+            return TransferResult::for_box(status, box_name);
+        }
+        if !super::inventory_compat::remove_pristine_count(box_object, &key, 1)
+            || !super::inventory_compat::add_pristine_count(&mut body.object, &key, 1)
+        {
+            return TransferResult::for_box(TransferStatus::Unsupported, box_name);
+        }
+        let _ = save_box(box_object);
+        let mut groups = Vec::new();
+        increment_group_count(&mut groups, &details, 1);
+        return TransferResult {
+            status: TransferStatus::Ok,
+            box_name: box_object.getName(),
+            money: 0,
+            groups,
+        };
     }
 
     if item.is_none() {
@@ -1788,7 +2111,56 @@ fn take_selected(
             Err(status) => return TransferResult::for_box(status, box_name),
         };
         if item.is_none() {
-            return TransferResult::for_box(TransferStatus::ItemNotFound, box_name);
+            let object_count = match count_inventory_items(&box_object.objs, &name, true, false) {
+                Ok(count) => count,
+                Err(status) => return TransferResult::for_box(status, box_name),
+            };
+            let remaining = order.max(1).saturating_sub(object_count);
+            let Some((key, offset)) =
+                super::inventory_compat::counted_item_at(&box_object.inv_stack, &name, remaining)
+            else {
+                return TransferResult::for_box(TransferStatus::ItemNotFound, box_name);
+            };
+            let have = box_object.inv_stack.get(&key).copied().unwrap_or(0);
+            let Some(details) = stack_details(&key) else {
+                return TransferResult::for_box(TransferStatus::Unsupported, box_name);
+            };
+            let requested = if order > 1 { 1 } else { count.max(1) };
+            let (mut weight, mut current_count) = match current_inventory_load(body) {
+                Ok(value) => value,
+                Err(status) => return TransferResult::for_box(status, box_name),
+            };
+            let mut moved = 0_i64;
+            let wanted = requested.min(have.saturating_sub(offset - 1));
+            while moved < wanted {
+                if let Err(status) =
+                    can_take_candidate(body, &details, weight, current_count, max_count)
+                {
+                    if moved == 0 {
+                        return TransferResult::for_box(status, box_name);
+                    }
+                    break;
+                }
+                moved += 1;
+                if !details.hidden {
+                    weight = weight.saturating_add(details.weight.unwrap_or(0));
+                    current_count = current_count.saturating_add(1);
+                }
+            }
+            if !super::inventory_compat::remove_pristine_count(box_object, &key, moved)
+                || !super::inventory_compat::add_pristine_count(&mut body.object, &key, moved)
+            {
+                return TransferResult::for_box(TransferStatus::Unsupported, box_name);
+            }
+            let _ = save_box(box_object);
+            let mut groups = Vec::new();
+            increment_group_count(&mut groups, &details, moved);
+            return TransferResult {
+                status: TransferStatus::Ok,
+                box_name: box_object.getName(),
+                money: 0,
+                groups,
+            };
         }
         count = 1;
     }
@@ -1844,10 +2216,57 @@ fn take_selected(
             break;
         }
     }
-    if selected.is_empty() {
+    let mut stack_moves = Vec::<(String, i64)>::new();
+    let mut remaining = count.saturating_sub(selected.len() as i64);
+    if remaining > 0 {
+        for key in super::inventory_compat::counted_item_keys(&box_object.inv_stack, raw_name) {
+            let Some(details) = stack_details(&key) else {
+                continue;
+            };
+            let have = box_object.inv_stack.get(&key).copied().unwrap_or(0);
+            let mut moved = 0_i64;
+            while moved < have.min(remaining) {
+                if let Err(status) =
+                    can_take_candidate(body, &details, weight, current_count, max_count)
+                {
+                    if selected.is_empty() && stack_moves.is_empty() {
+                        return TransferResult::for_box(status, box_name);
+                    }
+                    break;
+                }
+                moved += 1;
+                if !details.hidden {
+                    weight = weight.saturating_add(details.weight.unwrap_or(0));
+                    current_count = current_count.saturating_add(1);
+                }
+            }
+            if moved > 0 {
+                increment_group_count(&mut groups, &details, moved);
+                stack_moves.push((key, moved));
+                remaining -= moved;
+            }
+            if remaining == 0 {
+                break;
+            }
+        }
+    }
+    if selected.is_empty() && stack_moves.is_empty() {
         return TransferResult::for_box(TransferStatus::Nothing, box_name);
     }
-    apply_take(body, box_object, selected, groups, oneitems)
+    let mut result = apply_take(body, box_object, selected, groups, oneitems);
+    if result.status != TransferStatus::Ok {
+        return result;
+    }
+    for (key, count) in stack_moves {
+        if !super::inventory_compat::remove_pristine_count(box_object, &key, count)
+            || !super::inventory_compat::add_pristine_count(&mut body.object, &key, count)
+        {
+            result.status = TransferStatus::Unsupported;
+            return result;
+        }
+    }
+    let _ = save_box(box_object);
+    result
 }
 
 fn execute_take(body: &mut Body, line: &str, oneitems: &mut dyn OneItemActions) -> TransferResult {
@@ -2007,7 +2426,7 @@ pub(super) fn register_box_command_efuns(engine: &mut Engine, body_ptr: *mut Bod
                 for key in ["보관수량", "보관최대수량", "보관증가은전", "은전"] {
                     result.insert(key.into(), Dynamic::from(value.getInt(key)));
                 }
-                let items = value
+                let mut items = value
                     .objs
                     .iter()
                     .filter_map(|item| {
@@ -2022,6 +2441,22 @@ pub(super) fn register_box_command_efuns(engine: &mut Engine, body_ptr: *mut Bod
                         Some(Dynamic::from(data))
                     })
                     .collect::<rhai::Array>();
+                let mut stack_keys = value.inv_stack.keys().cloned().collect::<Vec<_>>();
+                stack_keys.sort();
+                for key in stack_keys {
+                    let count = value.inv_stack.get(&key).copied().unwrap_or(0).max(0);
+                    let Some((item, _)) = super::object_from_item_json(&key) else {
+                        continue;
+                    };
+                    let Ok(item) = item.lock() else { continue };
+                    for _ in 0..count {
+                        let mut data = rhai::Map::new();
+                        data.insert("name".into(), Dynamic::from(item.getName()));
+                        data.insert("option".into(), Dynamic::from(item.get_option_str()));
+                        data.insert("oneitem".into(), Dynamic::from(false));
+                        items.push(Dynamic::from(data));
+                    }
+                }
                 result.insert("items".into(), Dynamic::from(items));
                 return Dynamic::from(result);
             }
@@ -2628,9 +3063,9 @@ mod tests {
         assert!(save_box(&box_object));
         let saved: JsonValue =
             serde_json::from_str(&std::fs::read_to_string(&source_path).unwrap()).unwrap();
-        assert_eq!(saved["아이템"][0]["이름"], "첫째");
-        assert_eq!(saved["아이템"][1]["이름"], "둘째");
-        assert_eq!(saved["아이템"][0]["시간"], serde_json::json!(12.5));
+        assert_eq!(saved["아이템"][0]["변경"]["이름"], "첫째");
+        assert_eq!(saved["아이템"][1]["변경"]["이름"], "둘째");
+        assert_eq!(saved["아이템"][0]["변경"]["시간"], serde_json::json!(12.5));
 
         let malformed = Arc::new(Mutex::new(Object::new()));
         box_object.objs.push(malformed);
@@ -2878,6 +3313,92 @@ mod tests {
         assert_eq!(result.status, TransferStatus::Ok);
         assert_eq!(object_names(&body.object.objs), ["마지막"]);
         assert_eq!(object_names(&box_object.objs), ["첫째"]);
+        let _ = std::fs::remove_dir_all(directory);
+    }
+
+    #[test]
+    fn numeric_take_selects_a_compact_stack_unit_without_expanding_the_box() {
+        let directory = test_directory("take_compact_numeric");
+        let mut box_object = make_box(&directory, "함", "주인", 10, 10, &["무기"], &[]);
+        box_object.inv_stack.insert("289".to_string(), 2);
+        let mut body = Body::new();
+        body.set("이름", "수량꺼내는이");
+        body.set("힘", 100_i64);
+        let mut oneitems = RecordingOneItems::default();
+
+        let result = take_selected(&mut body, &mut box_object, &["함", "1"], 300, &mut oneitems);
+
+        assert_eq!(result.status, TransferStatus::Ok);
+        assert_eq!(body.object.inv_stack.get("289"), Some(&1));
+        assert_eq!(box_object.inv_stack.get("289"), Some(&1));
+        assert!(body.object.objs.is_empty());
+        assert!(box_object.objs.is_empty());
+        let _ = std::fs::remove_dir_all(directory);
+    }
+
+    #[test]
+    fn numbered_box_transfer_counts_changed_objects_before_pristine_quantity() {
+        let directory = test_directory("mixed_numbered_transfer");
+        let mut box_object = make_box(&directory, "함", "주인", 10, 10, &["무기"], &[]);
+        let (changed, _) = super::super::object_from_item_json("289").unwrap();
+        changed.lock().unwrap().set("판매가격", 9_i64);
+
+        let mut body = Body::new();
+        body.set("이름", "혼합보관자");
+        body.set("힘", 100_i64);
+        body.object.objs.push(changed.clone());
+        body.object.inv_stack.insert("289".to_string(), 1);
+        let mut oneitems = RecordingOneItems::default();
+
+        let put = put_selected(&mut body, &mut box_object, &["함", "2철퇴"], &mut oneitems);
+        assert_eq!(put.status, TransferStatus::Ok);
+        assert_eq!(body.object.inv_stack.get("289"), None);
+        assert!(Arc::ptr_eq(&body.object.objs[0], &changed));
+        assert_eq!(box_object.inv_stack.get("289"), Some(&1));
+        assert!(box_object.objs.is_empty());
+
+        box_object.objs.push(changed.clone());
+        body.object.objs.clear();
+        let take = take_selected(
+            &mut body,
+            &mut box_object,
+            &["함", "2철퇴"],
+            300,
+            &mut oneitems,
+        );
+        assert_eq!(take.status, TransferStatus::Ok);
+        assert_eq!(body.object.inv_stack.get("289"), Some(&1));
+        assert!(Arc::ptr_eq(&box_object.objs[0], &changed));
+        assert_eq!(box_object.inv_stack.get("289"), None);
+
+        body.object.objs = vec![changed.clone()];
+        body.object.inv_stack.insert("289".to_string(), 2);
+        box_object.objs.clear();
+        box_object.inv_stack.clear();
+        let put_bulk_same_name = put_selected(
+            &mut body,
+            &mut box_object,
+            &["함", "철퇴", "3"],
+            &mut oneitems,
+        );
+        assert_eq!(put_bulk_same_name.status, TransferStatus::Ok);
+        assert!(body.object.objs.is_empty());
+        assert_eq!(body.object.inv_stack.get("289"), None);
+        assert!(Arc::ptr_eq(&box_object.objs[0], &changed));
+        assert_eq!(box_object.inv_stack.get("289"), Some(&2));
+
+        let take_bulk_same_name = take_selected(
+            &mut body,
+            &mut box_object,
+            &["함", "철퇴", "3"],
+            300,
+            &mut oneitems,
+        );
+        assert_eq!(take_bulk_same_name.status, TransferStatus::Ok);
+        assert!(Arc::ptr_eq(&body.object.objs[0], &changed));
+        assert_eq!(body.object.inv_stack.get("289"), Some(&2));
+        assert!(box_object.objs.is_empty());
+        assert_eq!(box_object.inv_stack.get("289"), None);
         let _ = std::fs::remove_dir_all(directory);
     }
 

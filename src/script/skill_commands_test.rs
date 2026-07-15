@@ -947,9 +947,9 @@ fn test_mugong_self_output_matches_python_categories_width_and_visions() {
     assert_eq!(output.len(), 8);
     assert_eq!(output[0], "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━");
     assert_eq!(
-            output[1],
-            "\x1b[0m\x1b[47m\x1b[30m◁ 당신의 무공 ▷                                                             \x1b[0m\x1b[40m\x1b[37m"
-        );
+        output[1],
+        "\x1b[0m\x1b[47m\x1b[30m◁ 당신의 무공 ▷                                                             \x1b[0m\x1b[40m\x1b[37m"
+    );
     assert_eq!(output[2], "───────────────────────────────────────");
     assert_eq!(
         output[3],

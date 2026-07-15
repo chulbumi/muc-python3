@@ -441,7 +441,7 @@ fn death_drop_all(
             continue;
         }
         if let Ok(mut item) = item.lock() {
-            item.set("inUse", 0_i64);
+            item.attr.remove("inUse");
         }
         body.object.remove(&item);
         result.removed += 1;
@@ -737,7 +737,7 @@ pub(super) fn register_drop_item_efuns(engine: &mut Engine, body_ptr: *mut Body)
             let mut world = match get_world_state().write() {
                 Ok(world) => world,
                 Err(_) => {
-                    return DropResult::empty(DropStatus::NotFound, true).into_death_dynamic(0)
+                    return DropResult::empty(DropStatus::NotFound, true).into_death_dynamic(0);
                 }
             };
             let (zone, room) = match world.get_player_position(&body.get_name()) {

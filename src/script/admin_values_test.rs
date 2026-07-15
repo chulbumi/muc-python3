@@ -636,6 +636,39 @@ fn comma_value_command_executes_python_assignment_branches() {
     assert_eq!(inventory_not_environment.0, vec!["☞ 그런 대상이 없어요!"]);
     assert_eq!(inventory_item.lock().unwrap().getInt("무게"), 9);
 
+    body.object.inv_stack.insert("비황석".into(), 2);
+    let counted_noop = storage
+        .execute("값설정", &mut body, "비황석 판매가격 8", None, None, None)
+        .unwrap();
+    assert_eq!(counted_noop.0, vec!["☞ 값이 설정되었습니다."]);
+    assert_eq!(body.object.inv_stack.get("비황석"), Some(&2));
+    assert!(!body
+        .object
+        .objs
+        .iter()
+        .any(|item| { item.lock().unwrap().getString("인덱스") == "비황석" }));
+
+    let counted_changed = storage
+        .execute("값설정", &mut body, "비황석 판매가격 9", None, None, None)
+        .unwrap();
+    assert_eq!(counted_changed.0, vec!["☞ 값이 설정되었습니다."]);
+    assert_eq!(body.object.inv_stack.get("비황석"), Some(&1));
+    assert!(body.object.objs.iter().any(|item| {
+        let item = item.lock().unwrap();
+        item.getString("인덱스") == "비황석" && item.getInt("판매가격") == 9
+    }));
+
+    let counted_restored = storage
+        .execute("값설정", &mut body, "비황석 판매가격 8", None, None, None)
+        .unwrap();
+    assert_eq!(counted_restored.0, vec!["☞ 값이 설정되었습니다."]);
+    assert_eq!(body.object.inv_stack.get("비황석"), Some(&2));
+    assert!(!body
+        .object
+        .objs
+        .iter()
+        .any(|item| { item.lock().unwrap().getString("인덱스") == "비황석" }));
+
     get_world_state()
         .write()
         .unwrap()

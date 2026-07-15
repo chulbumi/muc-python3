@@ -112,9 +112,11 @@ fn medicine_crafting_reads_real_mob_recipe_checks_output_before_consuming_and_fo
         .execute("조제", &mut body, "실패신약", None, None, None)
         .unwrap();
     assert_eq!(
-            unavailable.0,
-            vec!["\x1b[33m의원장\x1b[37m이 말합니다. \"음.. 재료가 다 떨어져서 한동안 조제가 힘들겠어...\""]
-        );
+        unavailable.0,
+        vec![
+            "\x1b[33m의원장\x1b[37m이 말합니다. \"음.. 재료가 다 떨어져서 한동안 조제가 힘들겠어...\""
+        ]
+    );
     assert_eq!(
         body.object.objs.len(),
         2,
@@ -130,20 +132,17 @@ fn medicine_crafting_reads_real_mob_recipe_checks_output_before_consuming_and_fo
         .execute("조제", &mut body, "검사신약", None, None, None)
         .unwrap();
     assert_eq!(
-            crafted.0,
-            vec![
-                "당신이 \x1b[33m의원장\x1b[37m에게 \x1b[36m검사신약\x1b[37m을 만들수 있는 재료들을 건네줍니다.",
-                "\x1b[33m의원장\x1b[37m이 재료들을 가지고 심오한 기를 불어 넣으며 작업합니다.",
-                "\x1b[33m의원장\x1b[37m이 당신에게 \x1b[0;36m검사환단\x1b[37m을 1개 줍니다.",
-            ]
-        );
-    assert_eq!(body.object.objs.len(), 2);
+        crafted.0,
+        vec![
+            "당신이 \x1b[33m의원장\x1b[37m에게 \x1b[36m검사신약\x1b[37m을 만들수 있는 재료들을 건네줍니다.",
+            "\x1b[33m의원장\x1b[37m이 재료들을 가지고 심오한 기를 불어 넣으며 작업합니다.",
+            "\x1b[33m의원장\x1b[37m이 당신에게 \x1b[0;36m검사환단\x1b[37m을 1개 줍니다.",
+        ]
+    );
+    assert_eq!(body.object.objs.len(), 1);
+    assert_eq!(body.object.inv_stack.get(&result_key), Some(&1));
     assert_eq!(
         body.object.objs[0].lock().unwrap().getString("인덱스"),
-        result_key
-    );
-    assert_eq!(
-        body.object.objs[1].lock().unwrap().getString("인덱스"),
         "조제비재료"
     );
 
@@ -231,18 +230,8 @@ fn eating_stacked_max_mp_food_matches_python_item_effect_and_one_time_limit() {
         .execute("먹어", &mut body, "백사주", None, None, None)
         .unwrap();
     assert_eq!(body.get_int("최고내공"), 130);
-    // Saving follows Python's ordered individual-item representation, so
-    // the remaining compressed item is materialized into objs.
-    assert!(body.object.inv_stack.is_empty());
-
-    assert_eq!(
-        body.object
-            .objs
-            .iter()
-            .filter(|item| item.lock().is_ok_and(|item| item.getName() == "백사주"))
-            .count(),
-        1
-    );
+    assert_eq!(body.object.inv_stack.get("백사주"), Some(&1));
+    assert!(body.object.objs.is_empty());
     assert_eq!(first.0.len(), 2);
     assert!(first.0[0].contains("마십니다.\r\n뜨거운 기운"));
     assert!(first.0[1].contains("+30"));
@@ -256,6 +245,36 @@ fn eating_stacked_max_mp_food_matches_python_item_effect_and_one_time_limit() {
     assert_eq!(second.0.len(), 1);
     assert!(second.0[0].contains("마십니다.\r\n뜨거운 기운"));
     let _ = std::fs::remove_file("data/user/스택백사주복용자.json");
+}
+
+#[test]
+fn numbered_eating_counts_stateful_food_before_pristine_quantity() {
+    let storage = ScriptStorage::default();
+    let mut body = Body::new();
+    body.set("이름", "혼합백사주복용자");
+    body.set("체력", 10_i64);
+    body.set("최고체력", 500_i64);
+    body.set("내공", 10_i64);
+    body.set("최고내공", 100_i64);
+    let (modified, _) = object_from_item_json("백사주").unwrap();
+    modified.lock().unwrap().set("체력", 7_i64);
+    body.object.objs.push(modified.clone());
+    body.object.inv_stack.insert("백사주".into(), 1);
+
+    storage
+        .execute("먹어", &mut body, "2백사주", None, None, None)
+        .unwrap();
+    assert!(!body.object.inv_stack.contains_key("백사주"));
+    assert_eq!(body.object.objs.len(), 1);
+    assert!(Arc::ptr_eq(&body.object.objs[0], &modified));
+    assert_eq!(body.get_int("체력"), 10);
+
+    storage
+        .execute("먹어", &mut body, "백사주", None, None, None)
+        .unwrap();
+    assert!(body.object.objs.is_empty());
+    assert_eq!(body.get_int("체력"), 17);
+    let _ = std::fs::remove_file("data/user/혼합백사주복용자.json");
 }
 #[test]
 fn eating_list_script_preserves_python_crlf_and_max_mp_room_ansi() {
@@ -296,12 +315,12 @@ fn eating_list_script_preserves_python_crlf_and_max_mp_room_ansi() {
     assert_eq!(body.get_int("최고내공"), 130);
     assert!(body.object.objs.is_empty());
     assert_eq!(
-            output,
-            vec![
-                "당신이 \x1b[0;36m백사주\x1b[37m을 마십니다.\r\n뜨거운 기운이 기경팔맥으로 뻗어나갑니다",
-                "\r\n\x1b[1m당신의 단전에 회오리가 몰아치며 몸주위에 하얀 진기가 맴돕니다.\x1b[0;37m (\x1b[1;36m+30\x1b[0;37m)",
-            ]
-        );
+        output,
+        vec![
+            "당신이 \x1b[0;36m백사주\x1b[37m을 마십니다.\r\n뜨거운 기운이 기경팔맥으로 뻗어나갑니다",
+            "\r\n\x1b[1m당신의 단전에 회오리가 몰아치며 몸주위에 하얀 진기가 맴돕니다.\x1b[0;37m (\x1b[1;36m+30\x1b[0;37m)",
+        ]
+    );
     let sends = match special.unwrap() {
         CommandResult::OutputAndSendToUsers(_, sends) => sends,
         other => panic!("unexpected eating room delivery: {other:?}"),
@@ -309,9 +328,12 @@ fn eating_list_script_preserves_python_crlf_and_max_mp_room_ansi() {
     assert_eq!(sends.len(), 1);
     assert_eq!(sends[0].0, "복용목격자");
     assert_eq!(
-            sends[0].1,
-            format!("{}\r\n\x1b[1m백사주복용자\x1b[0;37m가 \x1b[0;36m백사주\x1b[37m을 마십니다.\r\n뜨거운 기운이 기경팔맥으로 뻗어나갑니다\r\n\r\n\x1b[1m\x1b[1m백사주복용자\x1b[0;37m의 단전에 회오리가 몰아치며 몸주위에 하얀 진기가 맴돕니다.\x1b[0;37m (\x1b[1;36m+30\x1b[0;37m)\r\n\r\n\x1b[0;37;40m[ 21/31, 4/5 ] ", RAW_USER_MESSAGE_PREFIX)
-        );
+        sends[0].1,
+        format!(
+            "{}\r\n\x1b[1m백사주복용자\x1b[0;37m가 \x1b[0;36m백사주\x1b[37m을 마십니다.\r\n뜨거운 기운이 기경팔맥으로 뻗어나갑니다\r\n\r\n\x1b[1m\x1b[1m백사주복용자\x1b[0;37m의 단전에 회오리가 몰아치며 몸주위에 하얀 진기가 맴돕니다.\x1b[0;37m (\x1b[1;36m+30\x1b[0;37m)\r\n\r\n\x1b[0;37;40m[ 21/31, 4/5 ] ",
+            RAW_USER_MESSAGE_PREFIX
+        )
+    );
     let _ = std::fs::remove_file("data/user/백사주복용자.json");
 }
 #[test]

@@ -512,7 +512,10 @@ fn create_items(body: &mut Body, key: &str, count: i64) -> Map {
     let one_item = template_guard.checkAttr("아이템속성", "단일아이템");
     let index = template_guard.getString("인덱스");
     let particle_source = template_guard.getName();
-    if one_item && !crate::oneitem::oneitem_get(&index).is_empty() {
+    if one_item
+        && (!crate::oneitem::oneitem_get(&index).is_empty()
+            || super::inventory_compat::inventory_contains_index(&body.object, &index))
+    {
         result.insert("status".into(), Dynamic::from("one_exists"));
         result.insert("name".into(), Dynamic::from(display_name));
         let ansi = template_guard.getString("안시");
@@ -528,12 +531,21 @@ fn create_items(body: &mut Body, key: &str, count: i64) -> Map {
     if one_item {
         crate::oneitem::oneitem_have(&index, &body.get_name());
     }
-    for _ in 0..count.max(0) {
-        body.object
-            .objs
-            .push(std::sync::Arc::new(std::sync::Mutex::new(
-                template_guard.deepclone(),
-            )));
+    let count = if one_item {
+        count.clamp(0, 1)
+    } else {
+        count.max(0)
+    };
+    if super::is_stackable(&index) {
+        *body.object.inv_stack.entry(index).or_insert(0) += count;
+    } else {
+        for _ in 0..count {
+            body.object
+                .objs
+                .push(std::sync::Arc::new(std::sync::Mutex::new(
+                    template_guard.deepclone(),
+                )));
+        }
     }
     result.insert("status".into(), Dynamic::from("ok"));
     result.insert("name".into(), Dynamic::from(display_name));

@@ -531,6 +531,28 @@ fn look_inventory_order_uses_python_bare_numeric_prefix() {
 }
 
 #[test]
+fn look_numbering_counts_changed_objects_before_pristine_quantity() {
+    let mut body = Body::new();
+    body.set("이름", "봐혼합순번검사");
+    let (changed, _) = object_from_item_json("361").unwrap();
+    changed.lock().unwrap().set("종류", "변형방어구");
+    changed
+        .lock()
+        .unwrap()
+        .set("설명2", "변형된 수박모자입니다.");
+    body.object.objs.push(changed);
+    body.object.inv_stack.insert("361".into(), 1);
+
+    let output = ScriptStorage::default()
+        .execute("봐", &mut body, "2수박모자", None, None, None)
+        .unwrap()
+        .0;
+    assert!(output.iter().any(|line| line.contains("◆ 종류 ▷ 방어구")));
+    assert!(!output.iter().any(|line| line.contains("변형방어구")));
+    assert!(!output.iter().any(|line| line == "변형된 수박모자입니다."));
+}
+
+#[test]
 fn look_keeps_python_exact_and_prefix_match_counters_separate() {
     use crate::world::{get_world_state, PlayerPosition};
 
@@ -819,7 +841,9 @@ fn look_player_uses_reaction_alias_visibility_and_python_raw_prompt() {
         sends,
         vec![(
             target.clone(),
-            format!("{RAW_USER_MESSAGE_PREFIX}\r\n{actor} 당신을 살펴봅니다.\r\n\r\n\x1b[0;37;40m[ 321/456, 12/34 ] ")
+            format!(
+                "{RAW_USER_MESSAGE_PREFIX}\r\n{actor} 당신을 살펴봅니다.\r\n\r\n\x1b[0;37;40m[ 321/456, 12/34 ] "
+            )
         )]
     );
 

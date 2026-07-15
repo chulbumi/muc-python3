@@ -115,14 +115,15 @@ fn search_mob(body: &mut Body, query: &str) -> Map {
         let max_items = super::get_murim_config_int("사용자아이템갯수").max(0) as usize;
         if body.get_item_count() >= max_items
             || body.get_item_weight().saturating_add(weight) > body.get_str() * 10
+            || item.lock().ok().is_some_and(|item| {
+                !super::inventory_compat::can_accept_object(&body.object, &item)
+            })
         {
             break;
         }
         mob.inventory.remove(0);
-        // Python Object.insert() prepends each transferred object. Multiple
-        // corpse items therefore appear in reverse transfer order ahead of
-        // the player's pre-existing inventory.
-        body.object.objs.insert(0, item);
+        let accepted = super::inventory_compat::store_acquired_object(&mut body.object, item, true);
+        debug_assert!(accepted);
         if one_item {
             crate::oneitem::oneitem_have(&item_index, &body.get_name());
         }
@@ -239,10 +240,13 @@ mod tests {
         };
         assert_eq!(sends.len(), 1);
         assert_eq!(sends[0].0, observer_name);
-        assert_eq!(sends[0].1, format!(
-            "{}\r\n\x1b[1m{player_name}\x1b[0;37m가 \x1b[33m시험몹\x1b[37m의 시체속에서 \x1b[0;36m구슬\x1b[37m을 뒤져서 가집니다.\r\n\x1b[1m{player_name}\x1b[0;37m가 \x1b[33m시험몹\x1b[37m의 시체속에서 \x1b[35m부적\x1b[0;37m을 뒤져서 가집니다.\r\n\r\n\x1b[0;37;40m[ 21/31, 4/9 ] ",
-            crate::script::RAW_USER_MESSAGE_PREFIX,
-        ));
+        assert_eq!(
+            sends[0].1,
+            format!(
+                "{}\r\n\x1b[1m{player_name}\x1b[0;37m가 \x1b[33m시험몹\x1b[37m의 시체속에서 \x1b[0;36m구슬\x1b[37m을 뒤져서 가집니다.\r\n\x1b[1m{player_name}\x1b[0;37m가 \x1b[33m시험몹\x1b[37m의 시체속에서 \x1b[35m부적\x1b[0;37m을 뒤져서 가집니다.\r\n\r\n\x1b[0;37;40m[ 21/31, 4/9 ] ",
+                crate::script::RAW_USER_MESSAGE_PREFIX,
+            )
+        );
         assert_eq!(body.object.objs.len(), 3);
         assert_eq!(body.object.objs[0].lock().unwrap().getName(), "부적");
         assert_eq!(body.object.objs[1].lock().unwrap().getName(), "구슬");

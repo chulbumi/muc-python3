@@ -47,8 +47,9 @@ use crate::script::{
     take_guild_position_request, take_guild_reset_request, take_guild_transfer_request,
     take_party_requests, take_remove_skill_request, take_save_all_request,
     take_set_player_attr_request, take_set_skill_request, take_summon_player_request,
-    take_teach_skill_request, verify_and_upgrade_user_password, AdultChannelDelivery, BoxDelivery,
-    CastRoomPlayerRef, PartyDelivery, TellPlayerSnapshot, PARTY_DISCONNECT_REQUEST,
+    take_teach_skill_request, try_fixture_event, try_item_event, verify_and_upgrade_user_password,
+    visible_fixture_short_lines, AdultChannelDelivery, BoxDelivery, CastRoomPlayerRef,
+    PartyDelivery, TellPlayerSnapshot, PARTY_DISCONNECT_REQUEST,
 };
 use crate::world::event::{
     run_script_chunk, run_script_chunk_rhai, try_mob_event, ScriptNext, EVENT_DEATH_FINISH_REQUEST,
@@ -944,8 +945,14 @@ async fn process_login_state(
                         session.waiting_for_command = waiting;
                         let name = session.char_name.clone();
                         let has_step = session.doumi_step.is_some();
-                        info!("[ScriptContinue] END: step={:?}, wait={}, complete={}, msg_len={}, delay={}",
-                            session.doumi_step, wait_for_input, is_complete, output_msg.as_ref().map_or(0, |m| m.len()), delay);
+                        info!(
+                            "[ScriptContinue] END: step={:?}, wait={}, complete={}, msg_len={}, delay={}",
+                            session.doumi_step,
+                            wait_for_input,
+                            is_complete,
+                            output_msg.as_ref().map_or(0, |m| m.len()),
+                            delay
+                        );
                         (
                             output_msg,
                             wait_for_input,
@@ -1328,8 +1335,12 @@ fn process_script_line(
     );
     let resume = resume_op.as_ref().map(|o| (o.as_str(), effective_input));
 
-    tracing::debug!("[process_script_line] Calling run_doumi_to_result: current_step={:?}, resume_op={:?}, initial_delay={}",
-        current_step, resume_op, session.delay_after_output);
+    tracing::debug!(
+        "[process_script_line] Calling run_doumi_to_result: current_step={:?}, resume_op={:?}, initial_delay={}",
+        current_step,
+        resume_op,
+        session.delay_after_output
+    );
 
     // Clear waiting flag - we're about to process script output, not waiting for input yet
     // Will be set to true again when we reach the next suspend (wait_enter/wait_input/wait_key_input)
@@ -2146,6 +2157,12 @@ async fn show_room_to_player(
         } else {
             format!("◁○   〔{}〕쪽으로 이동할 수 있습니다.", exits.join(" "))
         };
+        let fixture_str = visible_fixture_short_lines(&world, &pos.zone, &pos.room).join("\r\n");
+        let fixture_str = if fixture_str.is_empty() {
+            String::new()
+        } else {
+            format!("{fixture_str}\r\n")
+        };
 
         // Get mobs in room
         let mobs = world.mob_cache.get_mobs_in_room(&pos.zone, &pos.room);
@@ -2182,9 +2199,10 @@ async fn show_room_to_player(
         };
 
         format!(
-            "{}\r\n{}\r\n{}{}{}{}\r\n[ {}/{} , {}/{} ]\r\n",
+            "{}\r\n{}\r\n{}{}{}{}{}\r\n[ {}/{} , {}/{} ]\r\n",
             room_name_formatted,
             room_ref.description.join("\r\n"),
+            fixture_str,
             exits_str,
             mob_str,
             item_str,
@@ -3326,6 +3344,7 @@ fn show_room_to_player_with_world(
 
         let room_name_formatted = format_room_header(&room_ref.display_name);
         let exits_str = format_exits_long(&room_ref);
+        let fixture_lines = visible_fixture_short_lines(&world, &pos.zone, &pos.room);
 
         let mobs = world.mob_cache.get_mobs_in_room(&pos.zone, &pos.room);
         let mob_str = if mobs.is_empty() {
@@ -3368,7 +3387,11 @@ fn show_room_to_player_with_world(
             broadcaster.send_to(addr, description_line)?;
             broadcaster.send_to(addr, "\r\n")?;
         }
-        broadcaster.send_to(addr, "\r\n\r\n")?;
+        for fixture_line in fixture_lines {
+            broadcaster.send_to(addr, &fixture_line)?;
+            broadcaster.send_to(addr, "\r\n")?;
+        }
+        broadcaster.send_to(addr, "\r\n")?;
         broadcaster.send_to(addr, &exits_str)?;
         broadcaster.send_to(addr, "\r\n")?;
         if !mob_str.is_empty() {
@@ -5117,6 +5140,18 @@ async fn handle_single_game_command(
                 let result = if limit_claimed {
                     limit_result
                 } else if let Some(r) = (!python_say_syntax)
+                    .then(|| try_item_event(&mut player.body, &zone, &parsed.raw))
+                    .flatten()
+                {
+                    info!("[CMD] Item event: {}", parsed.raw);
+                    Some(r)
+                } else if let Some(r) = (!python_say_syntax)
+                    .then(|| try_fixture_event(&mut player.body, &zone, &room, &parsed.raw))
+                    .flatten()
+                {
+                    info!("[CMD] Fixture event: {}", parsed.raw);
+                    Some(r)
+                } else if let Some(r) = (!python_say_syntax)
                     .then(|| try_mob_event(&mut player.body, &zone, &room, &parsed.raw))
                     .flatten()
                 {
@@ -6217,6 +6252,7 @@ async fn handle_single_game_command(
             .flatten();
         if let Some(taddr) = target_addr {
             let mut to_move: Vec<Arc<Mutex<crate::object::Object>>> = Vec::new();
+            let mut moved_stack_count = 0usize;
             let mut give_item_error: Option<(String, Option<String>)> = None;
             {
                 let mut clients = broadcaster.clients.lock();
@@ -6311,6 +6347,18 @@ async fn handle_single_game_command(
                                             }
                                             continue; // 이번 건만 스킵, 다음 후보 계속
                                         }
+                                        if !crate::script::inventory_compat::can_accept_object(
+                                            &target_body.object,
+                                            &o,
+                                        ) {
+                                            if to_move.is_empty() {
+                                                give_item_error = Some((
+                                                    "☞ 그 물건은 줄 수 없어요. ^^".to_string(),
+                                                    None,
+                                                ));
+                                            }
+                                            break;
+                                        }
                                         let w = o.getInt("무게");
                                         // 관리자가 아니면 무게/수량 체크
                                         if !target_is_admin {
@@ -6321,9 +6369,17 @@ async fn handle_single_game_command(
                                                     let iga = crate::hangul::han_iga(&target_name);
                                                     let go = o.han_obj();
                                                     give_item_error = Some((
-                                                    format!("\x1b[1m{}\x1b[0;37m{} 무거워서 받지 못합니다.", target_name, iga),
-                                                    Some(format!("\r\n\x1b[1m{}\x1b[0;37m{} 줄려는 \x1b[36m{}\x1b[37m 무거워서 받지 못합니다.", giver_name, crate::hangul::han_iga(&giver_name), go)),
-                                                ));
+                                                        format!(
+                                                            "\x1b[1m{}\x1b[0;37m{} 무거워서 받지 못합니다.",
+                                                            target_name, iga
+                                                        ),
+                                                        Some(format!(
+                                                            "\r\n\x1b[1m{}\x1b[0;37m{} 줄려는 \x1b[36m{}\x1b[37m 무거워서 받지 못합니다.",
+                                                            giver_name,
+                                                            crate::hangul::han_iga(&giver_name),
+                                                            go
+                                                        )),
+                                                    ));
                                                 }
                                                 break;
                                             }
@@ -6334,9 +6390,17 @@ async fn handle_single_game_command(
                                                     let iga = crate::hangul::han_iga(&target_name);
                                                     let go = o.han_obj();
                                                     give_item_error = Some((
-                                                    format!("\x1b[1m{}\x1b[0;37m{} 수량 한계로 받지 못합니다.", target_name, iga),
-                                                    Some(format!("\r\n\x1b[1m{}\x1b[0;37m{} 줄려는 \x1b[36m{}\x1b[37m 수량 한계로 받지 못합니다.", giver_name, crate::hangul::han_iga(&giver_name), go)),
-                                                ));
+                                                        format!(
+                                                            "\x1b[1m{}\x1b[0;37m{} 수량 한계로 받지 못합니다.",
+                                                            target_name, iga
+                                                        ),
+                                                        Some(format!(
+                                                            "\r\n\x1b[1m{}\x1b[0;37m{} 줄려는 \x1b[36m{}\x1b[37m 수량 한계로 받지 못합니다.",
+                                                            giver_name,
+                                                            crate::hangul::han_iga(&giver_name),
+                                                            go
+                                                        )),
+                                                    ));
                                                 }
                                                 break;
                                             }
@@ -6347,10 +6411,12 @@ async fn handle_single_game_command(
                                     if give_item_error.is_none() {
                                         for arc in &to_move {
                                             giver_body.object.remove(arc);
-                                            // Python 줘.py transfers the same
-                                            // object identity with
-                                            // target.insert(obj), i.e. prepend.
-                                            target_body.object.objs.insert(0, arc.clone());
+                                            let accepted = crate::script::inventory_compat::store_acquired_object(
+                                                &mut target_body.object,
+                                                arc.clone(),
+                                                true,
+                                            );
+                                            debug_assert!(accepted);
                                             if let Ok(item) = arc.lock() {
                                                 if crate::script::python_item_field_contains(
                                                     &item,
@@ -6381,95 +6447,165 @@ async fn handle_single_game_command(
                         }
                     }
                 }
-            } else if let Some((ref key, cnt)) = give_item_stack {
-                let max_items =
-                    crate::script::get_murim_config_int("사용자아이템갯수").max(0) as usize;
-                let cnt_u = cnt as usize;
-                let w = get_item_weight_by_key(key);
-                let mut clients = broadcaster.clients.lock();
-                match (clients.remove(&giver_addr), clients.remove(&taddr)) {
-                    (None, target_opt) => {
-                        if let Some(t) = target_opt {
-                            clients.insert(taddr, t);
-                        }
-                        response = "☞ 오류가 발생했어요.\r\n".to_string();
-                        give_item_error = Some(("".to_string(), None));
-                    }
-                    (Some(giver), None) => {
-                        clients.insert(giver_addr, giver);
-                        give_item_error = Some((
-                            "☞ 물품을 건내줄 무림인을 찾을 수 없어요. ^^".to_string(),
-                            None,
-                        ));
-                    }
-                    (Some(mut giver), Some(mut target)) => {
-                        match (giver.player.as_mut(), target.player.as_mut()) {
-                            (Some(gp), Some(tp)) => {
-                                let giver_body = &mut gp.body;
-                                let target_body = &mut tp.body;
-                                // 관리자는 무게/수량 제한 없음
-                                let target_is_admin = bypass_item_limits;
-                                let have = *giver_body.object.inv_stack.get(key).unwrap_or(&0);
-                                if have < cnt {
-                                    give_item_error = Some((
-                                        "☞ 그런 아이템이 소지품에 없어요.".to_string(),
-                                        None,
-                                    ));
-                                } else if !target_is_admin
-                                    && target_body.get_item_weight() + w * cnt
-                                        > target_body.get_str() * 10
-                                {
-                                    let iga = crate::hangul::han_iga(&target_name);
-                                    let disp = get_item_display_name(key);
-                                    let go = format!(
-                                        "\x1b[33m{}\x1b[37m{}",
-                                        disp,
-                                        crate::hangul::han_obj(&disp)
-                                    );
-                                    give_item_error = Some((
-                                    format!("\x1b[1m{}\x1b[0;37m{} 무거워서 받지 못합니다.", target_name, iga),
-                                    Some(format!("\r\n\x1b[1m{}\x1b[0;37m{} 줄려는 \x1b[36m{}\x1b[37m 무거워서 받지 못합니다.", giver_name, iga, go)),
-                                ));
-                                } else if !target_is_admin
-                                    && target_body.get_item_count() + cnt_u > max_items
-                                {
-                                    let iga = crate::hangul::han_iga(&target_name);
-                                    let disp = get_item_display_name(key);
-                                    let go = format!(
-                                        "\x1b[33m{}\x1b[37m{}",
-                                        disp,
-                                        crate::hangul::han_obj(&disp)
-                                    );
-                                    give_item_error = Some((
-                                    format!("\x1b[1m{}\x1b[0;37m{} 수량 한계로 받지 못합니다.", target_name, iga),
-                                    Some(format!("\r\n\x1b[1m{}\x1b[0;37m{} 줄려는 \x1b[36m{}\x1b[37m 수량 한계로 받지 못합니다.", giver_name, iga, go)),
-                                ));
-                                } else {
-                                    let should_remove = {
-                                        let r = giver_body
-                                            .object
-                                            .inv_stack
-                                            .get_mut(key.as_str())
-                                            .unwrap();
-                                        *r -= cnt;
-                                        *r <= 0
-                                    };
-                                    if should_remove {
-                                        giver_body.object.inv_stack.remove(key.as_str());
-                                    }
-                                    *target_body
-                                        .object
-                                        .inv_stack
-                                        .entry(key.clone())
-                                        .or_insert(0) += cnt;
-                                }
-                                clients.insert(giver_addr, giver);
-                                clients.insert(taddr, target);
+            }
+            if give_item_error.is_none() {
+                if let Some((ref key, cnt)) = give_item_stack {
+                    let max_items =
+                        crate::script::get_murim_config_int("사용자아이템갯수").max(0) as usize;
+                    let w = get_item_weight_by_key(key);
+                    let mut clients = broadcaster.clients.lock();
+                    match (clients.remove(&giver_addr), clients.remove(&taddr)) {
+                        (None, target_opt) => {
+                            if let Some(t) = target_opt {
+                                clients.insert(taddr, t);
                             }
-                            _ => {
-                                clients.insert(giver_addr, giver);
-                                clients.insert(taddr, target);
-                                give_item_error = Some(("☞ 오류가 발생했어요.".to_string(), None));
+                            response = "☞ 오류가 발생했어요.\r\n".to_string();
+                            give_item_error = Some(("".to_string(), None));
+                        }
+                        (Some(giver), None) => {
+                            clients.insert(giver_addr, giver);
+                            give_item_error = Some((
+                                "☞ 물품을 건내줄 무림인을 찾을 수 없어요. ^^".to_string(),
+                                None,
+                            ));
+                        }
+                        (Some(mut giver), Some(mut target)) => {
+                            match (giver.player.as_mut(), target.player.as_mut()) {
+                                (Some(gp), Some(tp)) => {
+                                    let giver_body = &mut gp.body;
+                                    let target_body = &mut tp.body;
+                                    // 관리자는 무게/수량 제한 없음
+                                    let target_is_admin = bypass_item_limits;
+                                    let have = *giver_body.object.inv_stack.get(key).unwrap_or(&0);
+                                    let stack_restriction = crate::script::object_from_item_json(
+                                        key,
+                                    )
+                                    .and_then(|(item, _)| {
+                                        item.lock().ok().map(|item| {
+                                            (
+                                                crate::script::python_item_field_contains(
+                                                    &item,
+                                                    "아이템속성",
+                                                    "출력안함",
+                                                ),
+                                                crate::script::python_item_field_contains(
+                                                    &item,
+                                                    "아이템속성",
+                                                    "줄수없음",
+                                                ),
+                                            )
+                                        })
+                                    });
+                                    let prior_moved = !to_move.is_empty();
+                                    if have <= 0
+                                        || (!target_is_admin && stack_restriction.is_none())
+                                        || (!target_is_admin
+                                            && stack_restriction.is_some_and(|(hidden, _)| hidden))
+                                    {
+                                        if !prior_moved {
+                                            give_item_error = Some((
+                                                "☞ 그런 아이템이 소지품에 없어요.".to_string(),
+                                                None,
+                                            ));
+                                        }
+                                    } else if !target_is_admin
+                                        && stack_restriction
+                                            .is_some_and(|(_, cannot_give)| cannot_give)
+                                    {
+                                        if !prior_moved {
+                                            give_item_error = Some((
+                                                "☞ 그 물건은 줄 수 없어요. ^^".to_string(),
+                                                None,
+                                            ));
+                                        }
+                                    } else {
+                                        let requested = cnt.max(0).min(have);
+                                        let weight_room = if target_is_admin || w <= 0 {
+                                            requested
+                                        } else {
+                                            (target_body.get_str() * 10
+                                                - target_body.get_item_weight())
+                                            .max(0)
+                                                / w
+                                        };
+                                        let item_room = if target_is_admin {
+                                            requested
+                                        } else {
+                                            max_items.saturating_sub(target_body.get_item_count())
+                                                as i64
+                                        };
+                                        let movable =
+                                            requested.min(weight_room).min(item_room).max(0);
+                                        if movable > 0 {
+                                            let should_remove = {
+                                                let r = giver_body
+                                                    .object
+                                                    .inv_stack
+                                                    .get_mut(key.as_str())
+                                                    .unwrap();
+                                                *r -= movable;
+                                                *r <= 0
+                                            };
+                                            if should_remove {
+                                                giver_body.object.inv_stack.remove(key.as_str());
+                                            }
+                                            *target_body
+                                                .object
+                                                .inv_stack
+                                                .entry(key.clone())
+                                                .or_insert(0) += movable;
+                                            moved_stack_count = movable as usize;
+                                        } else if !prior_moved
+                                            && !target_is_admin
+                                            && weight_room == 0
+                                        {
+                                            let iga = crate::hangul::han_iga(&target_name);
+                                            let disp = get_item_display_name(key);
+                                            let go = format!(
+                                                "\x1b[33m{}\x1b[37m{}",
+                                                disp,
+                                                crate::hangul::han_obj(&disp)
+                                            );
+                                            give_item_error = Some((
+                                        format!(
+                                            "\x1b[1m{}\x1b[0;37m{} 무거워서 받지 못합니다.",
+                                            target_name, iga
+                                        ),
+                                        Some(format!(
+                                            "\r\n\x1b[1m{}\x1b[0;37m{} 줄려는 \x1b[36m{}\x1b[37m 무거워서 받지 못합니다.",
+                                            giver_name, iga, go
+                                        )),
+                                    ));
+                                        } else if !prior_moved && !target_is_admin && item_room == 0
+                                        {
+                                            let iga = crate::hangul::han_iga(&target_name);
+                                            let disp = get_item_display_name(key);
+                                            let go = format!(
+                                                "\x1b[33m{}\x1b[37m{}",
+                                                disp,
+                                                crate::hangul::han_obj(&disp)
+                                            );
+                                            give_item_error = Some((
+                                        format!(
+                                            "\x1b[1m{}\x1b[0;37m{} 수량 한계로 받지 못합니다.",
+                                            target_name, iga
+                                        ),
+                                        Some(format!(
+                                            "\r\n\x1b[1m{}\x1b[0;37m{} 줄려는 \x1b[36m{}\x1b[37m 수량 한계로 받지 못합니다.",
+                                            giver_name, iga, go
+                                        )),
+                                    ));
+                                        }
+                                    }
+                                    clients.insert(giver_addr, giver);
+                                    clients.insert(taddr, target);
+                                }
+                                _ => {
+                                    clients.insert(giver_addr, giver);
+                                    clients.insert(taddr, target);
+                                    give_item_error =
+                                        Some(("☞ 오류가 발생했어요.".to_string(), None));
+                                }
                             }
                         }
                     }
@@ -6486,11 +6622,9 @@ async fn handle_single_game_command(
                     }
                 }
             } else {
-                let (c, post, name_multi) = if give_item.is_some() {
-                    let c = to_move.len();
-                    if c == 0 {
-                        (0, String::new(), String::new())
-                    } else if c == 1 {
+                let (c, post, name_multi) = if !to_move.is_empty() {
+                    let c = to_move.len() + moved_stack_count;
+                    if c == 1 {
                         let o = to_move[0].lock().unwrap();
                         (c, o.han_obj(), o.getName())
                     } else {
@@ -6498,8 +6632,8 @@ async fn handle_single_game_command(
                         let n = o.getName();
                         (c, n.clone(), n)
                     }
-                } else if let Some((ref key, cnt)) = give_item_stack {
-                    let c = cnt as usize;
+                } else if let Some((ref key, _)) = give_item_stack {
+                    let c = moved_stack_count;
                     let name_multi = get_item_display_name(key);
                     let post = format!(
                         "\x1b[33m{}\x1b[37m{}",
@@ -6590,9 +6724,11 @@ async fn handle_single_game_command(
                 };
                 if !to_self.is_empty() {
                     response = format!("{}\r\n", to_self);
-                    let clients = broadcaster.clients.lock();
-                    if let Some(client) = clients.get(&taddr) {
-                        let _ = client.sender.send(format!("\r\n{}\r\n", to_target));
+                    {
+                        let clients = broadcaster.clients.lock();
+                        if let Some(client) = clients.get(&taddr) {
+                            let _ = client.sender.send(format!("\r\n{}\r\n", to_target));
+                        }
                     }
                     // Administrator 줘줘 only informs giver and recipient;
                     // Python does not call sendRoom in that command.
@@ -6933,8 +7069,16 @@ mod tests {
             "\r\n\r\n\x1b[0;37;40m[ 90/100, 8/10 ] "
         );
 
-        broadcaster.clients.lock().get_mut(&addr).unwrap().player.as_mut().unwrap()
-            .body.set("설정상태", "엘피출력 1");
+        broadcaster
+            .clients
+            .lock()
+            .get_mut(&addr)
+            .unwrap()
+            .player
+            .as_mut()
+            .unwrap()
+            .body
+            .set("설정상태", "엘피출력 1");
         assert!(event_move_lp_prompt(&broadcaster, addr).is_empty());
     }
 
@@ -7207,10 +7351,8 @@ mod tests {
             .as_ref()
             .expect("active actor player")
             .body;
-        assert!(actor_body.object.objs.iter().any(|item| {
-            item.lock()
-                .is_ok_and(|item| item.getString("인덱스") == "철사")
-        }));
+        assert_eq!(actor_body.object.inv_stack.get("철사"), Some(&1));
+        assert!(actor_body.object.objs.is_empty());
         assert!(clients[&actor_addr].pending_input.is_none());
         drop(clients);
 
@@ -9225,6 +9367,61 @@ fn step1() {
             2,
             "ordinary 줘 must not exempt an administrator recipient"
         );
+
+        {
+            let mut clients = broadcaster.clients.lock();
+            clients
+                .get_mut(&giver_addr)
+                .unwrap()
+                .player
+                .as_mut()
+                .unwrap()
+                .body
+                .object
+                .inv_stack
+                .insert("비황석".to_string(), 2);
+        }
+        handle_game_command(
+            &broadcaster,
+            giver_addr,
+            &format!("{target_name} 비황석 2 줘"),
+            registry.clone(),
+            room_cache.clone(),
+            None,
+        )
+        .await
+        .unwrap();
+        let ordinary_stack_giver = {
+            let mut output = String::new();
+            while let Ok(message) = giver_rx.try_recv() {
+                output.push_str(&message);
+            }
+            output
+        };
+        let ordinary_stack_target = {
+            let mut output = String::new();
+            while let Ok(message) = target_rx.try_recv() {
+                output.push_str(&message);
+            }
+            output
+        };
+        let ordinary_stack_observer = {
+            let mut output = String::new();
+            while let Ok(message) = observer_rx.try_recv() {
+                output.push_str(&message);
+            }
+            output
+        };
+        assert!(ordinary_stack_giver.contains("비황석\x1b[37m 2개를 줍니다."));
+        assert!(ordinary_stack_target.contains("비황석\x1b[37m 2개를 줍니다."));
+        assert!(ordinary_stack_observer.contains("비황석\x1b[37m 2개를 줍니다."));
+        {
+            let clients = broadcaster.clients.lock();
+            let giver_body = &clients[&giver_addr].player.as_ref().unwrap().body;
+            let target_body = &clients[&target_addr].player.as_ref().unwrap().body;
+            assert_eq!(giver_body.object.inv_stack.get("비황석"), None);
+            assert_eq!(target_body.object.inv_stack.get("비황석"), Some(&2));
+        }
 
         handle_game_command(
             &broadcaster,

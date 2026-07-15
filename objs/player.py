@@ -221,37 +221,71 @@ class Player(Body):
         if type(items) == dict:
             items = [items]
         
+        loadedOneItems = set()
         for item in items:
-            obj = getItem(str(item['인덱스']))
+            itemIndex = str(item['인덱스'])
+            obj = getItem(itemIndex)
             if obj == None:
-                print('사용자아이템 로딩 실패 : %s' % str(item['인덱스']))
-            if obj != None:
+                print('사용자아이템 로딩 실패 : %s' % itemIndex)
+                continue
+
+            # Rust saves pristine interchangeable items as one compact
+            # {인덱스, 수량} record. Stateful items add only their template
+            # differences under 변경/제거. Legacy full records remain valid.
+            try:
+                count = int(item.get('수량', 1))
+            except:
+                count = 1
+            count = max(1, min(count, 100000))
+            if obj.isOneItem():
+                if itemIndex in loadedOneItems:
+                    continue
+                loadedOneItems.add(itemIndex)
+                count = 1
+
+            saved = dict(item)
+            changed = item.get('변경', {})
+            if type(changed) == dict:
+                saved.update(changed)
+            else:
+                changed = {}
+            removed = item.get('제거', [])
+            if type(removed) != list:
+                removed = []
+
+            for _ in range(count):
                 obj = obj.deepclone()
-                if '이름' in item:
-                    obj['이름'] = item['이름']
-                if '반응이름' in item:
-                    react = item['반응이름']
+                for key in removed:
+                    if key != '인덱스' and key in obj.attr:
+                        del obj.attr[key]
+                if '이름' in saved:
+                    obj['이름'] = saved['이름']
+                if '반응이름' in saved:
+                    react = saved['반응이름']
                     if type(react) == str:
                         react = [ react ]
                     obj['반응이름'] = react
-                if '고유번호' in item:
-                    obj['고유번호'] = item['고유번호']
-                if '공격력' in item:
-                    obj['공격력'] = item['공격력']
-                if '방어력' in item:
-                    obj['방어력'] = item['방어력']
-                if '기량' in item:
-                    obj['기량'] = item['기량']
-                if '상태' in item:
+                for key, value in changed.items():
+                    if key not in ['인덱스', 'inUse']:
+                        obj[key] = value
+                if '고유번호' in saved:
+                    obj['고유번호'] = saved['고유번호']
+                if '공격력' in saved:
+                    obj['공격력'] = saved['공격력']
+                if '방어력' in saved:
+                    obj['방어력'] = saved['방어력']
+                if '기량' in saved:
+                    obj['기량'] = saved['기량']
+                if '상태' in saved or getInt(saved.get('inUse', 0)) != 0:
                     obj.inUse = True
                     self.armor += getInt(obj['방어력'])
                     self.attpower += getInt(obj['공격력'])
                     if obj['종류'] == '무기':
                         self.weaponItem = obj
-                if '아이템속성' in item:
-                    obj.set('아이템속성', item['아이템속성'])
-                if '옵션' in item:
-                    obj.set('옵션', item['옵션'])
+                if '아이템속성' in saved:
+                    obj.set('아이템속성', saved['아이템속성'])
+                if '옵션' in saved:
+                    obj.set('옵션', saved['옵션'])
                     if obj.inUse:
                         option = obj.getOption()
                         if option != None:
@@ -279,10 +313,10 @@ class Player(Body):
                                 elif op == '마법발견':
                                     self._magicChance += option[op]
 
-                if '확장 이름' in item:
-                    obj.set('확장 이름', item['확장 이름'])
-                if '체력' in item:
-                    obj.hp = item['체력']
+                if '확장 이름' in saved:
+                    obj.set('확장 이름', saved['확장 이름'])
+                if '체력' in saved:
+                    obj.hp = saved['체력']
                 #if '시간' in item:
                 #    obj.set('시간', item['시간'])
                 self.insert(obj)

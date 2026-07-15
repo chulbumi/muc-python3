@@ -23,7 +23,7 @@ mod event_directive_test;
 // Re-export commonly used types
 pub use difficulty::{base_zone_name, difficulty_from_zone, DifficultyConfig, DifficultyLevel};
 pub use event_binding::{EventBindings, EventScript};
-pub use fixture::{Fixture, FixtureKind};
+pub use fixture::{Fixture, FixtureKind, FixturePlacement};
 
 pub use room::{
     format_exits_long, format_room_header, get_room, handle_player_enter, handle_player_exit,
@@ -895,16 +895,38 @@ impl WorldState {
 
         // Get mob_ids from room (load from base zone)
         let base_zone = base_zone_name(zone);
-        let (mob_ids, installed_box_count) = self
+        let (mob_ids, installed_box_count, fixture_placements) = self
             .room_cache
             .get_room(base_zone, room)
             .ok()
             .and_then(|r| {
-                r.read()
-                    .ok()
-                    .map(|g| (g.mob_ids.clone(), g.installed_box_count))
+                r.read().ok().map(|g| {
+                    (
+                        g.mob_ids.clone(),
+                        g.installed_box_count,
+                        g.fixture_placements.clone(),
+                    )
+                })
             })
             .unwrap_or_default();
+
+        for placement in fixture_placements {
+            let already_placed = self.get_room_fixtures(zone, room).iter().any(|fixture| {
+                fixture
+                    .attribute("placement_key")
+                    .and_then(serde_json::Value::as_str)
+                    == Some(placement.key.as_str())
+            });
+            if already_placed {
+                continue;
+            }
+            let mut attributes = placement.attributes;
+            attributes.insert(
+                "placement_key".to_string(),
+                serde_json::Value::String(placement.key),
+            );
+            self.create_fixture(zone, room, placement.kind, attributes);
+        }
 
         // Python Room.create inserts every installation Box at index zero
         // before mobs are placed. The Box registry exposes the resulting

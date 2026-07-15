@@ -127,6 +127,8 @@ pub(crate) const PYTHON_RUNTIME_ALIASES: &[(&str, &str)] = &[
     ("공격", "쳐"),
     ("때려", "쳐"),
     ("버", "버려"),
+    ("던져", "투척"),
+    ("날려", "투척"),
     ("[", "채널잡담"),
 ];
 
@@ -440,7 +442,7 @@ mod tests {
         let registry = CommandRegistry::new();
 
         assert_eq!(registry.aliases, expected);
-        assert_eq!(registry.aliases.len(), 108);
+        assert_eq!(registry.aliases.len(), 110);
 
         for invented in [
             "/h",

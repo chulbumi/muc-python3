@@ -3,12 +3,150 @@
 //! These functions intentionally emit no user-visible text. Commands and room
 //! scripts decide how a fixture is presented and what an interaction means.
 
-use rhai::{Dynamic, Engine, Map};
+use rhai::{Dynamic, Engine, Map, Scope, AST};
 use serde_json::Value as JsonValue;
+use std::cell::RefCell;
 use std::collections::HashMap;
+use std::path::{Component, Path, PathBuf};
+use std::sync::{Arc, Mutex};
+use std::time::SystemTime;
 
+use crate::command::CommandResult;
 use crate::player::Body;
-use crate::world::{get_world_state, EventBindings, EventScript, Fixture, FixtureKind};
+use crate::world::{
+    get_world_state, EventBindings, EventScript, Fixture, FixtureKind, RoomObjectRef, WorldState,
+};
+
+thread_local! {
+    /// Rhai AST contains `Rc` without Rhai's sync feature, so fixture event
+    /// scripts use the same worker-local caching rule as ordinary commands.
+    static FIXTURE_EVENT_AST_CACHE: RefCell<HashMap<PathBuf, (SystemTime, AST)>> =
+        RefCell::new(HashMap::new());
+}
+
+fn fixture_event_path(zone: &str, configured: &str) -> Option<PathBuf> {
+    let relative = Path::new(configured.trim());
+    if relative.is_absolute()
+        || relative
+            .components()
+            .any(|component| !matches!(component, Component::Normal(_)))
+    {
+        return None;
+    }
+    let filename = if relative.extension().is_some() {
+        relative.to_path_buf()
+    } else {
+        relative.with_extension("rhai")
+    };
+    Some(Path::new("data/script").join(zone).join(filename))
+}
+
+fn cached_fixture_event_ast(path: &Path) -> Result<AST, String> {
+    let metadata = std::fs::metadata(path)
+        .map_err(|error| format!("fixture event metadata {}: {error}", path.display()))?;
+    let modified = metadata.modified().unwrap_or(SystemTime::UNIX_EPOCH);
+    if let Some(ast) = FIXTURE_EVENT_AST_CACHE.with(|cache| {
+        cache
+            .borrow()
+            .get(path)
+            .filter(|(cached_modified, _)| *cached_modified == modified)
+            .map(|(_, ast)| ast.clone())
+    }) {
+        return Ok(ast);
+    }
+
+    let source = std::fs::read_to_string(path)
+        .map_err(|error| format!("fixture event read {}: {error}", path.display()))?;
+    let executable = format!("{source}\nmain(ob, fixture_id, cmdline);");
+    let ast = Engine::new()
+        .compile(&executable)
+        .map_err(|error| format!("fixture event compile {}: {error}", path.display()))?;
+    FIXTURE_EVENT_AST_CACHE.with(|cache| {
+        cache
+            .borrow_mut()
+            .insert(path.to_path_buf(), (modified, ast.clone()));
+    });
+    Ok(ast)
+}
+
+/// Match `[fixture] ... [trigger]` and run the room fixture's hot-reloadable
+/// Rhai event. Rust selects data and exposes efuns; all visible game text and
+/// state-specific presentation remain in the bound script.
+pub(crate) fn try_fixture_event(
+    body: &mut Body,
+    zone: &str,
+    room: &str,
+    raw_line: &str,
+) -> Option<CommandResult> {
+    let words: Vec<&str> = raw_line.split_whitespace().collect();
+    if words.len() < 2 {
+        return None;
+    }
+    let query = words[0];
+    let trigger = *words.last()?;
+    let fixture = {
+        let world = get_world_state().read().ok()?;
+        world
+            .get_room_fixtures(zone, room)
+            .into_iter()
+            .filter_map(|fixture| {
+                let (exact, prefixes) = fixture.match_counts(query);
+                (exact || prefixes > 0).then_some((exact, fixture.name().len(), fixture.clone()))
+            })
+            .max_by_key(|(exact, name_len, _)| (*exact, *name_len))
+            .map(|(_, _, fixture)| fixture)?
+    };
+    let script = fixture
+        .events
+        .get(trigger)
+        .or_else(|| fixture.events.get(&format!("이벤트 ${trigger}")))?;
+    let EventScript::Rhai(configured_path) = script else {
+        return None;
+    };
+    let Some(path) = fixture_event_path(zone, configured_path) else {
+        return Some(CommandResult::Output(
+            "(Fixture 이벤트 경로가 올바르지 않습니다.)".to_string(),
+        ));
+    };
+    let ast = match cached_fixture_event_ast(&path) {
+        Ok(ast) => ast,
+        Err(error) => return Some(CommandResult::Output(format!("({error})"))),
+    };
+
+    let output = Arc::new(Mutex::new(Vec::new()));
+    let special = Arc::new(Mutex::new(None));
+    let user_sends = Arc::new(Mutex::new(Vec::new()));
+    let engine = super::create_engine_with_body_and_output(
+        body,
+        output.clone(),
+        None,
+        None,
+        special,
+        user_sends,
+        None,
+        Some("fixture_event"),
+        None,
+    );
+    let mut scope = Scope::new();
+    let player_data = super::build_ob_from_body(body);
+    scope.push("player", player_data.clone());
+    scope.push("me", player_data.clone());
+    scope.push("ob", player_data);
+    scope.push("fixture_id", fixture.id as i64);
+    scope.push("cmdline", raw_line.to_string());
+    if let Err(error) = engine.run_ast_with_scope(&mut scope, &ast) {
+        return Some(CommandResult::Output(format!(
+            "(Fixture 이벤트 스크립트 오류: {error})"
+        )));
+    }
+    let output_lines = output.lock().map(|lines| lines.clone()).unwrap_or_default();
+    Some(CommandResult::MobEvent {
+        output_lines,
+        set_position: None,
+        broadcast_lines: Vec::new(),
+        room_broadcast_lines: Vec::new(),
+    })
+}
 
 fn dynamic_to_json(value: &Dynamic) -> Option<JsonValue> {
     rhai::serde::from_dynamic(value).ok()
@@ -34,7 +172,7 @@ fn event_bindings_to_dynamic(bindings: &EventBindings) -> Dynamic {
     Dynamic::from(events)
 }
 
-fn fixture_to_dynamic(fixture: &Fixture) -> Dynamic {
+pub(super) fn fixture_to_dynamic(fixture: &Fixture) -> Dynamic {
     let mut snapshot = Map::new();
     for (key, value) in &fixture.attributes {
         snapshot.insert(key.as_str().into(), crate::data::json_to_dynamic(value));
@@ -51,11 +189,72 @@ fn fixture_to_dynamic(fixture: &Fixture) -> Dynamic {
         crate::data::json_to_dynamic(&attributes),
     );
     snapshot.insert("id".into(), Dynamic::from(fixture.id as i64));
+    if !snapshot.contains_key("name") {
+        snapshot.insert("name".into(), Dynamic::from(fixture.name().to_string()));
+    }
+    if !snapshot.contains_key("종류") {
+        snapshot.insert("종류".into(), Dynamic::from(fixture.kind.as_str()));
+    }
+    if !snapshot.contains_key("설명1") {
+        let short = fixture
+            .attribute("description1")
+            .and_then(JsonValue::as_str)
+            .unwrap_or("");
+        snapshot.insert("설명1".into(), Dynamic::from(short.to_string()));
+    }
+    if !snapshot.contains_key("설명") {
+        let description = fixture
+            .attribute("description")
+            .map(crate::data::json_to_dynamic)
+            .unwrap_or_else(|| Dynamic::from(rhai::Array::new()));
+        snapshot.insert("설명".into(), description);
+    }
     snapshot.insert("kind".into(), Dynamic::from(fixture.kind.as_str()));
     snapshot.insert("zone".into(), Dynamic::from(fixture.zone.clone()));
     snapshot.insert("room".into(), Dynamic::from(fixture.room.clone()));
     snapshot.insert("events".into(), event_bindings_to_dynamic(&fixture.events));
     Dynamic::from(snapshot)
+}
+
+/// Visible short descriptions in Python-compatible room object order. The
+/// text itself is fixture data; this function only applies visibility/order.
+pub(crate) fn visible_fixture_short_lines(
+    world: &WorldState,
+    zone: &str,
+    room: &str,
+) -> Vec<String> {
+    let ordered = world.get_room_object_order(zone, room);
+    let mut fixture_ids = ordered
+        .into_iter()
+        .filter_map(|object| match object {
+            RoomObjectRef::Fixture(id) => Some(id),
+            _ => None,
+        })
+        .collect::<Vec<_>>();
+    if fixture_ids.is_empty() {
+        fixture_ids.extend(
+            world
+                .get_room_fixtures(zone, room)
+                .into_iter()
+                .map(|fixture| fixture.id),
+        );
+    }
+    fixture_ids
+        .into_iter()
+        .filter_map(|id| {
+            let fixture = world.get_fixture(id)?;
+            if fixture.is_hidden() {
+                return None;
+            }
+            fixture
+                .attribute("설명1")
+                .or_else(|| fixture.attribute("description1"))
+                .and_then(JsonValue::as_str)
+                .filter(|line| !line.is_empty())
+                .map(str::to_string)
+                .or_else(|| (!fixture.name().is_empty()).then(|| fixture.name().to_string()))
+        })
+        .collect()
 }
 
 fn fixture_matches(fixture: &Fixture, query: &str) -> bool {
@@ -239,6 +438,7 @@ pub(super) fn register_fixture_efuns(engine: &mut Engine, body_ptr: *mut Body) {
 mod tests {
     use super::*;
     use crate::player::Body;
+    use crate::script::{build_room_lines, ScriptStorage};
     use crate::world::{PlayerPosition, RoomObjectRef};
     use std::sync::{Arc, Mutex};
 
@@ -317,5 +517,100 @@ mod tests {
         let mut world = get_world_state().write().unwrap();
         assert!(world.get_fixture(id as u64).is_none());
         world.remove_player_position(&name);
+    }
+
+    #[test]
+    fn mangmang_room_fixture_is_placed_once_and_triggers_rhai_event() {
+        let mut body = Body::new();
+        let player_name = format!("망망-fixture-event-test-{}", std::process::id());
+        body.set("이름", player_name.clone());
+
+        let fixture_id = {
+            let mut world = get_world_state().write().unwrap();
+            world.set_player_position(
+                &player_name,
+                PlayerPosition::new("사용자맵".into(), "망망".into()),
+            );
+            world.spawn_mobs_for_room("사용자맵", "망망");
+            world.spawn_mobs_for_room("사용자맵", "망망");
+            let fixtures = world.get_room_fixtures("사용자맵", "망망");
+            let placed: Vec<_> = fixtures
+                .into_iter()
+                .filter(|fixture| {
+                    fixture
+                        .attribute("placement_key")
+                        .and_then(JsonValue::as_str)
+                        == Some("청룡병풍")
+                })
+                .collect();
+            assert_eq!(placed.len(), 1, "re-entering must not duplicate fixtures");
+            placed[0].id
+        };
+
+        let room_view = build_room_lines(&player_name, &[]).expect("room view");
+        let fixture_offset = room_view.find("한쪽 벽에는 푸른 용").unwrap();
+        let exit_offset = room_view.find("쪽으로 이동할 수 있습니다").unwrap();
+        assert!(fixture_offset < exit_offset);
+
+        let look_output = ScriptStorage::default()
+            .execute("봐", &mut body, "병풍", None, None, None)
+            .expect("fixture detail look")
+            .0;
+        assert!(look_output.iter().any(|line| line.contains("◆ 이름 ▷")));
+        assert!(look_output
+            .iter()
+            .any(|line| line.contains("바닥의 희미한 자국")));
+
+        {
+            let mut world = get_world_state().write().unwrap();
+            world
+                .get_fixture_mut(fixture_id)
+                .unwrap()
+                .set_attribute("hidden", JsonValue::Bool(true));
+        }
+        assert!(!build_room_lines(&player_name, &[])
+            .expect("hidden room view")
+            .contains("한쪽 벽에는 푸른 용"));
+        let hidden_look = ScriptStorage::default()
+            .execute("봐", &mut body, "병풍", None, None, None)
+            .expect("hidden fixture look")
+            .0;
+        assert!(hidden_look.iter().any(|line| line.contains("안광으로는")));
+        get_world_state()
+            .write()
+            .unwrap()
+            .get_fixture_mut(fixture_id)
+            .unwrap()
+            .set_attribute("hidden", JsonValue::Bool(false));
+
+        let CommandResult::MobEvent { output_lines, .. } =
+            try_fixture_event(&mut body, "사용자맵", "망망", "병풍 밀어")
+                .expect("fixture event should match")
+        else {
+            panic!("fixture event should return event output");
+        };
+        assert_eq!(output_lines.len(), 3);
+        assert!(output_lines[1].contains("숨겨진 틈"));
+        assert_eq!(
+            get_world_state()
+                .read()
+                .unwrap()
+                .get_fixture(fixture_id)
+                .and_then(|fixture| fixture.attribute("moved")),
+            Some(&JsonValue::Bool(true))
+        );
+
+        let CommandResult::MobEvent { output_lines, .. } =
+            try_fixture_event(&mut body, "사용자맵", "망망", "청룡병풍 밀어")
+                .expect("fixture alias should match")
+        else {
+            panic!("repeated fixture event should return event output");
+        };
+        assert_eq!(output_lines.len(), 1);
+        assert!(output_lines[0].contains("이미 옮겨진 병풍"));
+
+        let mut world = get_world_state().write().unwrap();
+        world.remove_fixture(fixture_id);
+        world.remove_player_position(&player_name);
     }
 }

@@ -110,6 +110,29 @@ fn view_box_data(ob, box, detailed) {
     send_line(ob, ref);
 }
 
+fn view_fixture_data(ob, fixture) {
+    let ref = "━━━━━━━━━━━━━━━━━━━━━";
+    send_line(ob, ref);
+    let name_line = fill_space_euc_kr(42, "◆ 이름 ▷ " + fixture["name"].to_string());
+    send_line(ob, "\x1b[0m\x1b[44m\x1b[1m\x1b[37m" + name_line
+        + "\x1b[0m\x1b[37m\x1b[40m");
+    let type_line = fill_space_euc_kr(42, "◆ 종류 ▷ " + fixture["종류"].to_string());
+    send_line(ob, "\x1b[0m\x1b[44m\x1b[1m\x1b[37m" + type_line
+        + "\x1b[0m\x1b[37m\x1b[40m");
+    send_line(ob, "─────────────────────");
+    let desc = fixture["설명"];
+    if type_of(desc) == "array" {
+        if len(desc) == 0 && fixture["설명1"].to_string() != "" {
+            send_line(ob, fixture["설명1"].to_string());
+        } else {
+            for line in desc { send_line(ob, line.to_string()); }
+        }
+    } else if desc.to_string() != "" {
+        for line in split(desc.to_string(), "\r\n") { send_line(ob, line); }
+    }
+    send_line(ob, ref);
+}
+
 fn main(ob, line) {
     if line.trim() == "" {
         let r = view_map_data(ob);
@@ -168,6 +191,10 @@ fn main(ob, line) {
     }
 
     let lines = r["lines"];
+    if r["fixture_target"] {
+        view_fixture_data(ob, r["fixture"]);
+        return;
+    }
     for l in lines {
         send_line(ob, l);
     }
