@@ -6,12 +6,14 @@
 pub mod body;
 #[allow(clippy::module_inception)]
 pub mod player;
+pub mod soul;
 
 pub use body::{ActState, ActiveSkill, Body, MemoRecord, SendLine, SkillLevel, SkillTraining};
 pub use player::{
     decode_alias_entries, encode_alias_entries, Channel, Player, ALIAS_LIST_ATTR, CFG_OPTIONS,
     STATE_ACTIVE, STATE_DOUMI, STATE_INACTIVE, STATE_NOTICE,
 };
+pub use soul::{Soul, SoulBodyKind, SoulBodyMember, MAX_SOUL_BODIES};
 
 /// Configuration constants for game mechanics
 pub struct GameConfig;

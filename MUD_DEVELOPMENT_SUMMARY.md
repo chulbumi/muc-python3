@@ -154,10 +154,10 @@ sock.sendall("봐\r\n".encode('utf-8'))  # 주변 보기
 ### 3. 테스트 스크립트
 ```bash
 # 로그인 및 이동 테스트
-python3 test_login.py
+python3 test/test_login.py
 
 # 몹 스폰 테스트 (room 4000)
-python3 test_mobs_up.py
+python3 test/test_mob_spawn.py
 ```
 
 ## 현재 작동 방식

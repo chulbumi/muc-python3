@@ -229,6 +229,18 @@ impl Broadcaster {
         {
             self.unbind_player_name_if_matches(&name, addr);
         }
+        if let Some(soul) = removed.as_ref().and_then(|client| client.soul.as_ref()) {
+            if let Ok(mut world) = crate::world::get_world_state().write() {
+                for name in soul.inactive_names() {
+                    if let Some(mut user) = world.take_summoned_user_by_name(&name) {
+                        let _ = crate::script::save_body_to_json(
+                            &mut user.body,
+                            &format!("data/user/{name}.json"),
+                        );
+                    }
+                }
+            }
+        }
         self.leave_adult_channel(addr);
         removed
     }
@@ -308,6 +320,11 @@ impl Broadcaster {
         self.player_clients
             .lock()
             .insert(player_name.to_string(), addr);
+    }
+
+    pub(crate) fn rebind_active_body_name(&self, old_name: &str, new_name: &str, addr: SocketAddr) {
+        self.unbind_player_name_if_matches(old_name, addr);
+        self.bind_player_name(new_name, addr);
     }
 
     fn unbind_player_name_if_matches(&self, player_name: &str, addr: SocketAddr) -> bool {

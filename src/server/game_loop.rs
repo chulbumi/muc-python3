@@ -16,6 +16,7 @@ use crate::combat::processor::{calculate_exp_reward_for_level, calculate_gold_re
 use crate::combat::{calculate_skill_damage_against, process_mob_strike, process_player_strike};
 use crate::command::handler::PendingInput;
 use crate::command::CommandRegistry;
+use crate::data::SharedGlobalData;
 use crate::network::client::{handle_game_command, send_collected_user_message};
 use crate::network::client::{Client, ClientState, DISCONNECT_SENTINEL};
 use crate::network::Broadcaster;
@@ -61,12 +62,22 @@ impl Default for GameLoopConfig {
 /// State retained between one-second updates.
 pub struct GameLoop {
     config: GameLoopConfig,
+    global_data: Option<SharedGlobalData>,
     tick_count: u64,
     last_tick: Instant,
     after_fight: Vec<SocketAddr>,
     newly_dead: Vec<SocketAddr>,
     combat_render: Vec<SocketAddr>,
     auto_consume: Vec<(SocketAddr, String)>,
+}
+
+#[derive(Debug, Clone, Copy)]
+struct TickMurimConfig {
+    input_error_limit: i64,
+    age_interval: i64,
+    nickname_kill_threshold: i64,
+    herb_probability_cap: f64,
+    max_user_items: usize,
 }
 
 #[derive(Debug, Clone)]
@@ -83,6 +94,82 @@ struct PendingMobReward {
     damage_map: std::collections::HashMap<String, i64>,
     mob_key: String,
     mob_data: crate::world::RawMobData,
+}
+
+/// Split one mob's experience pool among at most four actual contributors.
+/// Damage participation controls most of the share. A level-compatibility
+/// factor rapidly suppresses rewards when a low-level character is carried by
+/// a much stronger party or attacks a mob far above its own reasonable range.
+fn party_experience_shares(
+    mob_level: i64,
+    members: &[(String, i64, i64)],
+) -> std::collections::HashMap<String, i64> {
+    let members = members
+        .iter()
+        .filter(|(_, _, damage)| *damage > 0)
+        .take(crate::network::social::MAX_PARTY_SIZE)
+        .collect::<Vec<_>>();
+    let Some(max_level) = members.iter().map(|(_, level, _)| *level).max() else {
+        return std::collections::HashMap::new();
+    };
+    let total_damage = members
+        .iter()
+        .map(|(_, _, damage)| *damage)
+        .sum::<i64>()
+        .max(1);
+    let mut weights = Vec::new();
+    let mut cooperative = 0_i64;
+    for (name, level, damage) in members {
+        let level = (*level).max(1);
+        let ratio = (level + 50)
+            .saturating_mul(1_000)
+            .div_euclid(max_level.max(1) + 50)
+            .clamp(1, 1_000);
+        let mut compatibility = ratio.saturating_mul(ratio).div_euclid(1_000);
+        let upward_gap = mob_level.saturating_sub(level);
+        let reasonable_gap = (level.div_euclid(4)).max(20);
+        if upward_gap > reasonable_gap {
+            let challenge = reasonable_gap
+                .saturating_mul(1_000)
+                .div_euclid(upward_gap.max(1))
+                .clamp(10, 1_000);
+            compatibility = compatibility.saturating_mul(challenge).div_euclid(1_000);
+        }
+        compatibility = compatibility.clamp(1, 1_000);
+        let contribution = damage
+            .saturating_mul(1_000)
+            .div_euclid(total_damage)
+            .clamp(1, 1_000);
+        let participation = 250_i64.saturating_add(contribution.saturating_mul(750) / 1_000);
+        let low_contribution = if contribution < 50 {
+            contribution.saturating_mul(1_000).div_euclid(50)
+        } else {
+            1_000
+        };
+        let weight = compatibility
+            .saturating_mul(participation)
+            .div_euclid(1_000)
+            .saturating_mul(low_contribution)
+            .div_euclid(1_000)
+            .max(1);
+        if compatibility >= 700 && contribution >= 100 {
+            cooperative += 1;
+        }
+        weights.push((name.clone(), weight));
+    }
+    let weight_sum = weights
+        .iter()
+        .map(|(_, weight)| *weight)
+        .sum::<i64>()
+        .max(1);
+    let party_bonus_percent = cooperative.saturating_sub(1).clamp(0, 3) * 10;
+    let pool = calculate_exp_reward_for_level(mob_level, max_level)
+        .saturating_mul(100 + party_bonus_percent)
+        .div_euclid(100);
+    weights
+        .into_iter()
+        .map(|(name, weight)| (name, pool.saturating_mul(weight).div_euclid(weight_sum)))
+        .collect()
 }
 
 static ADMIN_MOB_REWARDS: std::sync::LazyLock<std::sync::Mutex<Vec<PendingMobReward>>> =
@@ -120,12 +207,66 @@ impl GameLoop {
     pub fn new(config: GameLoopConfig) -> Self {
         Self {
             config,
+            global_data: None,
             tick_count: 0,
             last_tick: Instant::now(),
             after_fight: Vec::new(),
             newly_dead: Vec::new(),
             combat_render: Vec::new(),
             auto_consume: Vec::new(),
+        }
+    }
+
+    pub fn with_global_data(config: GameLoopConfig, global_data: SharedGlobalData) -> Self {
+        let mut game_loop = Self::new(config);
+        game_loop.global_data = Some(global_data);
+        game_loop
+    }
+
+    fn murim_config_int(&self, key: &str) -> i64 {
+        let Some(global_data) = self.global_data.as_ref() else {
+            return crate::script::get_murim_config_int(key);
+        };
+        global_data
+            .read()
+            .ok()
+            .and_then(|data| {
+                data.get_murim_config(key)
+                    .and_then(serde_json::Value::as_i64)
+            })
+            .unwrap_or(0)
+    }
+
+    fn tick_murim_config(&self) -> TickMurimConfig {
+        if let Some(global_data) = self.global_data.as_ref() {
+            let Ok(data) = global_data.read() else {
+                return TickMurimConfig {
+                    input_error_limit: 0,
+                    age_interval: 0,
+                    nickname_kill_threshold: 0,
+                    herb_probability_cap: 0.0,
+                    max_user_items: 0,
+                };
+            };
+            let value = |key: &str| {
+                data.get_murim_config(key)
+                    .and_then(serde_json::Value::as_i64)
+                    .unwrap_or(0)
+            };
+            return TickMurimConfig {
+                input_error_limit: value("입력초과에러수"),
+                age_interval: value("나이오름틱"),
+                nickname_kill_threshold: value("무림별호이벤트킬수"),
+                herb_probability_cap: value("약초나올확률") as f64,
+                max_user_items: value("사용자아이템갯수").max(0) as usize,
+            };
+        }
+        TickMurimConfig {
+            input_error_limit: self.murim_config_int("입력초과에러수"),
+            age_interval: self.murim_config_int("나이오름틱"),
+            nickname_kill_threshold: self.murim_config_int("무림별호이벤트킬수"),
+            herb_probability_cap: self.murim_config_int("약초나올확률") as f64,
+            max_user_items: self.murim_config_int("사용자아이템갯수").max(0) as usize,
         }
     }
 
@@ -157,8 +298,13 @@ impl GameLoop {
 
     fn tick_at(&mut self, broadcaster: &Broadcaster, now: Instant) -> bool {
         self.tick_count += 1;
+        // Python's global MURIM configuration changes only through the
+        // administrator reload path. Snapshot this once per tick instead of
+        // reopening and parsing murim.json for every active player.
+        let murim = self.tick_murim_config();
 
         let mut occupied_player_names = Vec::new();
+        let mut soul_formation_anchors = Vec::<(String, String, Vec<String>)>::new();
         let mut room_messages: Vec<(String, String)> = Vec::new();
         let mut pending_rewards = Vec::new();
         let mut clients = broadcaster.clients.lock();
@@ -187,10 +333,20 @@ impl GameLoop {
             }
 
             if client.state == ClientState::Active {
+                let soul_companion_names = client
+                    .soul
+                    .as_ref()
+                    .map(|soul| soul.inactive_names())
+                    .unwrap_or_default();
+                if let (Some(player), Some(soul)) = (client.player.as_ref(), client.soul.as_ref()) {
+                    soul_formation_anchors.push((
+                        player.body.get_name(),
+                        soul.main_body.clone(),
+                        soul.inactive_names(),
+                    ));
+                }
                 if let Some(player) = client.player.as_mut() {
-                    if i64::from(player.cmd_cnt)
-                        > crate::script::get_murim_config_int("입력초과에러수")
-                    {
+                    if i64::from(player.cmd_cnt) > murim.input_error_limit {
                         player.body.set("강제종료", chrono::Utc::now().timestamp());
                         let _ = client.sender.send(DISCONNECT_SENTINEL.to_string());
                         client.disconnect_requested = true;
@@ -199,7 +355,7 @@ impl GameLoop {
                     player.cmd_cnt = 0;
                     let was_dead = player.body.act == ActState::Death;
                     let death_step = player.body.get_death_step();
-                    update_active_player(player, &self.config);
+                    update_active_player(player, &self.config, murim);
                     // Python doDeath step 3 performs enterRoom("낙양성:7",
                     // "사망", "사망") while the player is still dead.
                     if was_dead && death_step == 3 {
@@ -270,6 +426,20 @@ impl GameLoop {
                     if player.body.act == ActState::Fight
                         && crate::script::combat_commands::pvp_target(&player.body).is_none()
                     {
+                        let target_keys =
+                            crate::script::combat_commands::combat_target_ids(&player.body);
+                        let target_instances =
+                            crate::script::combat_commands::combat_target_instance_ids(
+                                &player.body,
+                            );
+                        for companion in &soul_companion_names {
+                            process_soul_companion_combat_tick(
+                                companion,
+                                &target_keys,
+                                &target_instances,
+                                &mut pending_rewards,
+                            );
+                        }
                         let messages = process_combat_tick(player, &mut pending_rewards);
                         for (room, message) in messages {
                             room_messages.push((room, message));
@@ -289,6 +459,17 @@ impl GameLoop {
                         self.auto_consume.push((client_addr, command));
                     }
                     expire_player_skill_effects(&mut player.body);
+                    let expired_consumables =
+                        crate::script::item_effects::expire_timed(&mut player.body);
+                    if !expired_consumables.is_empty() {
+                        crate::script::combat_commands::queue_combat_presentation_event(
+                            &mut player.body,
+                            serde_json::json!({
+                                "kind": "consumable_expired",
+                                "scripts": expired_consumables,
+                            }),
+                        );
+                    }
                     if let Some(crate::object::Value::String(expired)) =
                         player.body.temp_mut().remove("_expired_auto_skills")
                     {
@@ -346,7 +527,7 @@ impl GameLoop {
         process_pvp_ticks(&mut clients, &mut self.combat_render, &mut self.newly_dead);
         if !pending_rewards.is_empty() {
             let positions = get_world_state().read().ok();
-            let snapshots = clients
+            let mut snapshots = clients
                 .values()
                 .filter_map(|client| {
                     let player = client.player.as_ref()?;
@@ -362,6 +543,17 @@ impl GameLoop {
                     ))
                 })
                 .collect::<std::collections::HashMap<_, _>>();
+            if let Some(world) = positions.as_ref() {
+                for user in world.summoned_users() {
+                    snapshots.entry(user.body.get_name()).or_insert_with(|| {
+                        (
+                            user.body.get_int("레벨"),
+                            user.position.zone.clone(),
+                            user.position.room.clone(),
+                        )
+                    });
+                }
+            }
             drop(positions);
             for reward in pending_rewards {
                 let same_room_targets = reward
@@ -373,29 +565,35 @@ impl GameLoop {
                         })
                     })
                     .cloned()
+                    .take(crate::network::social::MAX_PARTY_SIZE)
                     .collect::<Vec<_>>();
                 let count = same_room_targets.len() as i64;
-                let Some(max_level) = same_room_targets
-                    .iter()
-                    .filter_map(|name| snapshots.get(name).map(|(level, _, _)| *level))
-                    .max()
-                else {
-                    continue;
-                };
                 if count == 0 {
                     continue;
                 }
+                let experience_shares = party_experience_shares(
+                    reward.mob_level,
+                    &same_room_targets
+                        .iter()
+                        .filter_map(|name| {
+                            Some((
+                                name.clone(),
+                                snapshots.get(name)?.0,
+                                reward.damage_map.get(name).copied().unwrap_or(0),
+                            ))
+                        })
+                        .collect::<Vec<_>>(),
+                );
                 if let Some(first_target) = reward.targets.first() {
                     if let Some((target_level, zone, room)) = snapshots.get(first_target) {
                         if zone == &reward.zone
                             && room == &reward.room
                             && reward.mob_level >= *target_level
                         {
-                            let cap = crate::script::get_murim_config_int("약초나올확률") as f64;
                             let chance = (((reward.mob_level - *target_level) as f64 * 0.01)
                                 + 0.05
                                 + f64::from(reward.difficulty))
-                            .min(cap);
+                            .min(murim.herb_probability_cap);
                             if chance
                                 >= rand::Rng::gen_range(&mut rand::thread_rng(), 0..=99) as f64
                             {
@@ -435,19 +633,65 @@ impl GameLoop {
                     if !reward.damage_map.contains_key(&contributor) {
                         continue;
                     }
-                    let exp = calculate_exp_reward_for_level(reward.mob_level, max_level)
-                        .div_euclid(count);
+                    let exp = experience_shares.get(&contributor).copied().unwrap_or(0);
                     let gold = calculate_gold_reward_for_level(reward.mob_level, reward.mob_gold)
                         .div_euclid(count);
                     let difficulty = crate::world::DifficultyConfig::get(reward.difficulty);
                     let bonus_exp = difficulty.bonus_exp(exp);
                     let bonus_gold = difficulty.bonus_gold(gold);
-                    let Some(client) = clients.values_mut().find(|client| {
+                    let connected_addr = clients.iter().find_map(|(addr, client)| {
                         client
                             .player
                             .as_ref()
                             .is_some_and(|player| player.body.get_name() == contributor)
-                    }) else {
+                            .then_some(*addr)
+                    });
+                    if connected_addr.is_none() {
+                        if let Ok(mut world) = get_world_state().write() {
+                            if let Some(user) = world.summoned_user_mut_by_name(&contributor) {
+                                let old_max_hp = user.body.get_int("최고체력");
+                                let leveled = user.body.add_exp(exp.saturating_add(bonus_exp));
+                                let hp_increase = user.body.get_int("최고체력") - old_max_hp;
+                                user.body.set(
+                                    "은전",
+                                    user.body
+                                        .get_int("은전")
+                                        .saturating_add(gold)
+                                        .saturating_add(bonus_gold),
+                                );
+                                let kill_key = format!("{} 성격플킬", reward.personality);
+                                user.body
+                                    .set(&kill_key, user.body.get_int(&kill_key).saturating_add(1));
+                                crate::script::combat_commands::queue_combat_presentation_event(
+                                    &mut user.body,
+                                    serde_json::json!({
+                                        "kind": "reward", "mob": reward.mob_name,
+                                        "exp": exp, "gold": gold,
+                                        "bonus_exp": bonus_exp, "bonus_gold": bonus_gold,
+                                    }),
+                                );
+                                if leveled {
+                                    let max_hp = user.body.get_int("최고체력");
+                                    let armor = user.body.get_int("맷집");
+                                    crate::script::combat_commands::queue_combat_presentation_event(
+                                        &mut user.body,
+                                        serde_json::json!({
+                                            "kind": "level_up", "hp_increase": hp_increase,
+                                            "max_hp": max_hp,
+                                            "armor": armor,
+                                        }),
+                                    );
+                                }
+                                let _ = save_body_to_json(
+                                    &mut user.body,
+                                    &format!("data/user/{contributor}.json"),
+                                );
+                                first_contributor = false;
+                            }
+                        }
+                        continue;
+                    }
+                    let Some(client) = clients.get_mut(&connected_addr.unwrap()) else {
                         continue;
                     };
                     let Some(player) = client.player.as_mut() else {
@@ -483,8 +727,7 @@ impl GameLoop {
                             "자동습득",
                         )
                     {
-                        let max_items =
-                            crate::script::get_murim_config_int("사용자아이템갯수").max(0) as usize;
+                        let max_items = murim.max_user_items;
                         if reward.mob_level >= 2_000
                             && rand::Rng::gen_range(&mut rand::thread_rng(), 0..=99) < 1
                         {
@@ -589,6 +832,7 @@ impl GameLoop {
                             }
                         }
                     }
+                    crate::script::item_effects::refresh(&mut player.body);
                     crate::script::combat_commands::queue_combat_presentation_event(
                         &mut player.body,
                         serde_json::json!({
@@ -803,6 +1047,19 @@ impl GameLoop {
         }
         drop(clients);
 
+        if let Ok(mut world) = get_world_state().write() {
+            for (active_name, main_name, companions) in soul_formation_anchors {
+                let anchor = if main_name == active_name {
+                    world.get_player_position(&active_name).cloned()
+                } else {
+                    world.summoned_user_position_by_name(&main_name).cloned()
+                };
+                if let Some(anchor) = anchor {
+                    world.move_summoned_users_to(&companions, &anchor);
+                }
+            }
+        }
+
         for (room, message) in room_messages {
             broadcaster.tell_room(&room, &message, None);
         }
@@ -938,12 +1195,11 @@ impl GameLoop {
 /// The subset of Python `Player.update()` whose state and ordering are represented exactly by
 /// the current Rust model. Combat, death progression, auto-consume and timed defence effects are
 /// intentionally not approximated here; they require their own faithful runtime state migration.
-fn update_active_player(player: &mut Player, config: &GameLoopConfig) {
+fn update_active_player(player: &mut Player, config: &GameLoopConfig, murim: TickMurimConfig) {
     player.body.tick = player.body.tick.saturating_add(1);
     let age_tick = player.body.get_int("나이오름틱").saturating_add(1);
     player.body.set("나이오름틱", age_tick);
-    let age_interval = crate::script::get_murim_config_int("나이오름틱");
-    if age_interval > 0 && age_tick >= age_interval {
+    if murim.age_interval > 0 && age_tick >= murim.age_interval {
         player.body.set("나이오름틱", 0_i64);
         let age = player.body.get_int("나이").saturating_add(1);
         player.body.set("나이", age);
@@ -962,7 +1218,7 @@ fn update_active_player(player: &mut Player, config: &GameLoopConfig) {
         && player.body.get_int("0 성격플킬")
             + player.body.get_int("1 성격플킬")
             + player.body.get_int("2 성격플킬")
-            >= crate::script::get_murim_config_int("무림별호이벤트킬수")
+            >= murim.nickname_kill_threshold
     {
         crate::script::combat_commands::queue_combat_presentation_event(
             &mut player.body,
@@ -1691,6 +1947,74 @@ fn process_combat_tick(
         );
     }
     Vec::new()
+}
+
+fn process_soul_companion_combat_tick(
+    name: &str,
+    target_keys: &[String],
+    target_instance_ids: &[u64],
+    pending_rewards: &mut Vec<PendingMobReward>,
+) {
+    if target_keys.is_empty() {
+        return;
+    }
+    let extracted = get_world_state().write().ok().and_then(|mut world| {
+        let user = world.take_summoned_user_by_name(name)?;
+        let position = user.position.clone();
+        world.set_player_position(name, position.clone());
+        if let Some(mobs) = world
+            .mob_cache
+            .get_all_mobs_in_room_mut(&position.zone, &position.room)
+        {
+            for mob in mobs.iter_mut().filter(|mob| {
+                target_instance_ids.contains(&mob.instance_id)
+                    || (target_instance_ids.is_empty() && target_keys.contains(&mob.mob_key))
+            }) {
+                if mob.alive && !mob.targets.iter().any(|target| target == name) {
+                    mob.targets.push(name.to_string());
+                }
+            }
+        }
+        Some((user, position))
+    });
+    let Some((mut user, original_position)) = extracted else {
+        return;
+    };
+    if user.body.act == ActState::Death || user.body.get_hp() <= 0 {
+        if let Ok(mut world) = get_world_state().write() {
+            world.remove_player_position(name);
+            world.restore_summoned_user(user, original_position);
+        }
+        return;
+    }
+    user.body.temp_mut().insert(
+        "_combat_target_ids".to_string(),
+        crate::object::Value::String(target_keys.join("\n")),
+    );
+    if target_instance_ids.is_empty() {
+        user.body.temp_mut().remove("_combat_target_instance_ids");
+    } else {
+        user.body.temp_mut().insert(
+            "_combat_target_instance_ids".to_string(),
+            crate::object::Value::String(
+                target_instance_ids
+                    .iter()
+                    .map(u64::to_string)
+                    .collect::<Vec<_>>()
+                    .join("\n"),
+            ),
+        );
+    }
+    user.body.act = ActState::Fight;
+    let mut player = Player::from_body(user.body);
+    let _ = process_combat_tick(&mut player, pending_rewards);
+    user.body = player.body;
+    if let Ok(mut world) = get_world_state().write() {
+        let position = world
+            .remove_player_position(name)
+            .unwrap_or(original_position);
+        world.restore_summoned_user(user, position);
+    }
 }
 
 fn apply_python_damage_recovery(
@@ -2450,6 +2774,7 @@ fn render_combat_presentation(
 pub async fn run_game_loop(
     broadcaster: Arc<Broadcaster>,
     config: GameLoopConfig,
+    global_data: Option<SharedGlobalData>,
     call_out_scheduler: Option<Arc<CallOutScheduler>>,
     command_registry: Arc<CommandRegistry>,
     room_cache: Arc<std::sync::Mutex<RoomCache>>,
@@ -2458,7 +2783,11 @@ pub async fn run_game_loop(
     let mut timer = interval(config.tick_interval);
     timer.tick().await; // Tokio intervals fire immediately once; Python does not.
 
-    let mut game_loop = GameLoop::new(config);
+    let mut game_loop = if let Some(global_data) = global_data {
+        GameLoop::with_global_data(config, global_data)
+    } else {
+        GameLoop::new(config)
+    };
     loop {
         timer.tick().await;
         if let Some(scheduler) = &call_out_scheduler {
@@ -2616,6 +2945,110 @@ fn automatic_consumable_commands(player: &Player) -> Vec<String> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn party_experience_rewards_peers_and_blocks_low_level_bus_riding() {
+        let peer =
+            party_experience_shares(500, &[("갑".into(), 480, 500), ("을".into(), 500, 500)]);
+        assert!(peer["갑"] > 0);
+        assert!(peer["을"] > 0);
+        assert!(peer["갑"] * 2 > peer["을"]);
+
+        let carried = party_experience_shares(
+            1_000,
+            &[("고수".into(), 1_000, 9_990), ("초보".into(), 20, 10)],
+        );
+        assert!(carried["고수"] > carried["초보"] * 100);
+    }
+
+    #[test]
+    fn party_experience_never_rewards_more_than_four_contributors() {
+        let members = (1..=5)
+            .map(|number| (format!("인원{number}"), 100, 100))
+            .collect::<Vec<_>>();
+        let shares = party_experience_shares(100, &members);
+        assert_eq!(shares.len(), 4);
+        assert!(!shares.contains_key("인원5"));
+    }
+
+    #[test]
+    fn soul_companion_automatically_joins_the_active_mob_combat() {
+        let suffix = format!("동행전투{}", std::process::id());
+        let main_name = format!("{suffix}본캐");
+        let companion_name = format!("{suffix}동료");
+        let zone = format!("{suffix}존");
+        let room = "1".to_string();
+        let mob_key = format!("{zone}:표적");
+        let mut data = crate::world::RawMobData::new();
+        data.name = "동행전투표적".into();
+        data.zone = zone.clone();
+        data.hp = 100_000;
+        data.max_hp = 100_000;
+        data.strength = 0;
+        let position = crate::world::PlayerPosition::new(zone.clone(), room.clone());
+        let mut companion = Body::new();
+        companion.set("이름", companion_name.as_str());
+        companion.set("체력", 1_000_i64);
+        companion.set("최고체력", 1_000_i64);
+        companion.set("힘", 100_i64);
+        companion.set("명중", 100_000_i64);
+        companion.set("레벨", 100_i64);
+        {
+            let mut world = get_world_state().write().unwrap();
+            world
+                .mob_cache
+                .insert_mob_data(mob_key.clone(), data.clone());
+            let mut mob =
+                crate::world::MobInstance::new(mob_key.clone(), zone.clone(), &room, &data);
+            mob.targets.push(main_name.clone());
+            world.mob_cache.add_mob_instance(mob);
+            world.set_player_position(&main_name, position.clone());
+            world.add_summoned_user(companion, position.clone());
+        }
+        let broadcaster = Broadcaster::new();
+        let (mut client, _rx) = active_client(41401, &main_name, ActState::Fight);
+        client
+            .soul_mut()
+            .unwrap()
+            .add_body(
+                companion_name.clone(),
+                crate::player::SoulBodyKind::Alternate,
+            )
+            .unwrap();
+        let main = client.player.as_mut().unwrap();
+        main.body.set("레벨", 100_i64);
+        main.body.set("힘", 100_i64);
+        main.body.set("명중", 100_000_i64);
+        main.body.temp_mut().insert(
+            "_attack_target_key".to_string(),
+            crate::object::Value::String(mob_key.clone()),
+        );
+        broadcaster.add_client(client);
+
+        GameLoop::new(GameLoopConfig::default()).tick_at(&broadcaster, Instant::now());
+        let world = get_world_state().read().unwrap();
+        let mob = world
+            .mob_cache
+            .get_all_mobs_in_room(&zone, &room)
+            .into_iter()
+            .find(|mob| mob.mob_key == mob_key)
+            .unwrap();
+        assert!(mob.targets.contains(&companion_name));
+        let companion = world
+            .summoned_users()
+            .iter()
+            .find(|user| user.body.get_name() == companion_name)
+            .unwrap();
+        assert_eq!(companion.body.act, ActState::Fight);
+        assert!(!crate::script::combat_commands::combat_target_ids(&companion.body).is_empty());
+        drop(world);
+        if let Ok(mut world) = get_world_state().write() {
+            world.remove_player_position(&main_name);
+            let _ = world.take_summoned_user_by_name(&companion_name);
+            world.mob_cache.remove_instance(&zone, &room, &mob_key);
+            world.mob_cache.remove_mob(&mob_key);
+        }
+    }
     use crate::network::client::Client;
     use crate::player::STATE_ACTIVE;
     use std::net::{IpAddr, Ipv4Addr, SocketAddr};
@@ -2623,6 +3056,44 @@ mod tests {
 
     fn addr(port: u16) -> SocketAddr {
         SocketAddr::new(IpAddr::V4(Ipv4Addr::LOCALHOST), port)
+    }
+
+    #[test]
+    fn game_loop_with_global_data_does_not_fall_back_to_murim_file() {
+        let global_data = Arc::new(std::sync::RwLock::new(crate::data::GlobalData::new(
+            PathBuf::from("missing-data-directory"),
+        )));
+        let game_loop = GameLoop::with_global_data(GameLoopConfig::default(), global_data);
+        assert_eq!(game_loop.murim_config_int("입력초과에러수"), 0);
+    }
+
+    #[test]
+    fn game_loop_snapshots_all_hot_reloadable_murim_values_once_per_tick() {
+        let root = std::env::temp_dir().join(format!(
+            "muc_tick_murim_{}_{}",
+            std::process::id(),
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap()
+                .as_nanos()
+        ));
+        std::fs::create_dir_all(root.join("config")).unwrap();
+        std::fs::write(
+            root.join("config/murim.json"),
+            r#"{"메인설정":{"입력초과에러수":11,"나이오름틱":22,"무림별호이벤트킬수":33,"약초나올확률":44,"사용자아이템갯수":55}}"#,
+        )
+        .unwrap();
+        let global_data = crate::data::create_global_data(root.clone());
+        let game_loop = GameLoop::with_global_data(GameLoopConfig::default(), global_data);
+
+        let murim = game_loop.tick_murim_config();
+        assert_eq!(murim.input_error_limit, 11);
+        assert_eq!(murim.age_interval, 22);
+        assert_eq!(murim.nickname_kill_threshold, 33);
+        assert_eq!(murim.herb_probability_cap, 44.0);
+        assert_eq!(murim.max_user_items, 55);
+
+        let _ = std::fs::remove_dir_all(root);
     }
 
     #[tokio::test]
@@ -2790,7 +3261,12 @@ mod tests {
         player.body.tick = 59;
         player.body.set("0 성격플킬", 35_i64);
 
-        update_active_player(&mut player, &GameLoopConfig::default());
+        let game_loop = GameLoop::new(GameLoopConfig::default());
+        update_active_player(
+            &mut player,
+            &GameLoopConfig::default(),
+            game_loop.tick_murim_config(),
+        );
 
         assert_eq!(player.body.get_int("나이"), 60);
         assert_eq!(player.body.get_int("최고내공"), 160);

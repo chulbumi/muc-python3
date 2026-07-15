@@ -428,6 +428,7 @@ fn store_action(body: &mut Body, action: SocialAction) -> bool {
 fn empty_context() -> Map {
     let mut context = Map::new();
     context.insert("self_id".into(), Dynamic::from(String::new()));
+    context.insert("soul_member_count".into(), Dynamic::from(1_i64));
     context.insert(
         "self".into(),
         missing_party_person(String::new(), RelationState::default()),

@@ -16,12 +16,15 @@ pub(crate) use cast::skill_up_python;
 pub(crate) mod combat_commands;
 mod drop_item;
 mod fixture;
+mod world_edit;
 pub(crate) use fixture::{try_fixture_event, visible_fixture_short_lines};
 pub(crate) mod inventory_compat;
 pub(crate) use inventory_compat::mark_item_field_as_json_array;
 mod item_event;
 pub(crate) use item_event::try_item_event;
+pub(crate) mod item_effects;
 mod movement;
+mod package_item;
 mod party;
 mod requests;
 mod return_home;
@@ -947,6 +950,116 @@ pub(crate) fn clear_precomputed_room_view_players() {
     PRE_COMPUTED_ROOM_VIEW_PLAYERS.with(|slot| *slot.borrow_mut() = None);
 }
 
+thread_local! {
+    static PRE_COMPUTED_ROOM_ADMIN_BODIES: RefCell<Option<RoomAdminSnapshot>> =
+        const { RefCell::new(None) };
+}
+
+struct RoomAdminSnapshot {
+    bodies: Vec<(String, Body)>,
+    values: Option<Vec<serde_json::Value>>,
+}
+
+pub(crate) fn set_precomputed_room_admin_bodies(players: Vec<(String, Body)>) {
+    PRE_COMPUTED_ROOM_ADMIN_BODIES.with(|slot| {
+        *slot.borrow_mut() = Some(RoomAdminSnapshot {
+            bodies: players,
+            values: None,
+        });
+    });
+}
+
+pub(crate) fn clear_precomputed_room_admin_bodies() {
+    PRE_COMPUTED_ROOM_ADMIN_BODIES.with(|slot| *slot.borrow_mut() = None);
+}
+
+fn build_room_admin_player_value(name: &str, body: &Body) -> serde_json::Value {
+    let guards: Vec<serde_json::Value> = body
+        .object
+        .objs
+        .iter()
+        .filter_map(|arc| {
+            let obj = arc.lock().ok()?;
+            (obj.getString("종류") == "호위").then(|| {
+                let max_hp = object_from_item_json(&obj.getString("인덱스"))
+                    .and_then(|(template, _)| template.lock().ok().map(|item| item.getInt("체력")))
+                    .unwrap_or_else(|| obj.getInt("최고체력").max(obj.getInt("체력")));
+                serde_json::json!({
+                    "name": obj.getName(), "hp": obj.getInt("체력"),
+                    "max_hp": max_hp, "description": obj.getString("설명2")
+                })
+            })
+        })
+        .collect();
+    serde_json::json!({
+        "name": name,
+        "level": body.get_int("레벨"),
+        "age": body.get_int("나이"),
+        "hp": body.get_hp(),
+        "max_hp": body.get_max_hp(),
+        "mp": body.get_mp(),
+        "max_mp": body.get_max_mp(),
+        "attack": body.get_attack_power(),
+        "strength": body.get_str(),
+        "armor": body.get_armor(),
+        "arm": body.get_arm(),
+        "dex": body.get_dex(),
+        "weight": body.get_item_weight(),
+        "current_exp": body.get_int("현재경험치"),
+        "total_exp": body.get_total_exp(),
+        "hit": body.get_hit(), "miss": body.get_miss(),
+        "critical": body.get_critical(), "luck": body.get_critical_chance(),
+        "silver": body.get_int("은전"),
+        "성격": body.get_string("성격"), "성별": body.get_string("성별"),
+        "소속": body.get_string("소속"), "직위": body.get_string("직위"),
+        "배우자": body.get_string("배우자"),
+        "feature": body.get_int("특성치"),
+        "insurance_premium": body.get_int("보험료"),
+        "hp_script": hp_status_script(body.get_hp(), body.get_int("최고체력")),
+        "mp_script": mp_status_script(body.get_mp()),
+        "nickname": body.get_string("방파별호"),
+        "anger": body.get_int("분노"),
+        "targets": body.targets.iter().filter_map(|target| {
+            target.upgrade().and_then(|target| target.lock().ok().map(|object| object.getName()))
+        }).collect::<Vec<_>>(),
+        "guards": guards,
+        "raw_attrs": body.object.attr.iter().map(|(key, value)| {
+            let value = match value {
+                Value::Int(value) => serde_json::Value::Number((*value).into()),
+                Value::Float(value) => serde_json::Number::from_f64(*value)
+                    .map(serde_json::Value::Number).unwrap_or(serde_json::Value::Null),
+                Value::String(value) => serde_json::Value::String(value.clone()),
+            };
+            (key.clone(), value)
+        }).collect::<serde_json::Map<String, serde_json::Value>>()
+    })
+}
+
+fn room_admin_player_values(body: &Body) -> Option<Vec<serde_json::Value>> {
+    if let Some(values) = body
+        .temp()
+        .get("_online_room_admin")
+        .and_then(Value::as_str)
+        .and_then(|json| serde_json::from_str::<Vec<serde_json::Value>>(json).ok())
+    {
+        return Some(values);
+    }
+    PRE_COMPUTED_ROOM_ADMIN_BODIES.with(|slot| {
+        let mut slot = slot.borrow_mut();
+        let snapshot = slot.as_mut()?;
+        if snapshot.values.is_none() {
+            snapshot.values = Some(
+                snapshot
+                    .bodies
+                    .iter()
+                    .map(|(name, player)| build_room_admin_player_value(name, player))
+                    .collect(),
+            );
+        }
+        snapshot.values.clone()
+    })
+}
+
 pub(super) fn room_view_player_snapshots(zone: &str, room: &str) -> rhai::Array {
     PRE_COMPUTED_ROOM_VIEW_PLAYERS.with(|slot| {
         slot.borrow()
@@ -1146,7 +1259,7 @@ pub(crate) struct RoomMugongTargetSnapshot {
     active_skills: Vec<ActiveMugongSnapshot>,
 }
 
-fn reaction_names(raw: &str) -> Vec<String> {
+pub(crate) fn reaction_names(raw: &str) -> Vec<String> {
     raw.split(|c: char| c == '|' || c.is_whitespace())
         .filter(|name| !name.is_empty())
         .map(str::to_string)
@@ -2102,11 +2215,7 @@ fn request_online_player_admin_value(
     key: &str,
     raw: &str,
 ) -> Option<String> {
-    let players = body
-        .temp()
-        .get("_online_room_admin")
-        .and_then(Value::as_str)
-        .and_then(|json| serde_json::from_str::<Vec<serde_json::Value>>(json).ok())?;
+    let players = room_admin_player_values(body)?;
     let player = players
         .iter()
         .find(|player| player.get("name").and_then(|value| value.as_str()) == Some(target))?;
@@ -2146,11 +2255,7 @@ fn online_player_raw_attr(
     target: &str,
     key: &str,
 ) -> Option<Option<serde_json::Value>> {
-    let players = body
-        .temp()
-        .get("_online_room_admin")
-        .and_then(Value::as_str)
-        .and_then(|json| serde_json::from_str::<Vec<serde_json::Value>>(json).ok())?;
+    let players = room_admin_player_values(body)?;
     let player = players
         .iter()
         .find(|player| player.get("name").and_then(|value| value.as_str()) == Some(target))?;
@@ -3392,6 +3497,11 @@ pub fn load_body_from_json(body: &mut Body, path: &str) -> bool {
         return false;
     };
 
+    // A Body may be reloaded in place. Drop the old runtime marker before
+    // inventory loading rebuilds all equipment-derived caches.
+    item_effects::clear(body);
+    item_effects::clear_timed(body);
+
     {
         body.object.attr.clear();
         body.object
@@ -3508,6 +3618,11 @@ pub fn load_body_from_json(body: &mut Body, path: &str) -> bool {
     // `대화기록`이 있어도 다시 불러오지 않는다.
     body.talk_history.clear();
 
+    // Equipment was rebuilt above. Possession effects and equipped set tiers
+    // are derived runtime state and are never persisted as base attributes.
+    item_effects::refresh(body);
+    item_effects::refresh_timed(body);
+
     true
 }
 
@@ -3525,8 +3640,56 @@ pub(crate) fn load_script_file(path: &str) -> Option<Vec<String>> {
 /// Returns None if file missing or invalid; else Some((object, 아이템정보.이름 or key)).
 /// world::event::$아이템주기에서 사용. pub(crate).
 pub(crate) fn object_from_item_json(key: &str) -> Option<(Arc<Mutex<Object>>, String)> {
-    let path = format!("data/item/{}.json", key);
-    let content = std::fs::read_to_string(&path).ok()?;
+    let path = PathBuf::from(format!("data/item/{key}.json"));
+    object_from_item_path(&path, key)
+}
+
+#[derive(Clone)]
+struct CachedItemObjectTemplate {
+    modified: std::time::SystemTime,
+    file_len: u64,
+    object: Object,
+    display_name: String,
+}
+
+static ITEM_OBJECT_TEMPLATE_CACHE: std::sync::LazyLock<
+    std::sync::RwLock<HashMap<PathBuf, CachedItemObjectTemplate>>,
+> = std::sync::LazyLock::new(|| std::sync::RwLock::new(HashMap::new()));
+
+fn object_from_item_path(path: &Path, key: &str) -> Option<(Arc<Mutex<Object>>, String)> {
+    let metadata = std::fs::metadata(path).ok()?;
+    let modified = metadata
+        .modified()
+        .unwrap_or(std::time::SystemTime::UNIX_EPOCH);
+    let file_len = metadata.len();
+    if let Ok(cache) = ITEM_OBJECT_TEMPLATE_CACHE.read() {
+        if let Some(cached) = cache.get(path) {
+            if cached.modified == modified && cached.file_len == file_len {
+                return Some((
+                    Arc::new(Mutex::new(cached.object.deepclone())),
+                    cached.display_name.clone(),
+                ));
+            }
+        }
+    }
+
+    let (object, display_name) = load_item_object_from_path(path, key)?;
+    if let Ok(mut cache) = ITEM_OBJECT_TEMPLATE_CACHE.write() {
+        cache.insert(
+            path.to_path_buf(),
+            CachedItemObjectTemplate {
+                modified,
+                file_len,
+                object: object.deepclone(),
+                display_name: display_name.clone(),
+            },
+        );
+    }
+    Some((Arc::new(Mutex::new(object)), display_name))
+}
+
+fn load_item_object_from_path(path: &Path, key: &str) -> Option<(Object, String)> {
+    let content = std::fs::read_to_string(path).ok()?;
     let json: serde_json::Value = serde_json::from_str(&content).ok()?;
     let info = json.get("아이템정보")?.as_object()?;
     let display_name = info
@@ -3578,7 +3741,7 @@ pub(crate) fn object_from_item_json(key: &str) -> Option<(Arc<Mutex<Object>>, St
             serde_json::Value::Object(_) => {}
         }
     }
-    Some((Arc::new(Mutex::new(obj)), display_name))
+    Some((obj, display_name))
 }
 
 /// Upgrade Rust's legacy compact floor representation into the individual
@@ -6138,6 +6301,7 @@ pub fn create_engine_with_body_and_output(
     });
     let body_ptr = body as *mut Body;
     let spec = special_collector.clone();
+    item_effects::register_efuns(&mut engine, body_ptr);
 
     // Python `cmds/업데이트.py` owns every user-visible branch and
     // message. Rust exposes only the corresponding cache/hot-reload operation.
@@ -6163,10 +6327,26 @@ pub fn create_engine_with_body_and_output(
         });
     }
 
+    // `skill.json` is loaded with the other global configuration files and is
+    // refreshed by `무공 업데이트`.  Replace the base engine's file-backed
+    // fallback so ordinary command execution reads that snapshot instead of
+    // reparsing the complete file for every `get_skill_data()` call.
+    if let Some(skill_data) = global_data.clone() {
+        register_cached_skill_data_efun(&mut engine, skill_data);
+    }
+
+    // `murim.json` is part of the same hot-reloadable GlobalData snapshot.
+    // Keep ordinary commands off the synchronous file-read fallback installed
+    // by the base engine.
+    if let Some(murim_data) = global_data.clone() {
+        register_cached_murim_config_efun(&mut engine, murim_data);
+    }
+
     // Python `cmds/시전.py`의 대상 조회 및 상태 전이는 전용 데이터/로직
     // efun으로 제공한다. 사용자에게 보이는 문구와 ANSI는 `시전.rhai`에 둔다.
     cast::register_cast_efuns(&mut engine, body_ptr);
     anger::register_anger_efuns(&mut engine, body_ptr);
+    package_item::register_package_efun(&mut engine, body_ptr);
     admin_combat::register_admin_combat_efuns(&mut engine, body_ptr);
 
     // Python `넣어.py`/`꺼내.py` and `Box` ordered-child state.  Rust
@@ -6189,6 +6369,7 @@ pub fn create_engine_with_body_and_output(
     // Room-bound interactive objects expose only identity, placement, and
     // attribute state. Rhai owns their interaction rules and visible output.
     fixture::register_fixture_efuns(&mut engine, body_ptr);
+    world_edit::register_world_edit_efuns(&mut engine, body_ptr, script_name != Some("item_event"));
 
     // Python `cmds/귀환.py`의 검사/위치 전이만 제공한다. 명령 문구와
     // 같은 방 알림은 hot-reload되는 `귀환.rhai`가 결정한다.
@@ -9467,12 +9648,7 @@ pub fn create_engine_with_body_and_output(
                         .nth(order - 1)
                         .map(|mob| OrderedValueTarget::Mob(mob.instance_id));
                 }
-                let players = body
-                    .temp()
-                    .get("_online_room_admin")
-                    .and_then(Value::as_str)
-                    .and_then(|raw| serde_json::from_str::<Vec<serde_json::Value>>(raw).ok())
-                    .unwrap_or_default();
+                let players = room_admin_player_values(body).unwrap_or_default();
                 let digit_count = target.chars().take_while(|ch| ch.is_ascii_digit()).count();
                 let order = if digit_count == 0 {
                     1
@@ -9682,13 +9858,7 @@ pub fn create_engine_with_body_and_output(
                 return "ok".into();
             }
 
-            let live_players = body
-                .temp()
-                .get("_online_room_admin")
-                .and_then(Value::as_str)
-                .map(str::to_string)
-                .and_then(|json| serde_json::from_str::<Vec<serde_json::Value>>(&json).ok())
-                .unwrap_or_default();
+            let live_players = room_admin_player_values(body).unwrap_or_default();
             if let Some(player) = live_players
                 .iter()
                 .find(|player| {
@@ -11811,6 +11981,7 @@ pub fn create_engine_with_body_and_output(
             if kind == "무기" {
                 body.weapon_item = Some(std::sync::Arc::downgrade(&arc));
             }
+            item_effects::refresh(body);
             String::new()
         },
     );
@@ -11917,6 +12088,7 @@ pub fn create_engine_with_body_and_output(
                     body.object.remove(&item);
                 }
             }
+            item_effects::refresh(body);
             equipped
         },
     );
@@ -11943,6 +12115,9 @@ pub fn create_engine_with_body_and_output(
                     return result;
                 }
             };
+            // Remove derived bonuses before base equipment subtraction. This
+            // avoids the legacy zero clamp corrupting a negative set tier.
+            item_effects::clear(body);
             // 아이템의 모든 속성 수집 및 해제 처리
             let (is_weapon, stats, post) = {
                 let mut o = arc.lock().unwrap();
@@ -11972,6 +12147,7 @@ pub fn create_engine_with_body_and_output(
             if inventory_compat::absorb_pristine_object(&mut body.object, &arc) {
                 body.object.remove(&arc);
             }
+            item_effects::refresh(body);
             result.insert("err".into(), Dynamic::from(""));
             result.insert("post".into(), Dynamic::from(post));
             result
@@ -11998,12 +12174,14 @@ pub fn create_engine_with_body_and_output(
                     })
                 })
                 .collect::<rhai::Array>();
+            item_effects::clear(body);
             body.unwear_all();
             for item in body.object.objs.clone() {
                 if inventory_compat::absorb_pristine_object(&mut body.object, &item) {
                     body.object.remove(&item);
                 }
             }
+            item_effects::refresh(body);
             items
         },
     );
@@ -12016,6 +12194,14 @@ pub fn create_engine_with_body_and_output(
         "item_use_consumable",
         move |_ob: &mut rhai::Map, name: &str, order: i64| -> Dynamic {
             let mut m = rhai::Map::new();
+            m.insert("buff_name".into(), Dynamic::from(String::new()));
+            m.insert("buff_duration".into(), Dynamic::from(0_i64));
+            m.insert("buff_script".into(), Dynamic::from(String::new()));
+            m.insert(
+                "permanent_effects".into(),
+                Dynamic::from(rhai::Array::new()),
+            );
+            m.insert("permanent_script".into(), Dynamic::from(String::new()));
             if name.is_empty() {
                 m.insert("err".into(), Dynamic::from("usage".to_string()));
                 m.insert("name".into(), Dynamic::from(String::new()));
@@ -12115,6 +12301,9 @@ pub fn create_engine_with_body_and_output(
                                 *body.object.inv_stack.get_mut(&key).unwrap() -= 1;
                             }
 
+                            let buff = item_effects::apply_consumable_effect(body, &key);
+                            let permanent = item_effects::apply_permanent_effect(body, &key);
+
                             // 저장
                             let path = format!("data/user/{}.json", body.get_name());
                             let _ = save_body_to_json(body, &path);
@@ -12125,6 +12314,19 @@ pub fn create_engine_with_body_and_output(
                             m.insert("script".into(), Dynamic::from(script));
                             m.insert("ansi".into(), Dynamic::from(ansi));
                             m.insert("max_mp_gain".into(), Dynamic::from(max_mp_gain));
+                            m.insert("buff_name".into(), Dynamic::from(buff.name));
+                            m.insert("buff_duration".into(), Dynamic::from(buff.duration_seconds));
+                            m.insert("buff_script".into(), Dynamic::from(buff.activation_script));
+                            m.insert(
+                                "permanent_effects".into(),
+                                Dynamic::from(item_effects::permanent_effect_array(
+                                    permanent.effects,
+                                )),
+                            );
+                            m.insert(
+                                "permanent_script".into(),
+                                Dynamic::from(permanent.activation_script),
+                            );
                             m.insert(
                                 "remaining".into(),
                                 Dynamic::from(inventory_exact_name_count(body, &item_name)),
@@ -12144,7 +12346,7 @@ pub fn create_engine_with_body_and_output(
                     return Dynamic::from(m);
                 }
             };
-            let (item_name, hp, mp, script, ansi, mut max_mp_gain) = {
+            let (item_key, item_name, hp, mp, script, ansi, mut max_mp_gain) = {
                 let o = arc.lock().unwrap();
                 if o.getString("종류") != "먹는것" {
                     m.insert("err".into(), Dynamic::from("not_consumable".to_string()));
@@ -12152,6 +12354,7 @@ pub fn create_engine_with_body_and_output(
                     return Dynamic::from(m);
                 }
                 (
+                    o.getString("인덱스"),
                     o.getName(),
                     o.getInt("체력"),
                     o.getInt("내공"),
@@ -12186,6 +12389,8 @@ pub fn create_engine_with_body_and_output(
             body.object
                 .objs
                 .retain(|x| !std::sync::Arc::ptr_eq(x, &arc));
+            let buff = item_effects::apply_consumable_effect(body, &item_key);
+            let permanent = item_effects::apply_permanent_effect(body, &item_key);
             let remaining = inventory_exact_name_count(body, &item_name);
             let path = format!("data/user/{}.json", body.get_name());
             let _ = save_body_to_json(body, &path);
@@ -12195,6 +12400,17 @@ pub fn create_engine_with_body_and_output(
             m.insert("script".into(), Dynamic::from(script));
             m.insert("ansi".into(), Dynamic::from(ansi));
             m.insert("max_mp_gain".into(), Dynamic::from(max_mp_gain));
+            m.insert("buff_name".into(), Dynamic::from(buff.name));
+            m.insert("buff_duration".into(), Dynamic::from(buff.duration_seconds));
+            m.insert("buff_script".into(), Dynamic::from(buff.activation_script));
+            m.insert(
+                "permanent_effects".into(),
+                Dynamic::from(item_effects::permanent_effect_array(permanent.effects)),
+            );
+            m.insert(
+                "permanent_script".into(),
+                Dynamic::from(permanent.activation_script),
+            );
             m.insert("remaining".into(), Dynamic::from(remaining));
             Dynamic::from(m)
         },
@@ -12486,6 +12702,53 @@ pub fn create_engine_with_body_and_output(
                     Value::String(target.to_string()),
                 );
             }
+        },
+    );
+    let body_ptr_soul_roster = body_ptr;
+    engine.register_fn("get_soul_roster", move |_obj: &mut rhai::Map| -> Dynamic {
+        let body = unsafe { &*body_ptr_soul_roster };
+        body.temp()
+            .get("_soul_roster")
+            .and_then(Value::as_str)
+            .and_then(|json| serde_json::from_str::<serde_json::Value>(json).ok())
+            .map(|json| crate::data::json_to_dynamic(&json))
+            .unwrap_or_else(|| {
+                crate::data::json_to_dynamic(&serde_json::json!({
+                    "main": body.get_name(), "active": body.get_name(), "members": []
+                }))
+            })
+    });
+    let body_ptr_soul_switch = body_ptr;
+    engine.register_fn(
+        "request_soul_switch",
+        move |_obj: &mut rhai::Map, target: &str| -> bool {
+            if target.trim().is_empty() {
+                return false;
+            }
+            unsafe { &mut *body_ptr_soul_switch }.temp_mut().insert(
+                SOUL_SWITCH_REQUEST.to_string(),
+                Value::String(target.trim().to_string()),
+            );
+            true
+        },
+    );
+    // Authored item/mob/fixture scripts can grant an alternate character or
+    // mercenary without owning network/session mutation themselves.
+    let body_ptr_soul_attach = body_ptr;
+    engine.register_fn(
+        "request_soul_attach",
+        move |_obj: &mut rhai::Map, target: &str, kind: &str| -> bool {
+            if target.trim().is_empty() {
+                return false;
+            }
+            let request = (target.trim().to_string(), kind.trim().to_string());
+            let Ok(json) = serde_json::to_string(&request) else {
+                return false;
+            };
+            unsafe { &mut *body_ptr_soul_attach }
+                .temp_mut()
+                .insert(SOUL_ATTACH_REQUEST.to_string(), Value::String(json));
+            true
         },
     );
 
@@ -13433,12 +13696,7 @@ pub fn create_engine_with_body_and_output(
             let Some((zone, room)) = current_body_position(body) else {
                 return Dynamic::UNIT;
             };
-            let player_values = body
-                .temp()
-                .get("_online_room_admin")
-                .and_then(Value::as_str)
-                .and_then(|raw| serde_json::from_str::<Vec<serde_json::Value>>(raw).ok())
-                .unwrap_or_default();
+            let player_values = room_admin_player_values(body).unwrap_or_default();
             let Ok(world) = get_world_state().read() else {
                 return Dynamic::UNIT;
             };
@@ -13884,44 +14142,38 @@ pub fn create_engine_with_body_and_output(
             // 같은 방의 다른 플레이어 목록
             let mut arr = rhai::Array::new();
 
-            if let Some(crate::object::Value::String(raw)) = body.temp().get("_online_room_admin") {
-                if let Ok(values) = serde_json::from_str::<Vec<serde_json::Value>>(raw) {
-                    for value in values {
-                        if value.get("name").and_then(|v| v.as_str()) == Some(viewer_name.as_str())
-                        {
-                            continue;
-                        }
-                        let mut m = rhai::Map::new();
-                        if let Some(object) = value.as_object() {
-                            for (key, value) in object {
-                                if value.is_array() || value.is_object() {
-                                    m.insert(
-                                        key.clone().into(),
-                                        json_value_to_dynamic(value.clone()),
-                                    );
-                                } else if let Some(number) = value.as_i64() {
-                                    m.insert(key.clone().into(), Dynamic::from(number));
-                                } else if let Some(text) = value.as_str() {
-                                    m.insert(key.clone().into(), Dynamic::from(text.to_string()));
-                                }
-                            }
-                        }
-                        arr.push(Dynamic::from(m));
+            if let Some(values) = room_admin_player_values(body) {
+                for value in values {
+                    if value.get("name").and_then(|v| v.as_str()) == Some(viewer_name.as_str()) {
+                        continue;
                     }
-                    // Python channel.players also contains socket-less Players
-                    // created by 사용자몹소환. They are selected and rendered by
-                    // 상태보기 exactly like connected players.
-                    if let Ok(world) = get_world_state().read() {
-                        if let Some(pos) = world.get_player_position(viewer_name.as_str()) {
-                            for user in world.summoned_users_in_room(&pos.zone, &pos.room) {
-                                let mut m = admin_combat::body_status(&user.body);
-                                m.insert("name".into(), Dynamic::from(user.body.get_name()));
-                                arr.push(Dynamic::from(m));
+                    let mut m = rhai::Map::new();
+                    if let Some(object) = value.as_object() {
+                        for (key, value) in object {
+                            if value.is_array() || value.is_object() {
+                                m.insert(key.clone().into(), json_value_to_dynamic(value.clone()));
+                            } else if let Some(number) = value.as_i64() {
+                                m.insert(key.clone().into(), Dynamic::from(number));
+                            } else if let Some(text) = value.as_str() {
+                                m.insert(key.clone().into(), Dynamic::from(text.to_string()));
                             }
                         }
                     }
-                    return arr;
+                    arr.push(Dynamic::from(m));
                 }
+                // Python channel.players also contains socket-less Players
+                // created by 사용자몹소환. They are selected and rendered by
+                // 상태보기 exactly like connected players.
+                if let Ok(world) = get_world_state().read() {
+                    if let Some(pos) = world.get_player_position(viewer_name.as_str()) {
+                        for user in world.summoned_users_in_room(&pos.zone, &pos.room) {
+                            let mut m = admin_combat::body_status(&user.body);
+                            m.insert("name".into(), Dynamic::from(user.body.get_name()));
+                            arr.push(Dynamic::from(m));
+                        }
+                    }
+                }
+                return arr;
             }
 
             let w = match get_world_state().read() {
@@ -17068,13 +17320,7 @@ pub fn create_engine_with_body_and_output(
                                 }));
                             }
                             RoomObjectRef::Player(selected_name) => {
-                                if let Some(raw) = body
-                                    .temp()
-                                    .get("_online_room_admin")
-                                    .and_then(Value::as_str)
-                                    .and_then(|raw| {
-                                        serde_json::from_str::<Vec<serde_json::Value>>(raw).ok()
-                                    })
+                                if let Some(raw) = room_admin_player_values(body)
                                     .and_then(|players| {
                                         players.into_iter().find(|player| {
                                             player.get("name").and_then(|value| value.as_str())
@@ -19793,6 +20039,11 @@ pub fn create_engine_with_body_and_output(
 pub fn create_engine_with_global_data(global_data: SharedGlobalData) -> Engine {
     let mut engine = create_engine();
 
+    // Keep this standalone global-data engine consistent with the command
+    // engine: `get_skill_data` must observe the in-memory skill snapshot.
+    register_cached_skill_data_efun(&mut engine, global_data.clone());
+    register_cached_murim_config_efun(&mut engine, global_data.clone());
+
     // 글로벌 데이터를 clone하여 캡처
     let _gd = global_data.clone();
 
@@ -19924,6 +20175,31 @@ pub fn create_engine_with_global_data(global_data: SharedGlobalData) -> Engine {
 /// 내부적으로 data 모듈의 json_to_dynamic를 사용합니다.
 fn json_value_to_dynamic(value: serde_json::Value) -> Dynamic {
     crate::data::json_to_dynamic(&value)
+}
+
+/// Register the cached `skill.json` projection for engines that own
+/// `GlobalData`.  Engines without GlobalData retain the file-backed fallback
+/// for isolated tools and tests.
+fn register_cached_skill_data_efun(engine: &mut Engine, global_data: SharedGlobalData) {
+    engine.register_fn("get_skill_data", move |name: &str| -> Dynamic {
+        global_data
+            .try_read()
+            .ok()
+            .and_then(|data| data.get_skill(name).map(crate::data::json_to_dynamic))
+            .unwrap_or(Dynamic::UNIT)
+    });
+}
+
+/// Register the cached `murim.json` main-configuration projection. Engines
+/// without GlobalData retain the file-backed fallback used by isolated tools.
+fn register_cached_murim_config_efun(engine: &mut Engine, global_data: SharedGlobalData) {
+    engine.register_fn("get_murim_config", move |key: &str| -> Dynamic {
+        global_data
+            .try_read()
+            .ok()
+            .and_then(|data| data.get_murim_config(key).map(crate::data::json_to_dynamic))
+            .unwrap_or(Dynamic::UNIT)
+    });
 }
 
 fn python_json_repr(value: &serde_json::Value) -> String {
@@ -20364,6 +20640,10 @@ impl ScriptStorage {
             .ok_or_else(|| format!("Script not found: {}", name))?;
         let (_, command_ast) = self.cached_asts(name, script)?;
 
+        // Make an edited item definition visible to the command being run,
+        // not only to the command that follows it.
+        item_effects::refresh(player);
+
         let output_collector = Arc::new(Mutex::new(Vec::new()));
         let output_clone = output_collector.clone();
         let special_collector = Arc::new(Mutex::new(None));
@@ -20415,7 +20695,12 @@ impl ScriptStorage {
             rhai_and_efun_us = eval_elapsed.as_micros(),
             "Rhai script finished"
         );
-        result.map_err(|e| format!("스크립트 실행 오류: {}", e))?;
+        if let Err(error) = result {
+            // Native efuns may already have mutated inventory before a later
+            // Rhai expression fails.
+            item_effects::refresh(player);
+            return Err(format!("스크립트 실행 오류: {error}").into());
+        }
         let postprocess_started = Instant::now();
 
         // Affix commands also update their command-local `ob` map. Read that
@@ -20455,6 +20740,12 @@ impl ScriptStorage {
             "꼬리말제거" => player.set("꼬리말", ""),
             _ => {}
         }
+
+        // Commands may buy, receive, consume, drop, destroy, burn, unpack or
+        // otherwise mutate inventory through many efuns. Recomputing here is
+        // the common correctness boundary; item definitions themselves are
+        // cached and only reparsed after their mtime changes.
+        item_effects::refresh(player);
 
         let outputs = output_collector.lock().unwrap().clone();
         tracing::debug!(

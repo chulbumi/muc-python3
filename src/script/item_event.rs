@@ -6,6 +6,8 @@
 use rhai::{Dynamic, Engine, Scope, AST};
 use std::cell::RefCell;
 use std::collections::HashMap;
+#[cfg(unix)]
+use std::os::unix::fs::MetadataExt;
 use std::path::{Component, Path, PathBuf};
 use std::sync::{Arc, Mutex};
 use std::time::SystemTime;
@@ -15,7 +17,7 @@ use crate::player::Body;
 use crate::world::{get_world_state, EventScript};
 
 thread_local! {
-    static ITEM_EVENT_AST_CACHE: RefCell<HashMap<PathBuf, (SystemTime, AST)>> =
+    static ITEM_EVENT_AST_CACHE: RefCell<HashMap<PathBuf, (SystemTime, u64, u64, AST)>> =
         RefCell::new(HashMap::new());
 }
 
@@ -40,12 +42,21 @@ fn cached_item_event_ast(path: &Path) -> Result<AST, String> {
     let metadata = std::fs::metadata(path)
         .map_err(|error| format!("item event metadata {}: {error}", path.display()))?;
     let modified = metadata.modified().unwrap_or(SystemTime::UNIX_EPOCH);
+    let length = metadata.len();
+    #[cfg(unix)]
+    let identity = metadata.ino();
+    #[cfg(not(unix))]
+    let identity = 0;
     if let Some(ast) = ITEM_EVENT_AST_CACHE.with(|cache| {
         cache
             .borrow()
             .get(path)
-            .filter(|(cached_modified, _)| *cached_modified == modified)
-            .map(|(_, ast)| ast.clone())
+            .filter(|(cached_modified, cached_length, cached_identity, _)| {
+                *cached_modified == modified
+                    && *cached_length == length
+                    && *cached_identity == identity
+            })
+            .map(|(_, _, _, ast)| ast.clone())
     }) {
         return Ok(ast);
     }
@@ -56,9 +67,10 @@ fn cached_item_event_ast(path: &Path) -> Result<AST, String> {
         .compile(&executable)
         .map_err(|error| format!("item event compile {}: {error}", path.display()))?;
     ITEM_EVENT_AST_CACHE.with(|cache| {
-        cache
-            .borrow_mut()
-            .insert(path.to_path_buf(), (modified, ast.clone()));
+        cache.borrow_mut().insert(
+            path.to_path_buf(),
+            (modified, length, identity, ast.clone()),
+        );
     });
     Ok(ast)
 }
@@ -163,6 +175,7 @@ pub(crate) fn try_item_event(
         None,
     );
     let body_ptr = body as *mut Body;
+    super::world_edit::register_item_world_edit_efun(&mut engine, body_ptr, item_key.clone());
     let selected_stack_key = item_key.clone();
     engine.register_fn("item_event_consume", move |selected_id: i64| -> bool {
         let body = unsafe { &mut *body_ptr };
@@ -223,10 +236,12 @@ pub(crate) fn try_item_event(
     scope.push("item_key", item_key);
     scope.push("cmdline", raw_line.to_string());
     if let Err(error) = engine.run_ast_with_scope(&mut scope, &ast) {
+        super::item_effects::refresh(body);
         return Some(CommandResult::Output(format!(
             "(아이템 이벤트 스크립트 오류: {error})"
         )));
     }
+    super::item_effects::refresh(body);
     let path = format!("data/user/{}.json", body.get_name());
     let _ = super::save_body_to_json(body, &path);
     let output_lines = output.lock().map(|lines| lines.clone()).unwrap_or_default();
@@ -241,6 +256,50 @@ pub(crate) fn try_item_event(
 #[cfg(test)]
 mod tests {
     use super::*;
+    use rhai::Map;
+    use std::time::{SystemTime, UNIX_EPOCH};
+
+    #[test]
+    fn item_event_ast_reloads_after_runtime_edit() {
+        let path = std::env::temp_dir().join(format!(
+            "item-hot-reload-{}-{}.rhai",
+            std::process::id(),
+            SystemTime::now()
+                .duration_since(UNIX_EPOCH)
+                .unwrap()
+                .as_nanos()
+        ));
+        std::fs::write(&path, "fn main(ob, item_id, item_key, cmdline) { \"A\" }").unwrap();
+        let first = cached_item_event_ast(&path).unwrap();
+        let engine = Engine::new();
+        let mut scope = Scope::new();
+        scope.push("ob", Map::new());
+        scope.push("item_id", 1_i64);
+        scope.push("item_key", "상자");
+        scope.push("cmdline", "열어");
+        assert_eq!(
+            engine
+                .eval_ast_with_scope::<String>(&mut scope, &first)
+                .unwrap(),
+            "A"
+        );
+
+        let replacement = path.with_extension("replacement");
+        std::fs::write(
+            &replacement,
+            "fn main(ob, item_id, item_key, cmdline) { \"B\" }",
+        )
+        .unwrap();
+        std::fs::rename(replacement, &path).unwrap();
+        let second = cached_item_event_ast(&path).unwrap();
+        assert_eq!(
+            engine
+                .eval_ast_with_scope::<String>(&mut scope, &second)
+                .unwrap(),
+            "B"
+        );
+        let _ = std::fs::remove_file(path);
+    }
 
     #[test]
     fn sealed_dragon_box_event_consumes_grants_multiple_items_and_damages() {

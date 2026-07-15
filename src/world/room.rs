@@ -362,6 +362,38 @@ impl RoomCache {
         self.rooms.get(&key).cloned()
     }
 
+    /// Reload the static room definition while preserving live occupants and
+    /// floor state held by the cached room object. Existing `Arc` handles stay
+    /// valid, so runtime authoring becomes visible without reconnect/restart.
+    pub fn reload_room(&mut self, zone: &str, name: &str) -> Result<Arc<RwLock<Room>>, RoomError> {
+        let difficulty = difficulty_from_zone(zone);
+        let base_zone = base_zone_name(zone);
+        let mut fresh = self.load_room(base_zone, name)?;
+        if difficulty > 0 {
+            fresh.zone = zone.to_string();
+        }
+        let key = if difficulty > 0 {
+            format!("{}:{}:{}", base_zone, name, difficulty)
+        } else {
+            format!("{}:{}", zone, name)
+        };
+        if let Some(existing) = self.rooms.get(&key) {
+            let mut room = existing
+                .write()
+                .map_err(|_| RoomError::ParseError("room lock poisoned".into()))?;
+            fresh.players = std::mem::take(&mut room.players);
+            fresh.npcs = std::mem::take(&mut room.npcs);
+            fresh.items = std::mem::take(&mut room.items);
+            fresh.last_update_millis = room.last_update_millis;
+            *room = fresh;
+            return Ok(existing.clone());
+        }
+        let room = Arc::new(RwLock::new(fresh));
+        self.loaded_rooms.push((zone.to_string(), name.to_string()));
+        self.rooms.insert(key, room.clone());
+        Ok(room)
+    }
+
     /// Remove a loaded room from the runtime Room.Zones registry; its JSON
     /// source remains on disk, matching Python's in-memory deletion.
     pub fn remove_room(&mut self, zone: &str, name: &str) -> bool {

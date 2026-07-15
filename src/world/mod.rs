@@ -4,6 +4,7 @@
 //! the game world including rooms, zones, mobs, items, and navigation.
 
 pub mod difficulty;
+pub mod editor;
 pub mod event;
 pub mod event_binding;
 pub mod fixture;
@@ -22,6 +23,7 @@ mod event_directive_test;
 
 // Re-export commonly used types
 pub use difficulty::{base_zone_name, difficulty_from_zone, DifficultyConfig, DifficultyLevel};
+pub use editor::{WorldEditError, WorldEditor};
 pub use event_binding::{EventBindings, EventScript};
 pub use fixture::{Fixture, FixtureKind, FixturePlacement};
 
@@ -314,6 +316,12 @@ impl WorldState {
         self.summoned_users.iter_mut().find(|user| user.id == id)
     }
 
+    pub fn summoned_user_mut_by_name(&mut self, name: &str) -> Option<&mut SummonedUser> {
+        self.summoned_users
+            .iter_mut()
+            .find(|user| user.body.get_name() == name)
+    }
+
     pub fn take_summoned_user_by_name(&mut self, name: &str) -> Option<SummonedUser> {
         let index = self
             .summoned_users
@@ -343,6 +351,42 @@ impl WorldState {
             .iter()
             .filter(|user| user.position.zone == zone && user.position.room == room)
             .collect()
+    }
+
+    /// Keep socket-less bodies owned by one Soul at its formation anchor.
+    /// This is also the recovery path for any future random/automatic movement
+    /// applied to an auxiliary body: the main formation position wins.
+    pub fn move_summoned_users_to(&mut self, names: &[String], position: &PlayerPosition) -> usize {
+        let wanted = names.iter().collect::<std::collections::HashSet<_>>();
+        let moving = self
+            .summoned_users
+            .iter()
+            .filter(|user| wanted.contains(&user.body.get_name()))
+            .map(|user| (user.id, user.position.clone()))
+            .collect::<Vec<_>>();
+        for (id, old) in &moving {
+            self.remove_room_object(&old.zone, &old.room, &RoomObjectRef::SummonedUser(*id));
+        }
+        for user in &mut self.summoned_users {
+            if wanted.contains(&user.body.get_name()) {
+                user.position = position.clone();
+            }
+        }
+        for (id, _) in &moving {
+            self.record_room_object(
+                &position.zone,
+                &position.room,
+                RoomObjectRef::SummonedUser(*id),
+            );
+        }
+        moving.len()
+    }
+
+    pub fn summoned_user_position_by_name(&self, name: &str) -> Option<&PlayerPosition> {
+        self.summoned_users
+            .iter()
+            .find(|user| user.body.get_name() == name)
+            .map(|user| &user.position)
     }
 
     /// Python 제거 명령 scans channel.players and deletes the first matching
@@ -517,6 +561,48 @@ impl WorldState {
         self.remove_fixture_from_room_index(&fixture.zone, &fixture.room, id);
         self.remove_room_object(&fixture.zone, &fixture.room, &RoomObjectRef::Fixture(id));
         Some(fixture)
+    }
+
+    /// Reconcile persistent fixture declarations with the live room. Stable
+    /// placement keys keep runtime ids/order where possible.
+    pub fn reload_room_fixtures(&mut self, zone: &str, room: &str) -> Result<(), String> {
+        let placements = self
+            .room_cache
+            .get_room_cached(zone, room)
+            .and_then(|cached| {
+                cached
+                    .read()
+                    .ok()
+                    .map(|room| room.fixture_placements.clone())
+            })
+            .ok_or_else(|| format!("room not loaded: {zone}:{room}"))?;
+        for placement in placements {
+            let existing_id = self
+                .get_room_fixtures(zone, room)
+                .into_iter()
+                .find_map(|fixture| {
+                    (fixture
+                        .attribute("placement_key")
+                        .and_then(serde_json::Value::as_str)
+                        == Some(placement.key.as_str()))
+                    .then_some(fixture.id)
+                });
+            let mut attributes = placement.attributes;
+            attributes.insert(
+                "placement_key".into(),
+                serde_json::Value::String(placement.key),
+            );
+            if let Some(id) = existing_id {
+                if let Some(fixture) = self.get_fixture_mut(id) {
+                    fixture.kind = placement.kind;
+                    fixture.events = EventBindings::from_attributes(&attributes);
+                    fixture.attributes = attributes;
+                }
+            } else {
+                self.create_fixture(zone, room, placement.kind, attributes);
+            }
+        }
+        Ok(())
     }
 
     fn remove_fixture_from_room_index(&mut self, zone: &str, room: &str, id: u64) {

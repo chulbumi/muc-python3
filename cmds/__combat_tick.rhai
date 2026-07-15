@@ -102,6 +102,12 @@ fn cmd(ob, line) {
             }
             continue;
         }
+        if event["kind"] == "consumable_expired" {
+            for script in event["scripts"] {
+                if script != "" { send_line(ob, join(split(script, "\n"), "\r\n")); }
+            }
+            continue;
+        }
         if event["kind"] == "strength_up" || event["kind"] == "dexterity_up" || event["kind"] == "mastery_up" {
             let key = if event["kind"] == "strength_up" {
                 "힘증가스크립"

@@ -184,7 +184,7 @@ impl GlobalData {
 
     /// murim.json에서 설정을 가져옵니다.
     pub fn get_murim_config(&self, key: &str) -> Option<&JsonValue> {
-        self.get_path("murim", key)
+        self.get_path("murim", "메인설정")?.get(key)
     }
 
     /// mappath.json에서 맵 경로를 가져옵니다.
@@ -279,6 +279,17 @@ mod tests {
     fn test_global_data_contains() {
         let data = GlobalData::new(PathBuf::from("data"));
         assert!(!data.contains("nonexistent"));
+    }
+
+    #[test]
+    fn murim_config_reads_the_python_main_config_section() {
+        let mut data = GlobalData::new(PathBuf::from("data"));
+        data.reload("murim").expect("load murim.json");
+        assert_eq!(
+            data.get_murim_config("입력초과에러수")
+                .and_then(JsonValue::as_i64),
+            Some(64)
+        );
     }
 
     #[test]

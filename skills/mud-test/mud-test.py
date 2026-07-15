@@ -4,7 +4,7 @@
 MUD Test Skill - Python/Rust Server Comparison
 
 This skill provides comprehensive testing and comparison between Python and Rust MUD servers.
-It wraps the test_mud_comprehensive.py functionality with skill-specific enhancements.
+It wraps the test/test_mud_comprehensive.py functionality with skill-specific enhancements.
 """
 
 import sys
@@ -20,7 +20,7 @@ sys.path.insert(0, str(Path(__file__).parent.parent.parent))
 
 # Import the comprehensive test module
 try:
-    from test_mud_comprehensive import (
+    from test.test_mud_comprehensive import (
         MUDConnection, TestConfig, TestResult, ServerType,
         test_basic_commands, test_movement, test_combat,
         test_items, test_npc_dialogue, compare_outputs,

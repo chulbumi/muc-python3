@@ -1,6 +1,7 @@
-// Python `cmds/먹어.py`. Rust mutates inventory/vitals; Rhai owns output.
+// Rust/Rhai extension: consumable use alias. Item events are dispatched
+// before command lookup, so `[아이템] 사용` events retain priority.
 
-fn eat_prompt(player) {
+fn use_prompt(player) {
     if !player["show_prompt"] { return ""; }
     "\r\n\x1b[0;37;40m[ " + player["hp"].to_string() + "/"
         + player["max_hp"].to_string() + ", " + player["mp"].to_string()
@@ -18,13 +19,13 @@ fn permanent_effect_text(result) {
 }
 
 fn cmd(ob, line) {
-    if line == "" { send_line(ob, "☞ 사용법: [아이템 이름] 먹어"); return; }
+    if line == "" { send_line(ob, "☞ 사용법: [아이템 이름] 사용"); return; }
     let parsed = parse_order_name(line);
     let result = item_use_consumable(ob, parsed[1], parsed[0]);
     let error = result["err"];
-    if error == "bad_state" { send_line(ob, "☞ 먹을 수 있는 상황이 아니네요. ^_^"); return; }
+    if error == "bad_state" { send_line(ob, "☞ 사용할 수 있는 상황이 아니네요. ^_^"); return; }
     if error == "no_item" { send_line(ob, "☞ 그런 아이템이 소지품에 없어요."); return; }
-    if error == "not_consumable" { send_line(ob, "☞ 먹을 수 있는것이 아니에요. ^_^"); return; }
+    if error == "not_consumable" { send_line(ob, "☞ 사용할 수 있는 물건이 아니에요. ^_^"); return; }
     if error != "" { return; }
 
     let item = if result["ansi"] != "" {
@@ -75,22 +76,9 @@ fn cmd(ob, line) {
     for player in get_cast_room_players(ob) {
         if player["name"] != own_name && !player["reject_fight"] {
             send_raw_to_user(player["name"], "\r\n" + room_message + "\r\n"
-                + eat_prompt(player));
+                + use_prompt(player));
         }
     }
-
-    if alias_has(ob, "내공약") && alias_get(ob, "내공약") == result["name"]
-        && alias_has(ob, "내공약하한") && result["remaining"] <= parse_int_prefix(alias_get(ob, "내공약하한")) {
-        send_line(ob, "☞ 알림 : 내공약 개수 부족");
-    }
-    if alias_has(ob, "체력약") && alias_get(ob, "체력약") == result["name"]
-        && alias_has(ob, "체력약하한") && result["remaining"] <= parse_int_prefix(alias_get(ob, "체력약하한")) {
-        send_line(ob, "☞ 알림 : 체력약 개수 부족");
-    }
-    if alias_has(ob, "체력약") && alias_has(ob, "체력") && alias_has(ob, "연속복용")
-        && alias_get(ob, "연속복용") == "켜기"
-        && result["hp"] != 0 && get_int(ob, "체력") < parse_int_prefix(alias_get(ob, "체력")) {
-        queue_self_command(ob, line + " 먹어");
-    }
 }
+
 fn main(ob, line) { cmd(ob, line); }

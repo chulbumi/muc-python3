@@ -128,6 +128,9 @@ fn add_party(ob, line, context) {
     let count_matched = 0;
     let count_party = 0;
     let selected = [];
+    let soul_count = if context.contains("soul_member_count") {
+        context["soul_member_count"]
+    } else { 1 };
     for member in context["followers"] {
         if !all_mode && member["name"] != line {
             continue;
@@ -149,6 +152,12 @@ fn add_party(ob, line, context) {
             if !all_mode {
                 send_line(ob, object_eul(member) + " 따르는 무리가 있으므로 안됩니다.");
                 count_party += 1;
+            }
+            continue;
+        }
+        if soul_count + len(context["party_members"]) + len(selected) >= 4 {
+            if !all_mode {
+                send_line(ob, "☞ 무리는 자신을 포함해 최대 4명까지 구성할 수 있습니다.");
             }
             continue;
         }
