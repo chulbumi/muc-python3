@@ -62,8 +62,8 @@ pub struct RawItemData {
     pub is_equipment: bool,
     /// Is money (돈)
     pub is_money: bool,
-    /// Effect when used (사용효과)
-    pub use_effect: Option<String>,
+    /// Extensible effect definition when consumed (사용효과)
+    pub use_effect: Option<JsonValue>,
     /// Skill learned from this item (배울무공)
     pub learn_skill: Option<String>,
 }
@@ -437,10 +437,7 @@ impl ItemCache {
             .map(|s| s.to_string());
 
         // Use effect (사용효과)
-        data.use_effect = item_info
-            .get("사용효과")
-            .and_then(|v| v.as_str())
-            .map(|s| s.to_string());
+        data.use_effect = item_info.get("사용효과").cloned();
 
         data.events = EventBindings::from_json_map(item_info);
 

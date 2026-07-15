@@ -236,10 +236,12 @@ pub(crate) fn try_item_event(
     scope.push("item_key", item_key);
     scope.push("cmdline", raw_line.to_string());
     if let Err(error) = engine.run_ast_with_scope(&mut scope, &ast) {
+        super::item_effects::refresh(body);
         return Some(CommandResult::Output(format!(
             "(아이템 이벤트 스크립트 오류: {error})"
         )));
     }
+    super::item_effects::refresh(body);
     let path = format!("data/user/{}.json", body.get_name());
     let _ = super::save_body_to_json(body, &path);
     let output_lines = output.lock().map(|lines| lines.clone()).unwrap_or_default();

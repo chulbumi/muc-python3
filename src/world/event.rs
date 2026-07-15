@@ -951,6 +951,7 @@ fn do_event_rhai_source(
         if let Some(index) = one_item_index.filter(|index| !index.is_empty()) {
             let _ = crate::oneitem::oneitem_have(&index, &b.get_name());
         }
+        crate::script::item_effects::refresh(b);
         true
     });
     engine.register_fn("get_body_text", move |key: &str| -> String {
@@ -1794,6 +1795,7 @@ fn give_event_item_with_roll(
             let _ = crate::oneitem::oneitem_have(index, &body.get_name());
         }
     }
+    crate::script::item_effects::refresh(body);
 }
 
 /// $아이템삭제: 은전/금전이면 속성 감소, objs에서 인덱스 일치 cnt개 제거, 부족하면 inv_stack에서 차감.
@@ -1828,6 +1830,7 @@ fn del_item_from_body(body: &mut Body, index: &str, cnt: i64) {
             }
         }
     }
+    crate::script::item_effects::refresh(body);
 }
 
 /// Legacy `$아이템확인! index count` was migrated as one Rhai string such

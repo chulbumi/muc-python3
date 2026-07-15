@@ -6591,6 +6591,8 @@ async fn handle_single_game_command(
                                             }
                                         }
                                     }
+                                    crate::script::item_effects::refresh(giver_body);
+                                    crate::script::item_effects::refresh(target_body);
                                     clients.insert(giver_addr, giver);
                                     clients.insert(taddr, target);
                                 }
@@ -6754,6 +6756,8 @@ async fn handle_single_game_command(
                                     ));
                                         }
                                     }
+                                    crate::script::item_effects::refresh(giver_body);
+                                    crate::script::item_effects::refresh(target_body);
                                     clients.insert(giver_addr, giver);
                                     clients.insert(taddr, target);
                                 }

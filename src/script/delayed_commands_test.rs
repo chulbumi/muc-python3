@@ -211,7 +211,7 @@ async fn delayed_input_keeps_each_argument_and_reenters_real_rhai_command() {
     let scheduler = Arc::new(CallOutScheduler::default_resolution(broadcaster.clone()));
     let mut command_body = Body::new();
     command_body.set("이름", "지연예약검사");
-    for command in ["힘 올려", "민첩성 올려"] {
+    for command in ["명중 올려", "회피 올려"] {
         let result = storage
             .read()
             .await
@@ -237,8 +237,8 @@ async fn delayed_input_keeps_each_argument_and_reenters_real_rhai_command() {
     player.state = STATE_ACTIVE;
     player.body.set("이름", "지연실행검사");
     player.body.set("특성치", 2_i64);
-    player.body.set("힘", 10_i64);
-    player.body.set("민첩성", 20_i64);
+    player.body.set("명중", 10_i64);
+    player.body.set("회피", 20_i64);
     client.player = Some(player);
     broadcaster.add_client(client);
     let runner = create_call_out_script_runner(storage, broadcaster.clone());
@@ -246,25 +246,22 @@ async fn delayed_input_keeps_each_argument_and_reenters_real_rhai_command() {
         "지연실행검사",
         Some("지연입력"),
         "delayed_execute",
-        vec![serde_json::json!("힘 올려")],
+        vec![serde_json::json!("명중 올려")],
     )
     .unwrap();
     runner(
         "지연실행검사",
         Some("지연입력"),
         "delayed_execute",
-        vec![serde_json::json!("민첩성 올려")],
+        vec![serde_json::json!("회피 올려")],
     )
     .unwrap();
-    assert_eq!(rx.try_recv().unwrap(), "☞ [힘] 특성치를 올렸습니다.\r\n");
-    assert_eq!(
-        rx.try_recv().unwrap(),
-        "☞ [민첩성] 특성치를 올렸습니다.\r\n"
-    );
+    assert_eq!(rx.try_recv().unwrap(), "☞ [명중] 특성치를 올렸습니다.\r\n");
+    assert_eq!(rx.try_recv().unwrap(), "☞ [회피] 특성치를 올렸습니다.\r\n");
     assert_eq!(
         broadcaster.with_player_body_by_name("지연실행검사", |body| (
-            body.get_int("힘"),
-            body.get_int("민첩성"),
+            body.get_int("명중"),
+            body.get_int("회피"),
             body.get_int("특성치")
         )),
         Some((11, 21, 0))

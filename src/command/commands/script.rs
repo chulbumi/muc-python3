@@ -140,7 +140,8 @@ const PYTHON_COMMAND_LEVELS: &[(&str, i32)] = &[
 /// New Rust/Rhai commands which deliberately extend the Python command set.
 /// Keep these separate so parity audits can still compare Python metadata
 /// exactly while extensions receive an explicit non-public permission level.
-const EXTENSION_COMMAND_LEVELS: &[(&str, i32)] = &[("월드편집", 2000), ("풀어", 0), ("전환", 0)];
+const EXTENSION_COMMAND_LEVELS: &[(&str, i32)] =
+    &[("월드편집", 2000), ("사용", 0), ("풀어", 0), ("전환", 0)];
 
 fn is_player_command_script(script_name: &str) -> bool {
     !NON_COMMAND_SCRIPTS.contains(&script_name)

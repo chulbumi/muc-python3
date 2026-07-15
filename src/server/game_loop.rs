@@ -459,6 +459,17 @@ impl GameLoop {
                         self.auto_consume.push((client_addr, command));
                     }
                     expire_player_skill_effects(&mut player.body);
+                    let expired_consumables =
+                        crate::script::item_effects::expire_timed(&mut player.body);
+                    if !expired_consumables.is_empty() {
+                        crate::script::combat_commands::queue_combat_presentation_event(
+                            &mut player.body,
+                            serde_json::json!({
+                                "kind": "consumable_expired",
+                                "scripts": expired_consumables,
+                            }),
+                        );
+                    }
                     if let Some(crate::object::Value::String(expired)) =
                         player.body.temp_mut().remove("_expired_auto_skills")
                     {
@@ -821,6 +832,7 @@ impl GameLoop {
                             }
                         }
                     }
+                    crate::script::item_effects::refresh(&mut player.body);
                     crate::script::combat_commands::queue_combat_presentation_event(
                         &mut player.body,
                         serde_json::json!({

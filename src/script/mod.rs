@@ -22,6 +22,7 @@ pub(crate) mod inventory_compat;
 pub(crate) use inventory_compat::mark_item_field_as_json_array;
 mod item_event;
 pub(crate) use item_event::try_item_event;
+pub(crate) mod item_effects;
 mod movement;
 mod package_item;
 mod party;
@@ -3496,6 +3497,11 @@ pub fn load_body_from_json(body: &mut Body, path: &str) -> bool {
         return false;
     };
 
+    // A Body may be reloaded in place. Drop the old runtime marker before
+    // inventory loading rebuilds all equipment-derived caches.
+    item_effects::clear(body);
+    item_effects::clear_timed(body);
+
     {
         body.object.attr.clear();
         body.object
@@ -3611,6 +3617,11 @@ pub fn load_body_from_json(body: &mut Body, path: &str) -> bool {
     // 상태이며 Player.save/load 대상이 아니다. 레거시 Rust 저장 파일에
     // `대화기록`이 있어도 다시 불러오지 않는다.
     body.talk_history.clear();
+
+    // Equipment was rebuilt above. Possession effects and equipped set tiers
+    // are derived runtime state and are never persisted as base attributes.
+    item_effects::refresh(body);
+    item_effects::refresh_timed(body);
 
     true
 }
@@ -6290,6 +6301,7 @@ pub fn create_engine_with_body_and_output(
     });
     let body_ptr = body as *mut Body;
     let spec = special_collector.clone();
+    item_effects::register_efuns(&mut engine, body_ptr);
 
     // Python `cmds/업데이트.py` owns every user-visible branch and
     // message. Rust exposes only the corresponding cache/hot-reload operation.
@@ -11969,6 +11981,7 @@ pub fn create_engine_with_body_and_output(
             if kind == "무기" {
                 body.weapon_item = Some(std::sync::Arc::downgrade(&arc));
             }
+            item_effects::refresh(body);
             String::new()
         },
     );
@@ -12075,6 +12088,7 @@ pub fn create_engine_with_body_and_output(
                     body.object.remove(&item);
                 }
             }
+            item_effects::refresh(body);
             equipped
         },
     );
@@ -12101,6 +12115,9 @@ pub fn create_engine_with_body_and_output(
                     return result;
                 }
             };
+            // Remove derived bonuses before base equipment subtraction. This
+            // avoids the legacy zero clamp corrupting a negative set tier.
+            item_effects::clear(body);
             // 아이템의 모든 속성 수집 및 해제 처리
             let (is_weapon, stats, post) = {
                 let mut o = arc.lock().unwrap();
@@ -12130,6 +12147,7 @@ pub fn create_engine_with_body_and_output(
             if inventory_compat::absorb_pristine_object(&mut body.object, &arc) {
                 body.object.remove(&arc);
             }
+            item_effects::refresh(body);
             result.insert("err".into(), Dynamic::from(""));
             result.insert("post".into(), Dynamic::from(post));
             result
@@ -12156,12 +12174,14 @@ pub fn create_engine_with_body_and_output(
                     })
                 })
                 .collect::<rhai::Array>();
+            item_effects::clear(body);
             body.unwear_all();
             for item in body.object.objs.clone() {
                 if inventory_compat::absorb_pristine_object(&mut body.object, &item) {
                     body.object.remove(&item);
                 }
             }
+            item_effects::refresh(body);
             items
         },
     );
@@ -12174,6 +12194,14 @@ pub fn create_engine_with_body_and_output(
         "item_use_consumable",
         move |_ob: &mut rhai::Map, name: &str, order: i64| -> Dynamic {
             let mut m = rhai::Map::new();
+            m.insert("buff_name".into(), Dynamic::from(String::new()));
+            m.insert("buff_duration".into(), Dynamic::from(0_i64));
+            m.insert("buff_script".into(), Dynamic::from(String::new()));
+            m.insert(
+                "permanent_effects".into(),
+                Dynamic::from(rhai::Array::new()),
+            );
+            m.insert("permanent_script".into(), Dynamic::from(String::new()));
             if name.is_empty() {
                 m.insert("err".into(), Dynamic::from("usage".to_string()));
                 m.insert("name".into(), Dynamic::from(String::new()));
@@ -12273,6 +12301,9 @@ pub fn create_engine_with_body_and_output(
                                 *body.object.inv_stack.get_mut(&key).unwrap() -= 1;
                             }
 
+                            let buff = item_effects::apply_consumable_effect(body, &key);
+                            let permanent = item_effects::apply_permanent_effect(body, &key);
+
                             // 저장
                             let path = format!("data/user/{}.json", body.get_name());
                             let _ = save_body_to_json(body, &path);
@@ -12283,6 +12314,19 @@ pub fn create_engine_with_body_and_output(
                             m.insert("script".into(), Dynamic::from(script));
                             m.insert("ansi".into(), Dynamic::from(ansi));
                             m.insert("max_mp_gain".into(), Dynamic::from(max_mp_gain));
+                            m.insert("buff_name".into(), Dynamic::from(buff.name));
+                            m.insert("buff_duration".into(), Dynamic::from(buff.duration_seconds));
+                            m.insert("buff_script".into(), Dynamic::from(buff.activation_script));
+                            m.insert(
+                                "permanent_effects".into(),
+                                Dynamic::from(item_effects::permanent_effect_array(
+                                    permanent.effects,
+                                )),
+                            );
+                            m.insert(
+                                "permanent_script".into(),
+                                Dynamic::from(permanent.activation_script),
+                            );
                             m.insert(
                                 "remaining".into(),
                                 Dynamic::from(inventory_exact_name_count(body, &item_name)),
@@ -12302,7 +12346,7 @@ pub fn create_engine_with_body_and_output(
                     return Dynamic::from(m);
                 }
             };
-            let (item_name, hp, mp, script, ansi, mut max_mp_gain) = {
+            let (item_key, item_name, hp, mp, script, ansi, mut max_mp_gain) = {
                 let o = arc.lock().unwrap();
                 if o.getString("종류") != "먹는것" {
                     m.insert("err".into(), Dynamic::from("not_consumable".to_string()));
@@ -12310,6 +12354,7 @@ pub fn create_engine_with_body_and_output(
                     return Dynamic::from(m);
                 }
                 (
+                    o.getString("인덱스"),
                     o.getName(),
                     o.getInt("체력"),
                     o.getInt("내공"),
@@ -12344,6 +12389,8 @@ pub fn create_engine_with_body_and_output(
             body.object
                 .objs
                 .retain(|x| !std::sync::Arc::ptr_eq(x, &arc));
+            let buff = item_effects::apply_consumable_effect(body, &item_key);
+            let permanent = item_effects::apply_permanent_effect(body, &item_key);
             let remaining = inventory_exact_name_count(body, &item_name);
             let path = format!("data/user/{}.json", body.get_name());
             let _ = save_body_to_json(body, &path);
@@ -12353,6 +12400,17 @@ pub fn create_engine_with_body_and_output(
             m.insert("script".into(), Dynamic::from(script));
             m.insert("ansi".into(), Dynamic::from(ansi));
             m.insert("max_mp_gain".into(), Dynamic::from(max_mp_gain));
+            m.insert("buff_name".into(), Dynamic::from(buff.name));
+            m.insert("buff_duration".into(), Dynamic::from(buff.duration_seconds));
+            m.insert("buff_script".into(), Dynamic::from(buff.activation_script));
+            m.insert(
+                "permanent_effects".into(),
+                Dynamic::from(item_effects::permanent_effect_array(permanent.effects)),
+            );
+            m.insert(
+                "permanent_script".into(),
+                Dynamic::from(permanent.activation_script),
+            );
             m.insert("remaining".into(), Dynamic::from(remaining));
             Dynamic::from(m)
         },
@@ -20582,6 +20640,10 @@ impl ScriptStorage {
             .ok_or_else(|| format!("Script not found: {}", name))?;
         let (_, command_ast) = self.cached_asts(name, script)?;
 
+        // Make an edited item definition visible to the command being run,
+        // not only to the command that follows it.
+        item_effects::refresh(player);
+
         let output_collector = Arc::new(Mutex::new(Vec::new()));
         let output_clone = output_collector.clone();
         let special_collector = Arc::new(Mutex::new(None));
@@ -20633,7 +20695,12 @@ impl ScriptStorage {
             rhai_and_efun_us = eval_elapsed.as_micros(),
             "Rhai script finished"
         );
-        result.map_err(|e| format!("스크립트 실행 오류: {}", e))?;
+        if let Err(error) = result {
+            // Native efuns may already have mutated inventory before a later
+            // Rhai expression fails.
+            item_effects::refresh(player);
+            return Err(format!("스크립트 실행 오류: {error}").into());
+        }
         let postprocess_started = Instant::now();
 
         // Affix commands also update their command-local `ob` map. Read that
@@ -20673,6 +20740,12 @@ impl ScriptStorage {
             "꼬리말제거" => player.set("꼬리말", ""),
             _ => {}
         }
+
+        // Commands may buy, receive, consume, drop, destroy, burn, unpack or
+        // otherwise mutate inventory through many efuns. Recomputing here is
+        // the common correctness boundary; item definitions themselves are
+        // cached and only reparsed after their mtime changes.
+        item_effects::refresh(player);
 
         let outputs = output_collector.lock().unwrap().clone();
         tracing::debug!(
