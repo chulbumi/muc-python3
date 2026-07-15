@@ -33,12 +33,13 @@ use crate::script::{
     build_room_mugong_player_snapshot, build_room_mugong_stack_item_snapshot,
     build_room_objs_grouped, build_room_player_inventory_snapshot,
     build_room_view_player_snapshot_with_interactive, clear_precomputed_all_online,
-    clear_precomputed_box_context, clear_precomputed_room_view_players,
-    immediate_exit_destinations, installed_box_party_snapshot_by_pointer,
-    installed_box_party_snapshots, load_body_from_json, missing_party_person, password_hash,
-    password_verify, save_body_to_json, set_cast_room_players, set_precomputed_adult_channel,
-    set_precomputed_all_online, set_precomputed_box_context, set_precomputed_connected_names,
-    set_precomputed_online_names, set_precomputed_party_context, set_precomputed_room_inventories,
+    clear_precomputed_box_context, clear_precomputed_room_admin_bodies,
+    clear_precomputed_room_view_players, immediate_exit_destinations,
+    installed_box_party_snapshot_by_pointer, installed_box_party_snapshots, load_body_from_json,
+    missing_party_person, password_hash, password_verify, save_body_to_json, set_cast_room_players,
+    set_precomputed_adult_channel, set_precomputed_all_online, set_precomputed_box_context,
+    set_precomputed_connected_names, set_precomputed_online_names, set_precomputed_party_context,
+    set_precomputed_room_admin_bodies, set_precomputed_room_inventories,
     set_precomputed_room_mugong_targets, set_precomputed_room_view_players,
     set_precomputed_tell_players, take_admin_set_player_value_request, take_adult_channel_requests,
     take_auto_move_request, take_box_deliveries, take_change_player_request,
@@ -2241,6 +2242,7 @@ impl Drop for PreComputedOtherDescsGuard {
         PRE_COMPUTED_OTHER_DESCS.with(|c| *c.borrow_mut() = None);
         PRE_COMPUTED_OTHER_MAP.with(|c| *c.borrow_mut() = None);
         clear_precomputed_room_view_players();
+        clear_precomputed_room_admin_bodies();
         clear_precomputed_all_online();
         clear_precomputed_box_context();
     }
@@ -5025,96 +5027,35 @@ async fn handle_single_game_command(
             set_cast_room_players(cast_players);
         }
 
-        // Snapshot live same-room Body values before executing Rhai commands.
-        // The script engine itself only receives the actor Body; keep this
-        // read-only, room-scoped payload on its temp map for admin commands.
-        let live_room_admin: Vec<serde_json::Value> = room_player_bindings
+        // The script engine only receives the actor Body. Keep cheap Body
+        // snapshots for arbitrary event scripts, but defer detailed admin
+        // calculations and JSON conversion until an admin efun is called.
+        let room_admin_snapshot_started = Instant::now();
+        let room_admin_bodies: Vec<(String, Body)> = room_player_bindings
             .iter()
             .filter_map(|(name, client_addr)| {
-                clients.get(client_addr).and_then(|client| {
-                    client.player.as_ref().map(|player| {
-                        let guards: Vec<serde_json::Value> = player
-                            .body
-                            .object
-                            .objs
-                            .iter()
-                            .filter_map(|arc| {
-                                let obj = arc.lock().ok()?;
-                                (obj.getString("종류") == "호위").then(|| {
-                                    let max_hp = crate::script::object_from_item_json(
-                                        &obj.getString("인덱스"),
-                                    )
-                                    .and_then(|(template, _)| {
-                                        template.lock().ok().map(|item| item.getInt("체력"))
-                                    })
-                                    .unwrap_or_else(|| {
-                                        obj.getInt("최고체력").max(obj.getInt("체력"))
-                                    });
-                                    serde_json::json!({
-                                        "name": obj.getName(), "hp": obj.getInt("체력"),
-                                        "max_hp": max_hp, "description": obj.getString("설명2")
-                                    })
-                                })
-                            })
-                            .collect();
-                        serde_json::json!({
-                            "name": name,
-                            "level": player.body.get_int("레벨"),
-                            "age": player.body.get_int("나이"),
-                            "hp": player.body.get_hp(),
-                            "max_hp": player.body.get_max_hp(),
-                            "mp": player.body.get_mp(),
-                            "max_mp": player.body.get_max_mp(),
-                            "attack": player.body.get_attack_power(),
-                            "strength": player.body.get_str(),
-                            "armor": player.body.get_armor(),
-                            "arm": player.body.get_arm(),
-                            "dex": player.body.get_dex(),
-                            "weight": player.body.get_item_weight(),
-                            "current_exp": player.body.get_int("현재경험치"),
-                            "total_exp": player.body.get_total_exp(),
-                            "hit": player.body.get_hit(), "miss": player.body.get_miss(),
-                            "critical": player.body.get_critical(), "luck": player.body.get_critical_chance(),
-                            "silver": player.body.get_int("은전"),
-                            "성격": player.body.get_string("성격"), "성별": player.body.get_string("성별"),
-                            "소속": player.body.get_string("소속"), "직위": player.body.get_string("직위"),
-                            "배우자": player.body.get_string("배우자"),
-                            "feature": player.body.get_int("특성치"),
-                            "insurance_premium": player.body.get_int("보험료"),
-                            "hp_script": crate::script::hp_status_script(player.body.get_hp(), player.body.get_int("최고체력")),
-                            "mp_script": crate::script::mp_status_script(player.body.get_mp()),
-                            "nickname": player.body.get_string("방파별호"),
-                            "anger": player.body.get_int("분노"),
-                            "targets": player.body.targets.iter().filter_map(|target| {
-                                target.upgrade().and_then(|target| target.lock().ok().map(|object| object.getName()))
-                            }).collect::<Vec<_>>(),
-                            "guards": guards,
-                            "raw_attrs": player.body.object.attr.iter().map(|(key, value)| {
-                                let value = match value {
-                                    crate::object::Value::Int(value) => serde_json::Value::Number((*value).into()),
-                                    crate::object::Value::Float(value) => serde_json::Number::from_f64(*value)
-                                        .map(serde_json::Value::Number).unwrap_or(serde_json::Value::Null),
-                                    crate::object::Value::String(value) => serde_json::Value::String(value.clone()),
-                                };
-                                (key.clone(), value)
-                            }).collect::<serde_json::Map<String, serde_json::Value>>()
-                        })
-                    })
-                })
+                clients
+                    .get(client_addr)
+                    .and_then(|client| client.player.as_ref())
+                    .map(|player| (name.clone(), player.body.clone()))
             })
             .collect();
+        let room_admin_body_count = room_admin_bodies.len();
+        set_precomputed_room_admin_bodies(room_admin_bodies);
+        debug!(
+            target: "muc_perf",
+            command = %parsed.command,
+            room_admin_body_count,
+            room_admin_snapshot_us = room_admin_snapshot_started.elapsed().as_micros(),
+            "prepared lazy room admin snapshots"
+        );
         if let Some(client) = clients.get_mut(&addr) {
             if let Some(player) = client.player_mut() {
                 player.body.temp_mut().insert(
                     "_connection_token".to_string(),
                     crate::object::Value::String(player_connection_token.clone()),
                 );
-                if let Ok(serialized) = serde_json::to_string(&live_room_admin) {
-                    player.body.temp_mut().insert(
-                        "_online_room_admin".to_string(),
-                        crate::object::Value::String(serialized),
-                    );
-                }
+                player.body.temp_mut().remove("_online_room_admin");
                 player.body.temp_mut().insert(
                     "_auto_move_count".to_string(),
                     crate::object::Value::Int(player.auto_move_list.len() as i64),

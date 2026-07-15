@@ -222,7 +222,7 @@ impl MudServer {
         let global_data = create_global_data(std::path::PathBuf::from("data"));
 
         let mut script_storage = ScriptStorage::new(ScriptConfig::default());
-        script_storage.set_global_data(global_data);
+        script_storage.set_global_data(global_data.clone());
         let script_storage = Arc::new(tokio::sync::RwLock::new(script_storage));
 
         let call_out_scheduler = Arc::new(CallOutScheduler::new(
@@ -263,6 +263,7 @@ impl MudServer {
             run_game_loop(
                 broadcaster,
                 game_loop_config,
+                Some(global_data),
                 Some(call_out_for_loop),
                 game_loop_registry,
                 game_loop_rooms,

@@ -19,7 +19,7 @@ ROOT = Path(__file__).resolve().parents[1]
 SKILL_DIR = ROOT / "skills" / "mud-test"
 sys.path.insert(0, str(ROOT))
 
-import test_mud_comprehensive as comprehensive
+from test import test_mud_comprehensive as comprehensive
 
 
 def load_script_module(name: str, path: Path):

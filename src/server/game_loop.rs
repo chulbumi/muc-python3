@@ -16,6 +16,7 @@ use crate::combat::processor::{calculate_exp_reward_for_level, calculate_gold_re
 use crate::combat::{calculate_skill_damage_against, process_mob_strike, process_player_strike};
 use crate::command::handler::PendingInput;
 use crate::command::CommandRegistry;
+use crate::data::SharedGlobalData;
 use crate::network::client::{handle_game_command, send_collected_user_message};
 use crate::network::client::{Client, ClientState, DISCONNECT_SENTINEL};
 use crate::network::Broadcaster;
@@ -61,12 +62,22 @@ impl Default for GameLoopConfig {
 /// State retained between one-second updates.
 pub struct GameLoop {
     config: GameLoopConfig,
+    global_data: Option<SharedGlobalData>,
     tick_count: u64,
     last_tick: Instant,
     after_fight: Vec<SocketAddr>,
     newly_dead: Vec<SocketAddr>,
     combat_render: Vec<SocketAddr>,
     auto_consume: Vec<(SocketAddr, String)>,
+}
+
+#[derive(Debug, Clone, Copy)]
+struct TickMurimConfig {
+    input_error_limit: i64,
+    age_interval: i64,
+    nickname_kill_threshold: i64,
+    herb_probability_cap: f64,
+    max_user_items: usize,
 }
 
 #[derive(Debug, Clone)]
@@ -120,12 +131,66 @@ impl GameLoop {
     pub fn new(config: GameLoopConfig) -> Self {
         Self {
             config,
+            global_data: None,
             tick_count: 0,
             last_tick: Instant::now(),
             after_fight: Vec::new(),
             newly_dead: Vec::new(),
             combat_render: Vec::new(),
             auto_consume: Vec::new(),
+        }
+    }
+
+    pub fn with_global_data(config: GameLoopConfig, global_data: SharedGlobalData) -> Self {
+        let mut game_loop = Self::new(config);
+        game_loop.global_data = Some(global_data);
+        game_loop
+    }
+
+    fn murim_config_int(&self, key: &str) -> i64 {
+        let Some(global_data) = self.global_data.as_ref() else {
+            return crate::script::get_murim_config_int(key);
+        };
+        global_data
+            .read()
+            .ok()
+            .and_then(|data| {
+                data.get_murim_config(key)
+                    .and_then(serde_json::Value::as_i64)
+            })
+            .unwrap_or(0)
+    }
+
+    fn tick_murim_config(&self) -> TickMurimConfig {
+        if let Some(global_data) = self.global_data.as_ref() {
+            let Ok(data) = global_data.read() else {
+                return TickMurimConfig {
+                    input_error_limit: 0,
+                    age_interval: 0,
+                    nickname_kill_threshold: 0,
+                    herb_probability_cap: 0.0,
+                    max_user_items: 0,
+                };
+            };
+            let value = |key: &str| {
+                data.get_murim_config(key)
+                    .and_then(serde_json::Value::as_i64)
+                    .unwrap_or(0)
+            };
+            return TickMurimConfig {
+                input_error_limit: value("입력초과에러수"),
+                age_interval: value("나이오름틱"),
+                nickname_kill_threshold: value("무림별호이벤트킬수"),
+                herb_probability_cap: value("약초나올확률") as f64,
+                max_user_items: value("사용자아이템갯수").max(0) as usize,
+            };
+        }
+        TickMurimConfig {
+            input_error_limit: self.murim_config_int("입력초과에러수"),
+            age_interval: self.murim_config_int("나이오름틱"),
+            nickname_kill_threshold: self.murim_config_int("무림별호이벤트킬수"),
+            herb_probability_cap: self.murim_config_int("약초나올확률") as f64,
+            max_user_items: self.murim_config_int("사용자아이템갯수").max(0) as usize,
         }
     }
 
@@ -157,6 +222,10 @@ impl GameLoop {
 
     fn tick_at(&mut self, broadcaster: &Broadcaster, now: Instant) -> bool {
         self.tick_count += 1;
+        // Python's global MURIM configuration changes only through the
+        // administrator reload path. Snapshot this once per tick instead of
+        // reopening and parsing murim.json for every active player.
+        let murim = self.tick_murim_config();
 
         let mut occupied_player_names = Vec::new();
         let mut room_messages: Vec<(String, String)> = Vec::new();
@@ -188,9 +257,7 @@ impl GameLoop {
 
             if client.state == ClientState::Active {
                 if let Some(player) = client.player.as_mut() {
-                    if i64::from(player.cmd_cnt)
-                        > crate::script::get_murim_config_int("입력초과에러수")
-                    {
+                    if i64::from(player.cmd_cnt) > murim.input_error_limit {
                         player.body.set("강제종료", chrono::Utc::now().timestamp());
                         let _ = client.sender.send(DISCONNECT_SENTINEL.to_string());
                         client.disconnect_requested = true;
@@ -199,7 +266,7 @@ impl GameLoop {
                     player.cmd_cnt = 0;
                     let was_dead = player.body.act == ActState::Death;
                     let death_step = player.body.get_death_step();
-                    update_active_player(player, &self.config);
+                    update_active_player(player, &self.config, murim);
                     // Python doDeath step 3 performs enterRoom("낙양성:7",
                     // "사망", "사망") while the player is still dead.
                     if was_dead && death_step == 3 {
@@ -391,11 +458,10 @@ impl GameLoop {
                             && room == &reward.room
                             && reward.mob_level >= *target_level
                         {
-                            let cap = crate::script::get_murim_config_int("약초나올확률") as f64;
                             let chance = (((reward.mob_level - *target_level) as f64 * 0.01)
                                 + 0.05
                                 + f64::from(reward.difficulty))
-                            .min(cap);
+                            .min(murim.herb_probability_cap);
                             if chance
                                 >= rand::Rng::gen_range(&mut rand::thread_rng(), 0..=99) as f64
                             {
@@ -483,8 +549,7 @@ impl GameLoop {
                             "자동습득",
                         )
                     {
-                        let max_items =
-                            crate::script::get_murim_config_int("사용자아이템갯수").max(0) as usize;
+                        let max_items = murim.max_user_items;
                         if reward.mob_level >= 2_000
                             && rand::Rng::gen_range(&mut rand::thread_rng(), 0..=99) < 1
                         {
@@ -938,12 +1003,11 @@ impl GameLoop {
 /// The subset of Python `Player.update()` whose state and ordering are represented exactly by
 /// the current Rust model. Combat, death progression, auto-consume and timed defence effects are
 /// intentionally not approximated here; they require their own faithful runtime state migration.
-fn update_active_player(player: &mut Player, config: &GameLoopConfig) {
+fn update_active_player(player: &mut Player, config: &GameLoopConfig, murim: TickMurimConfig) {
     player.body.tick = player.body.tick.saturating_add(1);
     let age_tick = player.body.get_int("나이오름틱").saturating_add(1);
     player.body.set("나이오름틱", age_tick);
-    let age_interval = crate::script::get_murim_config_int("나이오름틱");
-    if age_interval > 0 && age_tick >= age_interval {
+    if murim.age_interval > 0 && age_tick >= murim.age_interval {
         player.body.set("나이오름틱", 0_i64);
         let age = player.body.get_int("나이").saturating_add(1);
         player.body.set("나이", age);
@@ -962,7 +1026,7 @@ fn update_active_player(player: &mut Player, config: &GameLoopConfig) {
         && player.body.get_int("0 성격플킬")
             + player.body.get_int("1 성격플킬")
             + player.body.get_int("2 성격플킬")
-            >= crate::script::get_murim_config_int("무림별호이벤트킬수")
+            >= murim.nickname_kill_threshold
     {
         crate::script::combat_commands::queue_combat_presentation_event(
             &mut player.body,
@@ -2450,6 +2514,7 @@ fn render_combat_presentation(
 pub async fn run_game_loop(
     broadcaster: Arc<Broadcaster>,
     config: GameLoopConfig,
+    global_data: Option<SharedGlobalData>,
     call_out_scheduler: Option<Arc<CallOutScheduler>>,
     command_registry: Arc<CommandRegistry>,
     room_cache: Arc<std::sync::Mutex<RoomCache>>,
@@ -2458,7 +2523,11 @@ pub async fn run_game_loop(
     let mut timer = interval(config.tick_interval);
     timer.tick().await; // Tokio intervals fire immediately once; Python does not.
 
-    let mut game_loop = GameLoop::new(config);
+    let mut game_loop = if let Some(global_data) = global_data {
+        GameLoop::with_global_data(config, global_data)
+    } else {
+        GameLoop::new(config)
+    };
     loop {
         timer.tick().await;
         if let Some(scheduler) = &call_out_scheduler {
@@ -2623,6 +2692,44 @@ mod tests {
 
     fn addr(port: u16) -> SocketAddr {
         SocketAddr::new(IpAddr::V4(Ipv4Addr::LOCALHOST), port)
+    }
+
+    #[test]
+    fn game_loop_with_global_data_does_not_fall_back_to_murim_file() {
+        let global_data = Arc::new(std::sync::RwLock::new(crate::data::GlobalData::new(
+            PathBuf::from("missing-data-directory"),
+        )));
+        let game_loop = GameLoop::with_global_data(GameLoopConfig::default(), global_data);
+        assert_eq!(game_loop.murim_config_int("입력초과에러수"), 0);
+    }
+
+    #[test]
+    fn game_loop_snapshots_all_hot_reloadable_murim_values_once_per_tick() {
+        let root = std::env::temp_dir().join(format!(
+            "muc_tick_murim_{}_{}",
+            std::process::id(),
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap()
+                .as_nanos()
+        ));
+        std::fs::create_dir_all(root.join("config")).unwrap();
+        std::fs::write(
+            root.join("config/murim.json"),
+            r#"{"메인설정":{"입력초과에러수":11,"나이오름틱":22,"무림별호이벤트킬수":33,"약초나올확률":44,"사용자아이템갯수":55}}"#,
+        )
+        .unwrap();
+        let global_data = crate::data::create_global_data(root.clone());
+        let game_loop = GameLoop::with_global_data(GameLoopConfig::default(), global_data);
+
+        let murim = game_loop.tick_murim_config();
+        assert_eq!(murim.input_error_limit, 11);
+        assert_eq!(murim.age_interval, 22);
+        assert_eq!(murim.nickname_kill_threshold, 33);
+        assert_eq!(murim.herb_probability_cap, 44.0);
+        assert_eq!(murim.max_user_items, 55);
+
+        let _ = std::fs::remove_dir_all(root);
     }
 
     #[tokio::test]
@@ -2790,7 +2897,12 @@ mod tests {
         player.body.tick = 59;
         player.body.set("0 성격플킬", 35_i64);
 
-        update_active_player(&mut player, &GameLoopConfig::default());
+        let game_loop = GameLoop::new(GameLoopConfig::default());
+        update_active_player(
+            &mut player,
+            &GameLoopConfig::default(),
+            game_loop.tick_murim_config(),
+        );
 
         assert_eq!(player.body.get_int("나이"), 60);
         assert_eq!(player.body.get_int("최고내공"), 160);

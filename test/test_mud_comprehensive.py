@@ -17,7 +17,7 @@ Features:
 - Generate detailed test reports
 
 Usage:
-    python3 test_mud_comprehensive.py [options]
+    python3 test/test_mud_comprehensive.py [options]
 
     Options:
         --host HOST         Server host (default: localhost)
@@ -62,7 +62,7 @@ class TestConfig:
     rust_port: int = 9999
     num_characters: int = 2
     base_password: str = "test1234"
-    character_name: str = "비교테스터"
+    character_name: str = "비교자"
     encoding: str = "utf-8"
     connection_timeout: int = 15
     command_timeout: int = 5
@@ -494,66 +494,58 @@ class MUDConnection:
             if self.config.verbose:
                 print(f"[{self.server_type.value}] Creating character: {self.character_name}")
 
-            # Python/Rust 서버는 한글만 입력
-            # Check for creation menu or DOUMI system
-            self.buffer = self._read_output()
+            # Both servers expose the Python-compatible hidden DOUMI entry at
+            # the name prompt.  A missing character returns to that prompt, so
+            # enter DOUMI explicitly instead of sending the legacy `y` guess.
+            if not self._send("나만바라바"):
+                return False
+            self.buffer = ""
+            if not self._wait_for_prompt(['무림존함ː'], timeout=8):
+                return False
 
-            # DOUMI 빠른 캐릭터 생성 (나만바라바)
-            if '나만바라바' in self.buffer or '빠른도우미' in self.buffer:
-                if self.config.verbose:
-                    print(f"[{self.server_type.value}] DOUMI creation detected")
+            if not self._send(self.character_name):
+                return False
+            self.buffer = ""
+            if not self._wait_for_prompt(['존함암호ː'], timeout=8):
+                return False
 
-                # Select option 1: 빠른도우미
-                self._send("1")
-                time.sleep(0.5)
-                self.buffer = self._read_output()
-
-                # Continue through DOUMI flow (press Enter for defaults)
-                max_prompts = 20
-                prompts_answered = 0
-
-                while prompts_answered < max_prompts:
-                    self._send("")
-                    time.sleep(0.3)
-                    self.buffer = self._read_output()
-
-                    # Check if we're at the main game prompt
-                    if any(p in self.buffer for p in ['명령', 'Commands', '무공', '능력치', '낙양성', '접속', '입장하셨습니다']):
-                        self.logged_in = True
-                        if self.config.verbose:
-                            print(f"[{self.server_type.value}] DOUMI character created successfully")
-                        return True
-
-                    prompts_answered += 1
-
-                self.logged_in = True
-                return True
-
-            # Regular creation flow
-            # Send confirmation to create
-            self._send("y")
-            time.sleep(1)
-            self.buffer = self._read_output()
-
-            # Answer creation prompts with default values
-            max_prompts = 15
-            prompts_answered = 0
-
-            while prompts_answered < max_prompts:
-                self._send("")
-                time.sleep(0.3)
-                self.buffer = self._read_output()
-
-                # Check if we're at the main game prompt
-                if any(p in self.buffer for p in ['명령', 'Commands', '무공', '능력치', '낙양성', '접속', '입장하셨습니다']):
-                    self.logged_in = True
-                    if self.config.verbose:
-                        print(f"[{self.server_type.value}] Character created successfully")
-                    return True
-
-                prompts_answered += 1
-
+            if self.config.verbose:
+                print(f"[{self.server_type.value}] DOUMI creation detected")
+            if not self._send(self.password):
+                return False
+            self.buffer = ""
+            if not self._wait_for_prompt(['암호확인ː'], timeout=5):
+                return False
+            if not self._send(self.password):
+                return False
+            self.buffer = ""
+            if not self._wait_for_prompt(['성별(남/여)ː'], timeout=8):
+                return False
+            if not self._send("남"):
+                return False
+            self.buffer = ""
+            if not self._wait_for_prompt(['엔터키'], timeout=8):
+                return False
+            # In Python's AutoScript the visible line precedes the following
+            # `$키입력` directive by one scheduled tick. Wait until input_to
+            # has installed pressEnter1 before sending the key.
+            time.sleep(0.4)
+            if not self._send(""):
+                return False
+            self.buffer = ""
+            if not self._wait_for_prompt(['엔터키'], timeout=8):
+                return False
+            if not self._send(""):
+                return False
+            self.buffer = ""
+            if not self._wait_for_prompt(
+                ['명령', 'Commands', '무공', '능력치', '낙양성', '접속', '입장하셨습니다'],
+                timeout=12,
+            ):
+                return False
             self.logged_in = True
+            if self.config.verbose:
+                print(f"[{self.server_type.value}] DOUMI character created successfully")
             return True
 
         except Exception as e:
@@ -1249,7 +1241,7 @@ class MUDTestRunner:
 
     def _reset_comparison_fixture(self) -> None:
         """Put the shared deterministic comparison character at the start room."""
-        path = Path(__file__).parent / "data" / "user" / "비교테스터.json"
+        path = Path(__file__).resolve().parents[1] / "data" / "user" / f"{self.config.character_name}.json"
         try:
             data = json.loads(path.read_text(encoding="utf-8"))
             user = data.get("사용자오브젝트", {})
@@ -1276,7 +1268,7 @@ class MUDTestRunner:
             self.config,
             ServerType.PYTHON,
             self.config.py_port,
-            "비교테스터"
+            self.config.character_name
         )
 
         if self.py_conn.connect():
@@ -1294,7 +1286,7 @@ class MUDTestRunner:
             self.config,
             ServerType.RUST,
             self.config.rust_port,
-            "비교테스터"
+            self.config.character_name
         )
 
         if self.rust_conn.connect():
