@@ -17,6 +17,8 @@ pub(crate) const GUILD_RESET_REQUEST: &str = "_guild_reset_request";
 pub(crate) const ADMIN_SET_PLAYER_VALUE_REQUEST: &str = "_admin_set_player_value_request";
 pub(crate) const SET_PLAYER_ATTR_REQUEST: &str = "_set_player_attr_request";
 pub(crate) const CHANGE_PLAYER_REQUEST: &str = "_change_player_request";
+pub(crate) const SOUL_SWITCH_REQUEST: &str = "_soul_switch_request";
+pub(crate) const SOUL_ATTACH_REQUEST: &str = "_soul_attach_request";
 pub(crate) const SUMMON_PLAYER_REQUEST: &str = "_summon_player_request";
 pub(crate) const FORCE_COMMAND_REQUEST: &str = "_force_command_request";
 /// NPC event `$별호변경`처럼 Python `do_command()`가 현재 사용자의 다음
@@ -68,6 +70,16 @@ pub(crate) fn take_change_player_request(body: &mut Body) -> Option<String> {
     body.temp_mut()
         .remove(CHANGE_PLAYER_REQUEST)
         .and_then(|value| value.as_str().map(str::to_string))
+}
+
+pub(crate) fn take_soul_switch_request(body: &mut Body) -> Option<String> {
+    body.temp_mut()
+        .remove(SOUL_SWITCH_REQUEST)
+        .and_then(|value| value.as_str().map(str::to_string))
+}
+
+pub(crate) fn take_soul_attach_request(body: &mut Body) -> Option<(String, String)> {
+    take_json(body, SOUL_ATTACH_REQUEST)
 }
 
 pub(crate) fn take_teach_skill_request(body: &mut Body) -> Option<(String, String)> {

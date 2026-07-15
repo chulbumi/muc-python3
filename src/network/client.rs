@@ -25,7 +25,7 @@ use crate::emotion::{self, EmotionTarget};
 use crate::hangul::han_wa;
 use crate::network::social::{RelationState, SocialAction};
 use crate::network::DelimiterCodec;
-use crate::player::{Body, Player, STATE_ACTIVE};
+use crate::player::{Body, Player, Soul, SoulBodyKind, STATE_ACTIVE};
 use crate::script::{
     build_adult_channel_member_snapshot, build_box_observer_snapshot,
     build_party_nonplayer_snapshot, build_party_person_snapshot, build_room_lines,
@@ -47,8 +47,9 @@ use crate::script::{
     take_guild_apply_request, take_guild_kick_request, take_guild_nickname_request,
     take_guild_position_request, take_guild_reset_request, take_guild_transfer_request,
     take_party_requests, take_remove_skill_request, take_save_all_request,
-    take_set_player_attr_request, take_set_skill_request, take_summon_player_request,
-    take_teach_skill_request, try_fixture_event, try_item_event, verify_and_upgrade_user_password,
+    take_set_player_attr_request, take_set_skill_request, take_soul_attach_request,
+    take_soul_switch_request, take_summon_player_request, take_teach_skill_request,
+    try_fixture_event, try_item_event, verify_and_upgrade_user_password,
     visible_fixture_short_lines, AdultChannelDelivery, BoxDelivery, CastRoomPlayerRef,
     PartyDelivery, TellPlayerSnapshot, PARTY_DISCONNECT_REQUEST,
 };
@@ -188,6 +189,9 @@ pub struct Client {
     login_session: Option<LoginSession>,
     /// Player data (Some after login complete)
     pub player: Option<Player>,
+    /// Authenticated connection identity and every body controlled by it.
+    /// `player.body` is only the currently active member of this Soul.
+    pub soul: Option<Soul>,
     /// 대기 중인 다단계 입력 (암호변경: 이전→새→확인). None이면 일반 명령.
     pub pending_input: Option<PendingInput>,
     /// Python `Client.dataReceived` updates this on every received byte chunk.
@@ -211,6 +215,7 @@ impl Client {
             sender,
             login_session: Some(LoginSession::new()),
             player: None,
+            soul: None,
             pending_input: None,
             last_input: Instant::now(),
             disconnect_requested: false,
@@ -245,7 +250,19 @@ impl Client {
 
     /// Set the player for this client
     pub fn set_player(&mut self, player: Player) {
+        let body_name = player.body.get_name();
+        if self.soul.is_none() && !body_name.is_empty() {
+            self.soul = Some(Soul::load_or_new(&body_name));
+        }
         self.player = Some(player);
+    }
+
+    pub fn soul(&self) -> Option<&Soul> {
+        self.soul.as_ref()
+    }
+
+    pub fn soul_mut(&mut self) -> Option<&mut Soul> {
+        self.soul.as_mut()
     }
 
     /// Get mutable reference to player
@@ -288,6 +305,61 @@ impl Client {
             player.idle = 0;
         }
     }
+}
+
+fn restore_soul_companions(client: &mut Client, anchor: &PlayerPosition) {
+    let Some(soul) = client.soul.as_mut() else {
+        return;
+    };
+    let names = soul.inactive_names();
+    let mut world = match get_world_state().write() {
+        Ok(world) => world,
+        Err(_) => return,
+    };
+    for name in names {
+        if world.get_player_position(&name).is_some()
+            || world.summoned_user_position_by_name(&name).is_some()
+        {
+            continue;
+        }
+        let mut body = Body::new();
+        if !load_body_from_json(&mut body, &format!("data/user/{name}.json"))
+            || body.get_name() != name
+        {
+            continue;
+        }
+        let id = world.add_summoned_user(body, anchor.clone());
+        soul.set_summoned_id(&name, Some(id));
+    }
+}
+
+fn switch_client_soul_body(client: &mut Client, target_name: &str) -> Result<String, String> {
+    let (player, soul) = match (&mut client.player, &mut client.soul) {
+        (Some(player), Some(soul)) => (player, soul),
+        _ => return Err("no_soul".into()),
+    };
+    let old_name = player.body.get_name();
+    if target_name == old_name || !soul.contains(target_name) {
+        return Err("invalid_target".into());
+    }
+    let mut world = get_world_state().write().map_err(|_| "world_lock")?;
+    let target_user = world
+        .take_summoned_user_by_name(target_name)
+        .ok_or_else(|| "target_unavailable".to_string())?;
+    let anchor = world
+        .get_player_position(&old_name)
+        .cloned()
+        .unwrap_or(target_user.position.clone());
+    let _ = save_body_to_json(&mut player.body, &format!("data/user/{old_name}.json"));
+    world.remove_player_position(&old_name);
+    let old_body = std::mem::replace(&mut player.body, target_user.body);
+    let old_id = world.add_summoned_user(old_body, anchor.clone());
+    world.set_player_position(target_name, anchor.clone());
+    world.move_summoned_users_to(&soul.inactive_names(), &anchor);
+    soul.switch_active(target_name, old_id)?;
+    player.load_aliases_from_body();
+    let _ = soul.save();
+    Ok(old_name)
 }
 
 /// Read a text file from the data/text directory
@@ -1495,6 +1567,7 @@ async fn complete_char_creation_and_enter_game(
                 w.set_player_position(name.as_str(), start_pos.clone());
                 w.spawn_mobs_for_room(&start_pos.zone, &start_pos.room);
             }
+            restore_soul_companions(client, &start_pos);
 
             info!("New character created: {} ({})", name, gender);
 
@@ -1713,6 +1786,7 @@ async fn complete_login_and_enter_game(
                 w.set_player_position(name.as_str(), start_pos.clone());
                 w.spawn_mobs_for_room(&start_pos.zone, &start_pos.room);
             }
+            restore_soul_companions(client, &start_pos);
 
             info!("Player {} logged in from {}", name, addr);
 
@@ -2544,6 +2618,15 @@ fn install_party_context(
 
     let mut context = Map::new();
     context.insert("self_id".into(), Dynamic::from(actor_id.clone()));
+    context.insert(
+        "soul_member_count".into(),
+        Dynamic::from(
+            actor
+                .soul
+                .as_ref()
+                .map_or(1_i64, |soul| soul.members.len() as i64),
+        ),
+    );
     context.insert("self".into(), person(Some(&actor_id)));
     context.insert("follow".into(), person(social.follow.as_deref()));
     context.insert(
@@ -4504,6 +4587,9 @@ async fn handle_single_game_command(
     let mut force_command_pending: Vec<(String, String)> = Vec::new();
     let mut event_command_pending: Option<String> = None;
     let mut change_player_pending: Option<String> = None;
+    let mut soul_switch_pending: Option<String> = None;
+    let mut soul_attach_pending: Option<(String, String)> = None;
+    let mut soul_formation_move_pending: Option<(Vec<String>, PlayerPosition)> = None;
     let mut set_player_attr_pending: Option<(String, String, i64)> = None;
     let mut movement_follower_candidates: Vec<(SocketAddr, String)> = Vec::new();
     let mut follower_move_pending: Vec<(SocketAddr, String)> = Vec::new();
@@ -5050,7 +5136,33 @@ async fn handle_single_game_command(
             "prepared lazy room admin snapshots"
         );
         if let Some(client) = clients.get_mut(&addr) {
+            let soul_roster = client.soul.as_ref().map(|soul| {
+                serde_json::json!({
+                    "id": soul.id,
+                    "main": soul.main_body,
+                    "active": soul.active_body,
+                    "members": soul.members.iter().enumerate().map(|(index, member)| {
+                        serde_json::json!({
+                            "number": index + 1,
+                            "name": member.name,
+                            "kind": match member.kind {
+                                SoulBodyKind::Main => "main",
+                                SoulBodyKind::Alternate => "alternate",
+                                SoulBodyKind::Mercenary => "mercenary",
+                            },
+                            "active": member.name == soul.active_body,
+                        })
+                    }).collect::<Vec<_>>()
+                })
+                .to_string()
+            });
             if let Some(player) = client.player_mut() {
+                if let Some(soul_roster) = soul_roster {
+                    player.body.temp_mut().insert(
+                        "_soul_roster".to_string(),
+                        crate::object::Value::String(soul_roster),
+                    );
+                }
                 player.body.temp_mut().insert(
                     "_connection_token".to_string(),
                     crate::object::Value::String(player_connection_token.clone()),
@@ -5210,6 +5322,32 @@ async fn handle_single_game_command(
                 if let Some(crate::object::Value::String(move_name)) =
                     player.body.temp_mut().remove("_movement_completed_move")
                 {
+                    let companion_names = player
+                        .body
+                        .temp()
+                        .get("_soul_roster")
+                        .and_then(crate::object::Value::as_str)
+                        .and_then(|json| serde_json::from_str::<serde_json::Value>(json).ok())
+                        .and_then(|roster| {
+                            let active = roster.get("active")?.as_str()?;
+                            Some(
+                                roster
+                                    .get("members")?
+                                    .as_array()?
+                                    .iter()
+                                    .filter_map(|member| member.get("name")?.as_str())
+                                    .filter(|name| *name != active)
+                                    .map(str::to_string)
+                                    .collect::<Vec<_>>(),
+                            )
+                        })
+                        .unwrap_or_default();
+                    if let Some((zone, room)) = player.body.get_string("위치").split_once(':') {
+                        soul_formation_move_pending = Some((
+                            companion_names,
+                            PlayerPosition::new(zone.to_string(), room.to_string()),
+                        ));
+                    }
                     follower_move_pending.extend(
                         movement_follower_candidates
                             .iter()
@@ -5279,6 +5417,8 @@ async fn handle_single_game_command(
                 force_command_pending = take_force_command_request(&mut player.body);
                 event_command_pending = take_event_command_request(&mut player.body);
                 change_player_pending = take_change_player_request(&mut player.body);
+                soul_switch_pending = take_soul_switch_request(&mut player.body);
+                soul_attach_pending = take_soul_attach_request(&mut player.body);
                 if let Some(route) = take_auto_move_request(&mut player.body) {
                     // Python alias.split(';') preserves empty components and
                     // whitespace inside the saved alias. Only the explicit
@@ -5690,6 +5830,12 @@ async fn handle_single_game_command(
         }
     }
 
+    if let Some((companion_names, position)) = soul_formation_move_pending {
+        if let Ok(mut world) = get_world_state().write() {
+            world.move_summoned_users_to(&companion_names, &position);
+        }
+    }
+
     if let Some(actor_id) = party_actor_id.as_deref() {
         apply_party_requests(broadcaster, actor_id, party_action, party_deliveries);
     }
@@ -5748,6 +5894,73 @@ async fn handle_single_game_command(
         }
     }
 
+    if let Some((target_name, requested_kind)) = soul_attach_pending {
+        let social_party_size = broadcaster
+            .clients
+            .lock()
+            .get(&addr)
+            .map(|client| {
+                broadcaster
+                    .social_snapshot(&client.connection_token)
+                    .party_members
+                    .len()
+            })
+            .unwrap_or(0);
+        let target_online = broadcaster.clients.lock().values().any(|client| {
+            client
+                .player
+                .as_ref()
+                .is_some_and(|player| player.body.get_name() == target_name)
+        });
+        if !target_online {
+            let mut body = Body::new();
+            if load_body_from_json(&mut body, &format!("data/user/{target_name}.json"))
+                && body.get_name() == target_name
+            {
+                let anchor = get_world_state()
+                    .read()
+                    .ok()
+                    .and_then(|world| world.get_player_position(&actor_name).cloned());
+                if let Some(anchor) = anchor {
+                    let mut clients = broadcaster.clients.lock();
+                    if let Some(client) = clients.get_mut(&addr) {
+                        if let Some(soul) = client.soul.as_mut() {
+                            let kind = if requested_kind == "mercenary" || requested_kind == "용병"
+                            {
+                                SoulBodyKind::Mercenary
+                            } else {
+                                SoulBodyKind::Alternate
+                            };
+                            if soul.members.len().saturating_add(social_party_size)
+                                < crate::network::social::MAX_PARTY_SIZE
+                                && soul.add_body(target_name.clone(), kind).is_ok()
+                            {
+                                if let Ok(mut world) = get_world_state().write() {
+                                    let id = world.add_summoned_user(body, anchor);
+                                    soul.set_summoned_id(&target_name, Some(id));
+                                    let _ = soul.save();
+                                }
+                            }
+                        }
+                    }
+                }
+            }
+        }
+    }
+
+    if let Some(target_name) = soul_switch_pending {
+        let mut switched_from = None;
+        {
+            let mut clients = broadcaster.clients.lock();
+            if let Some(client) = clients.get_mut(&addr) {
+                switched_from = switch_client_soul_body(client, &target_name).ok();
+            }
+        }
+        if let Some(old_name) = switched_from {
+            broadcaster.rebind_active_body_name(&old_name, &target_name, addr);
+        }
+    }
+
     if let Some(target_name) = change_player_pending {
         let same_room = get_world_state()
             .read()
@@ -5778,11 +5991,14 @@ async fn handle_single_game_command(
                 let mut actor_player = clients
                     .get_mut(&addr)
                     .and_then(|client| client.player.take());
+                let mut actor_soul = clients.get_mut(&addr).and_then(|client| client.soul.take());
                 if let Some(target_client) = clients.get_mut(&target_addr) {
                     std::mem::swap(&mut actor_player, &mut target_client.player);
+                    std::mem::swap(&mut actor_soul, &mut target_client.soul);
                 }
                 if let Some(actor_client) = clients.get_mut(&addr) {
                     actor_client.player = actor_player;
+                    actor_client.soul = actor_soul;
                 }
                 if let Some(actor_client) = clients.get(&addr) {
                     let _ = actor_client.send(actor_message);
@@ -6974,6 +7190,65 @@ async fn handle_single_game_command(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn soul_switch_changes_only_active_body_and_keeps_formation_together() {
+        let suffix = format!("소울전환{}", std::process::id());
+        let main_name = format!("{suffix}본캐");
+        let alternate_name = format!("{suffix}부캐");
+        let addr: SocketAddr = "127.0.0.1:18991".parse().unwrap();
+        let (sender, _receiver) = mpsc::unbounded_channel();
+        let mut main = Player::new();
+        main.body.set("이름", main_name.as_str());
+        main.body.set("레벨", 100_i64);
+        let mut client = Client::new(addr, sender);
+        client.set_player(main);
+        client
+            .soul_mut()
+            .unwrap()
+            .add_body(alternate_name.clone(), SoulBodyKind::Alternate)
+            .unwrap();
+        let mut alternate = Body::new();
+        alternate.set("이름", alternate_name.as_str());
+        alternate.set("레벨", 20_i64);
+        let anchor = PlayerPosition::new("전환시험존".into(), "1".into());
+        {
+            let mut world = get_world_state().write().unwrap();
+            world.set_player_position(&main_name, anchor.clone());
+            let id = world.add_summoned_user(alternate, anchor.clone());
+            client
+                .soul_mut()
+                .unwrap()
+                .set_summoned_id(&alternate_name, Some(id));
+        }
+
+        assert_eq!(
+            switch_client_soul_body(&mut client, &alternate_name),
+            Ok(main_name.clone())
+        );
+        assert_eq!(client.player().unwrap().body.get_name(), alternate_name);
+        assert_eq!(client.player().unwrap().body.get_int("레벨"), 20);
+        assert_eq!(client.soul().unwrap().active_body, alternate_name);
+        let world = get_world_state().read().unwrap();
+        let active_position = world.get_player_position(&alternate_name).unwrap();
+        assert_eq!(
+            (&active_position.zone, &active_position.room),
+            (&anchor.zone, &anchor.room)
+        );
+        let main_position = world.summoned_user_position_by_name(&main_name).unwrap();
+        assert_eq!(
+            (&main_position.zone, &main_position.room),
+            (&anchor.zone, &anchor.room)
+        );
+        drop(world);
+
+        if let Ok(mut world) = get_world_state().write() {
+            world.remove_player_position(&alternate_name);
+            let _ = world.take_summoned_user_by_name(&main_name);
+        }
+        let _ = std::fs::remove_file(format!("data/user/{main_name}.json"));
+        let _ = std::fs::remove_file(Soul::path_for(&main_name));
+    }
 
     #[test]
     fn event_room_view_adds_python_position_suffix_only_for_admins() {

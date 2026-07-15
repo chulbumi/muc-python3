@@ -316,6 +316,12 @@ impl WorldState {
         self.summoned_users.iter_mut().find(|user| user.id == id)
     }
 
+    pub fn summoned_user_mut_by_name(&mut self, name: &str) -> Option<&mut SummonedUser> {
+        self.summoned_users
+            .iter_mut()
+            .find(|user| user.body.get_name() == name)
+    }
+
     pub fn take_summoned_user_by_name(&mut self, name: &str) -> Option<SummonedUser> {
         let index = self
             .summoned_users
@@ -345,6 +351,42 @@ impl WorldState {
             .iter()
             .filter(|user| user.position.zone == zone && user.position.room == room)
             .collect()
+    }
+
+    /// Keep socket-less bodies owned by one Soul at its formation anchor.
+    /// This is also the recovery path for any future random/automatic movement
+    /// applied to an auxiliary body: the main formation position wins.
+    pub fn move_summoned_users_to(&mut self, names: &[String], position: &PlayerPosition) -> usize {
+        let wanted = names.iter().collect::<std::collections::HashSet<_>>();
+        let moving = self
+            .summoned_users
+            .iter()
+            .filter(|user| wanted.contains(&user.body.get_name()))
+            .map(|user| (user.id, user.position.clone()))
+            .collect::<Vec<_>>();
+        for (id, old) in &moving {
+            self.remove_room_object(&old.zone, &old.room, &RoomObjectRef::SummonedUser(*id));
+        }
+        for user in &mut self.summoned_users {
+            if wanted.contains(&user.body.get_name()) {
+                user.position = position.clone();
+            }
+        }
+        for (id, _) in &moving {
+            self.record_room_object(
+                &position.zone,
+                &position.room,
+                RoomObjectRef::SummonedUser(*id),
+            );
+        }
+        moving.len()
+    }
+
+    pub fn summoned_user_position_by_name(&self, name: &str) -> Option<&PlayerPosition> {
+        self.summoned_users
+            .iter()
+            .find(|user| user.body.get_name() == name)
+            .map(|user| &user.position)
     }
 
     /// Python 제거 명령 scans channel.players and deletes the first matching

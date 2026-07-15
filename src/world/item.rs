@@ -530,6 +530,13 @@ pub fn get_item_cache() -> &'static RwLock<ItemCache> {
 
 /// Read item weight from data/item/{key}.json. Returns 0 if not found. inv_stack 무게 합산용.
 pub fn get_item_weight_by_key(key: &str) -> i64 {
+    get_item_weight_by_key_depth(key, 0)
+}
+
+fn get_item_weight_by_key_depth(key: &str, depth: u8) -> i64 {
+    if depth > 8 {
+        return 0;
+    }
     let path = format!("data/item/{}.json", key);
     let content = match std::fs::read_to_string(&path) {
         Ok(c) => c,
@@ -540,8 +547,29 @@ pub fn get_item_weight_by_key(key: &str) -> i64 {
         Err(_) => return 0,
     };
     let info = json.get("아이템정보").and_then(|v| v.as_object());
-    info.and_then(|o| o.get("무게").and_then(|v| v.as_i64()))
-        .unwrap_or(0)
+    let Some(info) = info else { return 0 };
+    if let Some(weight) = info.get("무게").and_then(|v| v.as_i64()) {
+        return weight;
+    }
+    let kind = info.get("종류").and_then(|v| v.as_str()).unwrap_or("");
+    if !matches!(kind, "포장" | "묶음" | "꾸러미") {
+        return 0;
+    }
+    let original = info
+        .get("포장원본")
+        .or_else(|| info.get("묶음원본"))
+        .and_then(|v| v.as_str())
+        .unwrap_or("");
+    let quantity = info
+        .get("포장수량")
+        .or_else(|| info.get("묶음수량"))
+        .and_then(|v| v.as_i64())
+        .unwrap_or(0);
+    if original.is_empty() || quantity <= 0 {
+        0
+    } else {
+        get_item_weight_by_key_depth(original, depth + 1).saturating_mul(quantity)
+    }
 }
 
 /// 아이템 표시이름. data/item/{key}.json의 아이템정보.이름, 없으면 key.

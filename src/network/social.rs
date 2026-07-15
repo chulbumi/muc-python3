@@ -7,6 +7,7 @@
 use std::collections::HashMap;
 
 pub(crate) type ConnectionId = String;
+pub(crate) const MAX_PARTY_SIZE: usize = 4;
 
 #[derive(Clone, Debug, Default, PartialEq, Eq)]
 pub(crate) struct RelationState {
@@ -236,6 +237,14 @@ impl SocialState {
         self.party_members.entry(leader.to_string()).or_default();
 
         for member in members {
+            if self
+                .party_members
+                .get(leader)
+                .map_or(1, |party| party.len().saturating_add(1))
+                >= MAX_PARTY_SIZE
+            {
+                break;
+            }
             if self.follow_target.get(member).map(String::as_str) != Some(leader)
                 || self.party_leader.contains_key(member)
             {
@@ -505,6 +514,30 @@ mod tests {
         let snapshot = state.snapshot("혼자대장");
         assert_eq!(snapshot.party_leader.as_deref(), Some("혼자대장"));
         assert!(snapshot.party_members.is_empty());
+    }
+
+    #[test]
+    fn party_is_limited_to_leader_plus_three_members() {
+        let mut state = SocialState::default();
+        for member in ["일", "이", "삼", "사"] {
+            state.apply(
+                member,
+                SocialAction::Follow {
+                    target: "대장".into(),
+                },
+            );
+        }
+        state.apply(
+            "대장",
+            SocialAction::AddPartyMembers {
+                members: ids(&["일", "이", "삼", "사"]),
+            },
+        );
+        assert_eq!(
+            state.snapshot("대장").party_members,
+            ids(&["일", "이", "삼"])
+        );
+        assert_eq!(state.snapshot("사").party_leader, None);
     }
 
     #[test]

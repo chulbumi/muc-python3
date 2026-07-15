@@ -23,6 +23,7 @@ pub(crate) use inventory_compat::mark_item_field_as_json_array;
 mod item_event;
 pub(crate) use item_event::try_item_event;
 mod movement;
+mod package_item;
 mod party;
 mod requests;
 mod return_home;
@@ -1257,7 +1258,7 @@ pub(crate) struct RoomMugongTargetSnapshot {
     active_skills: Vec<ActiveMugongSnapshot>,
 }
 
-fn reaction_names(raw: &str) -> Vec<String> {
+pub(crate) fn reaction_names(raw: &str) -> Vec<String> {
     raw.split(|c: char| c == '|' || c.is_whitespace())
         .filter(|name| !name.is_empty())
         .map(str::to_string)
@@ -6333,6 +6334,7 @@ pub fn create_engine_with_body_and_output(
     // efun으로 제공한다. 사용자에게 보이는 문구와 ANSI는 `시전.rhai`에 둔다.
     cast::register_cast_efuns(&mut engine, body_ptr);
     anger::register_anger_efuns(&mut engine, body_ptr);
+    package_item::register_package_efun(&mut engine, body_ptr);
     admin_combat::register_admin_combat_efuns(&mut engine, body_ptr);
 
     // Python `넣어.py`/`꺼내.py` and `Box` ordered-child state.  Rust
@@ -12642,6 +12644,53 @@ pub fn create_engine_with_body_and_output(
                     Value::String(target.to_string()),
                 );
             }
+        },
+    );
+    let body_ptr_soul_roster = body_ptr;
+    engine.register_fn("get_soul_roster", move |_obj: &mut rhai::Map| -> Dynamic {
+        let body = unsafe { &*body_ptr_soul_roster };
+        body.temp()
+            .get("_soul_roster")
+            .and_then(Value::as_str)
+            .and_then(|json| serde_json::from_str::<serde_json::Value>(json).ok())
+            .map(|json| crate::data::json_to_dynamic(&json))
+            .unwrap_or_else(|| {
+                crate::data::json_to_dynamic(&serde_json::json!({
+                    "main": body.get_name(), "active": body.get_name(), "members": []
+                }))
+            })
+    });
+    let body_ptr_soul_switch = body_ptr;
+    engine.register_fn(
+        "request_soul_switch",
+        move |_obj: &mut rhai::Map, target: &str| -> bool {
+            if target.trim().is_empty() {
+                return false;
+            }
+            unsafe { &mut *body_ptr_soul_switch }.temp_mut().insert(
+                SOUL_SWITCH_REQUEST.to_string(),
+                Value::String(target.trim().to_string()),
+            );
+            true
+        },
+    );
+    // Authored item/mob/fixture scripts can grant an alternate character or
+    // mercenary without owning network/session mutation themselves.
+    let body_ptr_soul_attach = body_ptr;
+    engine.register_fn(
+        "request_soul_attach",
+        move |_obj: &mut rhai::Map, target: &str, kind: &str| -> bool {
+            if target.trim().is_empty() {
+                return false;
+            }
+            let request = (target.trim().to_string(), kind.trim().to_string());
+            let Ok(json) = serde_json::to_string(&request) else {
+                return false;
+            };
+            unsafe { &mut *body_ptr_soul_attach }
+                .temp_mut()
+                .insert(SOUL_ATTACH_REQUEST.to_string(), Value::String(json));
+            true
         },
     );
 
