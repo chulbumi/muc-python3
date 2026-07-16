@@ -376,7 +376,7 @@ mod tests {
         let master = MasterObject::default_storage(storage);
 
         // Valid paths
-        assert!(master.valid_compile("cmds/test.rhai"));
+        assert!(master.valid_compile("cmds/master.rhai"));
         assert!(master.valid_compile("lib/test.rhai"));
 
         // Invalid paths
