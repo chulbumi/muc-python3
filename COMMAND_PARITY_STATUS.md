@@ -20,7 +20,7 @@
 - 현재 완료: **189개**
 - 현재 해야 할 것: **0개**
 - `comm.py`/`comm.rhai`는 `CmdObj`가 없는 follower/group helper이며 명령 등록기에서도 비공개로 제외되므로 플레이어 명령 집계에서 제외
-- Rhai에만 있는 16개도 검토 완료: `attack`, `debug_test`, `help`, `inventory`, `look`, `master`, `say`, `test`, `test_output`, `test_simple`, `test_syntax`, `디버그`, `주다`, `테스트명령`은 등록 차단된 호환·개발·중복 소스이며, `끝`·`종료`만 Python `Player.parse_command`와 같은 비공개 registry hook으로 등록된다.
+- Rhai에만 있는 9개도 검토 완료: `attack`, `help`, `inventory`, `look`, `master`, `say`, `주다`는 등록 차단된 호환·중복 소스이며, `끝`·`종료`만 Python `Player.parse_command`와 같은 비공개 registry hook으로 등록된다.
 
 ## 목표 단계와 잔여 작업
 

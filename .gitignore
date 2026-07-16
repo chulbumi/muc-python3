@@ -153,5 +153,6 @@ Thumbs.db
 # --- 로컬/임시 ---
 /temp
 /tmp
+/test_results.md
 .env.local
 .env.*.local

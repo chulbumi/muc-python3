@@ -22,7 +22,7 @@ pub type PlayerMapFn = Arc<dyn Fn() -> HashMap<String, String> + Send + Sync>;
 ///
 /// `comm.py` is a Python helper module rather than a `CmdObj`, and its Rhai
 /// counterpart must not become a command merely because it lives in `cmds/`.
-/// The remaining entries are engine support or development/test scripts.
+/// The remaining entries are engine support or compatibility scripts.
 const NON_COMMAND_SCRIPTS: &[&str] = &[
     // Python Player.parse_command owns one-word exits/directions.  The Rhai
     // implementation is registered through CommandRegistry's private hook,
@@ -33,17 +33,10 @@ const NON_COMMAND_SCRIPTS: &[&str] = &[
     "__combat_tick",
     "attack",
     "comm",
-    "debug_test",
     "help",
     "inventory",
     "look",
     "say",
-    "test",
-    "test_output",
-    "test_simple",
-    "test_syntax",
-    "디버그",
-    "테스트명령",
     "master",
     // Python has cmds/줘.py, not cmds/주다.py. The duplicate Rhai source must
     // not create an additional command or shadow the exact `줘` command.
