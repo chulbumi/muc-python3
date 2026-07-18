@@ -1536,6 +1536,12 @@ async fn complete_char_creation_and_enter_game(
                 .map(|s| s.char_password.clone())
                 .unwrap_or_default();
 
+            // DOUMI finished creating the character.  The next input must go
+            // through the normal game-command dispatcher, not ScriptMode.
+            // Keeping this login session caused the first room to render while
+            // every following command was still treated as helper input.
+            complete_created_client_login(client);
+
             // Create player and initialize
             let mut player = Player::new();
             player.body.set("이름", name.as_str());
@@ -1625,6 +1631,11 @@ async fn complete_char_creation_and_enter_game(
     }
 
     Ok(())
+}
+
+/// End the DOUMI/login input flow before accepting gameplay commands.
+fn complete_created_client_login(client: &mut Client) {
+    client.complete_login();
 }
 
 /// Send logo and name prompt to client
@@ -8598,6 +8609,19 @@ fn step1() {
 
         client.complete_login();
         assert!(!client.is_logging_in());
+        assert_eq!(client.state, ClientState::Active);
+    }
+
+    #[test]
+    fn character_creation_completion_exits_script_mode() {
+        let (tx, _rx) = mpsc::unbounded_channel();
+        let addr = "127.0.0.1:8083".parse().unwrap();
+        let mut client = Client::new(addr, tx);
+        client.login_session.as_mut().unwrap().state = LoginState::ScriptMode;
+
+        complete_created_client_login(&mut client);
+
+        assert!(client.login_session.is_none());
         assert_eq!(client.state, ClientState::Active);
     }
 
