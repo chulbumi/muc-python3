@@ -1562,6 +1562,20 @@ fn consume_mob_actions(dex: &mut i64) -> usize {
     count
 }
 
+/// Python `Body.clearTarget()` removes the relationship from both combatants.
+/// Rust keeps mob targets as player names, so the reverse side must be cleared
+/// explicitly when a player dies.
+fn clear_dead_player_from_mobs(mobs: &mut [crate::world::MobInstance], player_name: &str) {
+    for mob in mobs {
+        mob.targets.retain(|target| target != player_name);
+        if mob.act == 1 && mob.targets.is_empty() {
+            mob.act = 0;
+            mob.combat_dex = 0;
+            mob.active_attack_skill = None;
+        }
+    }
+}
+
 /// Advance one Python `Player.update()` combat tick.
 ///
 /// The Rhai attack command stores the target mob key in the body temporary
@@ -1925,9 +1939,12 @@ fn process_combat_tick(
     }
     if round.player_died {
         // Python Player.die(): a lethal hit cancels the complete automatic
-        // route so it cannot resume after the funeral-home recovery sequence.
+        // route and Body.clearTarget() clears the reverse mob relationship.
+        // Otherwise room_view keeps rendering the mob as fighting after its
+        // only opponent has died.
         player.auto_move_list.clear();
         player.body.clear_target(None);
+        clear_dead_player_from_mobs(mobs, &name);
         player.body.temp_mut().remove("_combat_target_ids");
         player.body.temp_mut().remove("_combat_target_instance_ids");
         player.body.temp_mut().remove("_attack_target_key");
@@ -2947,6 +2964,30 @@ fn automatic_consumable_commands(player: &Player) -> Vec<String> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn dead_player_cleanup_preserves_mobs_still_fighting_another_player() {
+        let data = crate::world::RawMobData::new();
+        let mut lone = crate::world::MobInstance::new("존:단독".into(), "존".into(), 1, &data);
+        lone.targets = vec!["사망자".into()];
+        lone.act = 1;
+        lone.combat_dex = 321;
+
+        let mut shared = crate::world::MobInstance::new("존:공동".into(), "존".into(), 1, &data);
+        shared.targets = vec!["사망자".into(), "생존자".into()];
+        shared.act = 1;
+        shared.combat_dex = 654;
+
+        let mut mobs = vec![lone, shared];
+        clear_dead_player_from_mobs(&mut mobs, "사망자");
+
+        assert!(mobs[0].targets.is_empty());
+        assert_eq!(mobs[0].act, 0);
+        assert_eq!(mobs[0].combat_dex, 0);
+        assert_eq!(mobs[1].targets, vec!["생존자"]);
+        assert_eq!(mobs[1].act, 1);
+        assert_eq!(mobs[1].combat_dex, 654);
+    }
 
     #[test]
     fn party_experience_rewards_peers_and_blocks_low_level_bus_riding() {
@@ -4084,6 +4125,8 @@ mod tests {
             let mut mob =
                 crate::world::MobInstance::new(mob_key.clone(), zone.clone(), &room, &data);
             mob.targets.push(player_name.clone());
+            mob.act = 1;
+            mob.combat_dex = 321;
             world.mob_cache.add_mob_instance(mob);
             world.set_player_position(
                 &player_name,
@@ -4111,6 +4154,15 @@ mod tests {
         assert!(player.auto_move_list.is_empty());
         drop(clients);
         let mut world = get_world_state().write().unwrap();
+        let mob = world
+            .mob_cache
+            .get_all_mobs_in_room(&zone, &room)
+            .into_iter()
+            .find(|mob| mob.mob_key == mob_key)
+            .unwrap();
+        assert!(mob.targets.is_empty());
+        assert_eq!(mob.act, 0);
+        assert_eq!(mob.combat_dex, 0);
         world.remove_player_position(&player_name);
         world.mob_cache.remove_instance(&zone, &room, &mob_key);
         world.mob_cache.remove_mob(&mob_key);
