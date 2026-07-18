@@ -73,6 +73,25 @@ fn split_room_id(room_id: &str) -> Option<(&str, &str)> {
         .filter(|(zone, room)| !zone.is_empty() && !room.is_empty())
 }
 
+/// Keep asynchronous mob speech away from the user's partially typed command.
+/// `엘피출력 1` is the legacy "hide LP prompt" setting; every other interactive
+/// player receives the same HP/MP prompt used by normal command completion.
+fn mob_speech_payload(message: &str, player: &crate::player::Player) -> String {
+    let mut payload = format!("\r\n{message}\r\n");
+    let hide_lp_prompt =
+        crate::script::config_is_enabled(&player.body.get_string("설정상태"), "엘피출력");
+    if player.interactive == 1 && !hide_lp_prompt {
+        payload.push_str(&format!(
+            "\r\n\x1b[0;37;40m[ {}/{}, {}/{} ] ",
+            player.body.get_hp(),
+            player.body.get_max_hp(),
+            player.body.get_mp(),
+            player.body.get_max_mp()
+        ));
+    }
+    payload
+}
+
 /// Broadcaster manages all connected clients
 ///
 /// Provides thread-safe access to the client list and broadcast functionality.
@@ -608,6 +627,58 @@ impl Broadcaster {
         }
     }
 
+    /// Deliver an idle mob's automatic speech and restore each recipient's
+    /// input boundary. Prompt visibility and current vitals are per player.
+    pub fn tell_room_mob_speech(&self, room_id: &str, message: &str) {
+        if message.is_empty() {
+            return;
+        }
+        let Some((zone, room)) = split_room_id(room_id) else {
+            return;
+        };
+        let names = crate::world::get_world_state()
+            .read()
+            .unwrap()
+            .get_players_in_room(zone, room);
+        let bindings = self.player_bindings_for_names(&names);
+        let clients = self.clients.lock();
+        let mut dead_addrs = Vec::new();
+
+        for (indexed_name, addr) in bindings {
+            let Some(client) = clients.get(&addr) else {
+                continue;
+            };
+            let Some(player) = client
+                .player
+                .as_ref()
+                .filter(|player| player.body.get_name() == indexed_name)
+            else {
+                continue;
+            };
+            let processed_message = replace_player_templates(message, &indexed_name);
+            if client
+                .sender
+                .send(mob_speech_payload(&processed_message, player))
+                .is_err()
+            {
+                debug!(
+                    "Failed to send mob speech to {} (connection dead), marking for cleanup",
+                    addr
+                );
+                dead_addrs.push(addr);
+            }
+        }
+
+        drop(clients);
+        for addr in dead_addrs {
+            warn!(
+                "Removing dead client {} after mob speech send failure",
+                addr
+            );
+            self.remove_client(addr);
+        }
+    }
+
     /// Get all players in a room with their full data
     ///
     /// Returns a list of PlayerRoomData containing name, level, HP, guild, rank, etc.
@@ -757,6 +828,37 @@ mod tests {
         player.body.set("이름", name);
         client.player = Some(player);
         (client, receiver)
+    }
+
+    #[test]
+    fn mob_speech_always_ends_the_line_and_restores_only_visible_lp_prompt() {
+        let mut visible = crate::player::Player::new();
+        visible.interactive = 1;
+        visible.body.set("체력", 900_i64);
+        visible.body.set("최고체력", 900_i64);
+        visible.body.set("맷집", 0_i64);
+        visible.body.set("내공", 18_i64);
+        visible.body.set("최고내공", 18_i64);
+        visible.body.set("설정상태", "엘피출력 0");
+        assert_eq!(
+            mob_speech_payload("왕대협이 말합니다.", &visible),
+            "\r\n왕대협이 말합니다.\r\n\r\n\x1b[0;37;40m[ 900/900, 18/18 ] "
+        );
+
+        let mut hidden = crate::player::Player::new();
+        hidden.interactive = 1;
+        hidden.body.set("설정상태", "엘피출력 1");
+        assert_eq!(
+            mob_speech_payload("왕대협이 말합니다.", &hidden),
+            "\r\n왕대협이 말합니다.\r\n"
+        );
+
+        hidden.interactive = 0;
+        hidden.body.set("설정상태", "엘피출력 0");
+        assert_eq!(
+            mob_speech_payload("왕대협이 말합니다.", &hidden),
+            "\r\n왕대협이 말합니다.\r\n"
+        );
     }
 
     #[test]
