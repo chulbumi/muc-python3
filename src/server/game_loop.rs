@@ -1094,14 +1094,16 @@ impl GameLoop {
                 } else {
                     Vec::new()
                 };
-                // Python Mob.say uses Room.writeRoom: no prompt is appended.
+                // Automatic speech is asynchronous to player input. Keep the
+                // line boundary and restore the per-recipient LP prompt when
+                // that prompt is configured to be visible.
                 for message in messages {
                     match message.kind {
-                        crate::world::RoomMobMessageKind::Speech => broadcaster.tell_room(
-                            &format!("{}:{}", message.zone, message.room),
-                            &("\r\n".to_string() + message.message.as_str()),
-                            None,
-                        ),
+                        crate::world::RoomMobMessageKind::Speech => broadcaster
+                            .tell_room_mob_speech(
+                                &format!("{}:{}", message.zone, message.room),
+                                &message.message,
+                            ),
                         crate::world::RoomMobMessageKind::CorpseGone => {
                             let player_names = get_world_state()
                                 .read()
