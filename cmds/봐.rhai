@@ -135,29 +135,9 @@ fn view_fixture_data(ob, fixture) {
 
 fn main(ob, line) {
     if line.trim() == "" {
-        let r = view_map_data(ob);
-        if r["ok"] {
-            let rows = split(r["text"], "\r\n");
-            let i = 0;
-            while i < len(rows) {
-                // build_room_lines uses a terminal CRLF only to delimit its
-                // final Python sendLine. split exposes that delimiter as an
-                // extra empty row; sending it again adds one blank line
-                // before the command prompt.
-                if i + 1 < len(rows) || rows[i] != "" {
-                    send_line(ob, rows[i]);
-                }
-                i += 1;
-            }
-        } else {
-            if r["err"] == "no_position" {
-                send_line(ob, "\x1b[1;31m위치 정보가 없습니다.\x1b[0;37m");
-            } else if r["err"] == "room_error" {
-                send_line(ob, "\x1b[1;31m방 정보를 읽을 수 없습니다.\x1b[0;37m");
-            } else if r["err"] == "unknown_room" {
-                send_line(ob, "\x1b[1;37m[" + r["zone"] + ":" + int_to_str(r["room"]) + "]\x1b[0;37m\r\n알 수 없는 곳입니다.\r\n");
-            }
-        }
+        // 이동 직후와 같은 room_view 렌더러를 사용해야 간략설명과
+        // 나침반제거 설정이 `봐`에도 동일하게 반영된다.
+        emit_room_view(ob);
         return;
     }
 

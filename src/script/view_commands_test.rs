@@ -80,6 +80,48 @@ fn room_look_does_not_turn_terminal_delimiter_into_extra_blank_output() {
 }
 
 #[test]
+fn room_look_honors_brief_description_and_compass_settings() {
+    use crate::world::{get_world_state, PlayerPosition};
+
+    let player = format!("봐설정회귀-{}", std::process::id());
+    {
+        let mut world = get_world_state().write().unwrap();
+        if world.room_cache.get_room_cached("낙양성", "42").is_none() {
+            world.room_cache.preload_zone("낙양성").unwrap();
+        }
+        world.set_player_position(
+            &player,
+            PlayerPosition::new("낙양성".to_string(), "42".to_string()),
+        );
+    }
+    let mut body = Body::new();
+    body.set("이름", player.as_str());
+    body.set("설정상태", "간략설명 1\n나침반제거 1");
+
+    let output = ScriptStorage::default()
+        .execute("봐", &mut body, "", None, None, None)
+        .unwrap()
+        .0;
+
+    assert!(
+        output
+            .iter()
+            .any(|line| line.trim_start().starts_with("[출구] :")),
+        "{output:?}"
+    );
+    assert!(
+        !output.iter().any(|line| line.contains("산들바람에")),
+        "{output:?}"
+    );
+    assert!(!output.iter().any(|line| line.contains("○")), "{output:?}");
+
+    get_world_state()
+        .write()
+        .unwrap()
+        .remove_player_position(&player);
+}
+
+#[test]
 fn compare_uses_integrated_item_mob_collision_order() {
     use crate::world::{get_world_state, MobInstance, PlayerPosition, RawMobData, RoomObjectRef};
 
