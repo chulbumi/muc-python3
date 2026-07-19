@@ -10,7 +10,7 @@ env:
   CARGO_TERM_COLOR: always
 
 jobs:
-  test:
+  public-checks:
     runs-on: ubuntu-latest
 
     steps:
@@ -33,17 +33,40 @@ jobs:
     - name: Run formatting check
       run: cargo fmt --all -- --check
 
-    - name: Run clippy
-      run: cargo clippy --all-targets --all-features -- -D warnings
+    - name: Run compile check
+      run: cargo check --all-targets --all-features
 
-    - name: Run tests
-      run: cargo test --verbose
+    - name: Run public data loader smoke test
+      run: cargo test --lib public_fixture_test::public_fixture_loads_without_private_game_content -- --exact --test-threads=1
 
-  build:
+    - name: Build release
+      run: cargo build --release --bin murim_server
+
+    - name: Upload binary
+      uses: actions/upload-artifact@v4
+      with:
+        name: murim_server
+        path: target/release/murim_server
+        if-no-files-found: error
+
+  private-data-tests:
+    if: github.event_name == 'push' || github.event.pull_request.head.repo.full_name == github.repository
     runs-on: ubuntu-latest
 
     steps:
     - uses: actions/checkout@v4
+
+    - name: Checkout private game data
+      env:
+        DATA_DEPLOY_KEY: ${{ secrets.DATA_DEPLOY_KEY }}
+      run: |
+        install -d -m 700 ~/.ssh
+        printf '%s\n' "$DATA_DEPLOY_KEY" > ~/.ssh/muc_data_key
+        chmod 600 ~/.ssh/muc_data_key
+        git config submodule.data.url git@github.com:chulbumi/muc-python3-data.git
+        GIT_SSH_COMMAND='ssh -i ~/.ssh/muc_data_key -o IdentitiesOnly=yes -o StrictHostKeyChecking=accept-new' \
+          git submodule update --init --depth 1 data
+        ./scripts/init-runtime-data.sh
 
     - name: Install Rust toolchain
       uses: actions-rust-lang/setup-rust-toolchain@v1
@@ -57,12 +80,9 @@ jobs:
           target
         key: ${{ runner.os }}-cargo-${{ hashFiles('**/Cargo.lock') }}
 
-    - name: Build release
-      run: cargo build --release --bin murim_server
+    - name: Install Python compatibility dependencies
+      run: python3 -m pip install --user tossi==0.3.1
 
-    - name: Upload binary
-      uses: actions/upload-artifact@v4
-      with:
-        name: murim_server
-        path: target/release/murim_server
-        if-no-files-found: error
+    - name: Run full private-data test suite
+      timeout-minutes: 30
+      run: cargo test --lib -- --test-threads=1

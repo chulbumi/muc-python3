@@ -280,7 +280,12 @@ fn every_current_rhai_source_is_syntax_valid() {
     storage
         .load_all_scripts_checked()
         .expect("every cmds/*.rhai source must compile before registration");
-    assert_eq!(storage.script_names().len(), 215);
+    let expected = std::fs::read_dir("cmds")
+        .expect("cmds directory")
+        .filter_map(Result::ok)
+        .filter(|entry| entry.path().extension().and_then(std::ffi::OsStr::to_str) == Some("rhai"))
+        .count();
+    assert_eq!(storage.script_names().len(), expected);
 }
 #[test]
 fn test_script_preserves_self_output_with_targeted_sends() {
