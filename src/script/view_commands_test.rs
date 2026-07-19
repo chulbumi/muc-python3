@@ -122,6 +122,41 @@ fn room_look_honors_brief_description_and_compass_settings() {
 }
 
 #[test]
+fn room_mob_lines_reset_inherited_bright_ansi_state() {
+    use crate::world::{get_world_state, PlayerPosition};
+
+    let player = format!("몹안시초기화-{}", std::process::id());
+    {
+        let mut world = get_world_state().write().unwrap();
+        world.spawn_mobs_for_room("낙양성", "19");
+        world.set_player_position(
+            &player,
+            PlayerPosition::new("낙양성".to_string(), "19".to_string()),
+        );
+    }
+    let mut body = Body::new();
+    body.set("이름", player.as_str());
+
+    let output = ScriptStorage::default()
+        .execute("봐", &mut body, "", None, None, None)
+        .unwrap()
+        .0;
+    let dog = output
+        .iter()
+        .find(|line| line.contains("강아지") && line.contains("발발발"))
+        .expect("낙양성:19 강아지 설명");
+
+    assert!(dog.starts_with("\x1b[0;37;40m"), "{dog:?}");
+    assert!(dog.ends_with("\x1b[0;37;40m"), "{dog:?}");
+    assert!(dog.contains("\x1b[33m강아지\x1b[37;40m"), "{dog:?}");
+
+    get_world_state()
+        .write()
+        .unwrap()
+        .remove_player_position(&player);
+}
+
+#[test]
 fn compare_uses_integrated_item_mob_collision_order() {
     use crate::world::{get_world_state, MobInstance, PlayerPosition, RawMobData, RoomObjectRef};
 

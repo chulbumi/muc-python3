@@ -52,6 +52,13 @@ fn mob_actor(name) {
     "\x1b[33m" + name + "\x1b[37m" + han_iga(name)
 }
 
+fn mob_room_line(line) {
+    // Legacy mob descriptions commonly restore only foreground/background
+    // (`37;40m`). That does not turn off an inherited bold attribute, so one
+    // earlier bright segment can make a later mob row bright as well.
+    "\x1b[0;37;40m" + line + "\x1b[0;37;40m"
+}
+
 fn emit_room_view(ob) {
     let view = movement_room_view(ob);
     if !view["ok"] {
@@ -99,18 +106,18 @@ fn emit_room_view(ob) {
         }
         let name = mob["name"];
         if mob["act"] == 4 {
-            send_line(ob, mob_actor(name) + " 흐트러진 진기를 추스리고 있습니다.");
+            send_line(ob, mob_room_line(mob_actor(name) + " 흐트러진 진기를 추스리고 있습니다."));
         } else if mob["act"] == 0 {
-            send_line(ob, mob["desc1"]);
+            send_line(ob, mob_room_line(mob["desc1"]));
         } else if mob["act"] == 1 {
             let line = "";
             for head in mob["defense_heads"] {
                 line += head + " ";
             }
             line += mob_actor(name) + " 목숨을 건 사투를 벌이고 있습니다.";
-            send_line(ob, line);
+            send_line(ob, mob_room_line(line));
         } else if mob["act"] == 2 {
-            send_line(ob, "\x1b[33m" + name + "\x1b[37m의 싸늘한 시체가 있습니다.");
+            send_line(ob, mob_room_line("\x1b[33m" + name + "\x1b[37m의 싸늘한 시체가 있습니다."));
         }
     }
 
