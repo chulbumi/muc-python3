@@ -209,7 +209,9 @@ fn return_home_command_matches_python_guard_order_and_success_room_output() {
 
     let suffix = std::process::id();
     let player = format!("귀환회귀-{suffix}");
-    let zone = format!("귀환회귀존-{suffix}");
+    // Difficulty zones strip trailing ASCII digits when loading map JSON.
+    // Keep this synthetic zone from accidentally looking like one.
+    let zone = format!("귀환회귀존-{suffix}가");
     let directory = std::path::Path::new("data/map").join(&zone);
     std::fs::create_dir_all(&directory).unwrap();
     for (room, name, properties) in [
@@ -310,6 +312,7 @@ fn return_home_command_matches_python_guard_order_and_success_room_output() {
         observer(&old_observer, 11, 22, 3, 4),
         observer(&new_observer, 55, 66, 7, 8),
     ]);
+    body.set("설정상태", "간략설명 1\n나침반제거 1");
     let moved = storage
         .execute("귀환", &mut body, "", None, None, None)
         .unwrap();
@@ -317,7 +320,22 @@ fn return_home_command_matches_python_guard_order_and_success_room_output() {
         moved.0[0],
         "당신이 경공술을 펼치며 하늘로 치솟아 오릅니다. '무영지신!!!'"
     );
-    assert!(moved.0.iter().any(|line| line.contains("귀환지")));
+    assert!(
+        moved.0.iter().any(|line| line.contains("귀환지")),
+        "{moved:?}"
+    );
+    assert!(
+        moved
+            .0
+            .iter()
+            .any(|line| line.trim_start().starts_with("[출구] :")),
+        "{moved:?}"
+    );
+    assert!(
+        !moved.0.iter().any(|line| line.contains("귀환지 설명")),
+        "{moved:?}"
+    );
+    assert!(!moved.0.iter().any(|line| line.contains('○')), "{moved:?}");
     let sends = match moved.1 {
         Some(CommandResult::OutputAndSendToUsers(_, sends)) => sends,
         other => panic!("expected return-home room deliveries, got {other:?}"),

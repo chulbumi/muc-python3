@@ -892,11 +892,11 @@ fn room_view_data(body: &Body) -> Map {
     result
 }
 
-/// Return the current room's legacy `#오브젝트:<command>` text.
+/// Return the current room's legacy `오브젝트:<command>` text.
 ///
-/// Converted JSON stores these entries under `맵정보.오브젝트`, while
-/// Python's command loop exposed them as direct room commands after ordinary
-/// commands and emotions had failed to match.
+/// Python map JSON stores this as a direct map attribute (for example,
+/// `오브젝트:게시판`).  Keep accepting the earlier converted nested
+/// `오브젝트: { 게시판: ... }` form as a compatibility fallback.
 fn room_object_lines(body: &Body, command: &str) -> Array {
     let Some((zone, room)) = current_body_position(body) else {
         return Array::new();
@@ -904,11 +904,13 @@ fn room_object_lines(body: &Body, command: &str) -> Array {
     let Some(info) = room_info(&zone, &room) else {
         return Array::new();
     };
-    let Some(value) = info
-        .get("오브젝트")
-        .and_then(JsonValue::as_object)
-        .and_then(|objects| objects.get(command))
-    else {
+    let direct_key = format!("오브젝트:{command}");
+    let value = info.get(&direct_key).or_else(|| {
+        info.get("오브젝트")
+            .and_then(JsonValue::as_object)
+            .and_then(|objects| objects.get(command))
+    });
+    let Some(value) = value else {
         return Array::new();
     };
     json_strings(Some(value))
@@ -1284,6 +1286,92 @@ mod tests {
         assert!(lines[0].starts_with("무림크래프트를 처음 하시는분은"));
         assert!(lines[2].contains("\u{1b}[32m초보수련장"));
         assert!(room_object_lines(&body, "없는오브젝트").is_empty());
+    }
+
+    #[test]
+    fn direct_room_object_attribute_uses_the_python_object_prefix() {
+        let mut body = Body::new();
+        body.set("위치", "낙양성:22");
+
+        let lines = room_object_lines(&body, "게시판")
+            .into_iter()
+            .filter_map(|line| line.into_string().ok())
+            .collect::<Vec<_>>();
+
+        assert!(lines.len() > 10, "{lines:?}");
+        assert_eq!(
+            lines[3],
+            "∥     이    름  -  양  철  심                       ∥"
+        );
+        assert!(lines.iter().any(|line| line.contains("음양속고구환단 2알")));
+    }
+
+    #[test]
+    fn every_python_direct_room_object_attribute_is_exposed_as_a_command() {
+        let map_root = std::path::Path::new("data/map");
+        let mut checked = 0usize;
+
+        for zone_entry in std::fs::read_dir(map_root).expect("data/map") {
+            let Ok(zone_entry) = zone_entry else {
+                continue;
+            };
+            let Ok(kind) = zone_entry.file_type() else {
+                continue;
+            };
+            if !kind.is_dir() {
+                continue;
+            }
+            let Some(zone) = zone_entry.file_name().to_str().map(str::to_string) else {
+                continue;
+            };
+
+            for room_entry in std::fs::read_dir(zone_entry.path()).expect("map zone") {
+                let Ok(room_entry) = room_entry else {
+                    continue;
+                };
+                let path = room_entry.path();
+                if path.extension().and_then(std::ffi::OsStr::to_str) != Some("json") {
+                    continue;
+                }
+                let Some(room) = path.file_stem().and_then(std::ffi::OsStr::to_str) else {
+                    continue;
+                };
+                let Ok(source) = std::fs::read_to_string(&path) else {
+                    continue;
+                };
+                let Ok(root) = serde_json::from_str::<JsonValue>(&source) else {
+                    continue;
+                };
+                let Some(info) = root.get("맵정보").and_then(JsonValue::as_object) else {
+                    continue;
+                };
+
+                for (key, value) in info {
+                    let Some(command) = key.strip_prefix("오브젝트:") else {
+                        continue;
+                    };
+                    let mut body = Body::new();
+                    body.set("위치", format!("{zone}:{room}"));
+                    let actual = room_object_lines(&body, command)
+                        .into_iter()
+                        .filter_map(|line| line.into_string().ok())
+                        .collect::<Vec<_>>();
+                    assert_eq!(
+                        actual,
+                        json_strings(Some(value)),
+                        "{}:{} {command}",
+                        zone,
+                        room
+                    );
+                    checked += 1;
+                }
+            }
+        }
+
+        assert!(
+            checked > 0,
+            "expected at least one 오브젝트:<명령> map attribute"
+        );
     }
 
     #[test]
