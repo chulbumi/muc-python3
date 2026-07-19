@@ -27,6 +27,8 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     // Initialize logger
     tracing_subscriber::fmt::init();
 
+    muc_engine::runtime_layout::initialize()?;
+
     let port = get_port();
     tracing::info!("MUD server binding to 0.0.0.0:{}", port);
 

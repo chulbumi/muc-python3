@@ -33,11 +33,15 @@ pub mod network;
 pub mod object;
 pub mod oneitem;
 pub mod player;
+pub mod runtime_layout;
 pub mod scheduler;
 pub mod script;
 pub mod server;
 pub mod utils;
 pub mod world;
+
+#[cfg(test)]
+mod public_fixture_test;
 
 // Re-export commonly used types
 pub use command::{CommandHandler, CommandParser, CommandRegistry, CommandResult};

@@ -154,5 +154,6 @@ Thumbs.db
 /temp
 /tmp
 /test_results.md
+/runtime/
 .env.local
 .env.*.local
