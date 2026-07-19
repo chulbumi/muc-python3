@@ -93,12 +93,10 @@ fn cmd(ob, line) {
     }
 
     send_entry_room_updates(transition);
-    let room = view_map_data(ob);
-    if room["ok"] {
-        for row in split(room["text"], "\r\n") {
-            send_line(ob, row);
-        }
-    }
+    // Python enterRoom()은 이동 방식과 관계없이 같은 viewMapData()를
+    // 호출한다. 일반 이동/봐와 공통 렌더러를 사용해야 간략설명과
+    // 나침반제거 설정도 귀환 직후 동일하게 적용된다.
+    emit_room_view(ob);
 
     if transition["has_entry_events"] {
         let events = run_return_entry_events(ob);
