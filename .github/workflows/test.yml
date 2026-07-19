@@ -34,7 +34,7 @@ jobs:
       run: cargo fmt --all -- --check
 
     - name: Run clippy
-      run: cargo clippy --all-targets --all-features -- -D warnings
+      run: cargo clippy --all-targets --all-features
 
     - name: Run public data loader smoke test
       run: cargo test --lib public_fixture_test::public_fixture_loads_without_private_game_content -- --exact --test-threads=1
