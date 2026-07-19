@@ -31,26 +31,25 @@ use crate::script::{
     build_party_nonplayer_snapshot, build_party_person_snapshot, build_room_lines,
     build_room_mugong_item_snapshot, build_room_mugong_mob_snapshot,
     build_room_mugong_player_snapshot, build_room_mugong_stack_item_snapshot,
-    build_room_objs_grouped, build_room_player_inventory_snapshot,
-    build_room_view_player_snapshot_with_interactive, clear_precomputed_all_online,
-    clear_precomputed_box_context, clear_precomputed_room_admin_bodies,
-    clear_precomputed_room_view_players, immediate_exit_destinations,
-    installed_box_party_snapshot_by_pointer, installed_box_party_snapshots, load_body_from_json,
-    missing_party_person, password_hash, password_verify, save_body_to_json, set_cast_room_players,
-    set_precomputed_adult_channel, set_precomputed_all_online, set_precomputed_box_context,
-    set_precomputed_connected_names, set_precomputed_online_names, set_precomputed_party_context,
-    set_precomputed_room_admin_bodies, set_precomputed_room_inventories,
-    set_precomputed_room_mugong_targets, set_precomputed_room_view_players,
-    set_precomputed_tell_players, take_admin_set_player_value_request, take_adult_channel_requests,
-    take_auto_move_request, take_box_deliveries, take_change_player_request,
-    take_event_command_request, take_force_command_request, take_guild_accept_request,
-    take_guild_apply_request, take_guild_kick_request, take_guild_nickname_request,
-    take_guild_position_request, take_guild_reset_request, take_guild_transfer_request,
-    take_party_requests, take_remove_skill_request, take_save_all_request,
-    take_set_player_attr_request, take_set_skill_request, take_soul_attach_request,
-    take_soul_switch_request, take_summon_player_request, take_teach_skill_request,
-    try_fixture_event, try_item_event, verify_and_upgrade_user_password,
-    visible_fixture_short_lines, AdultChannelDelivery, BoxDelivery, CastRoomPlayerRef,
+    build_room_player_inventory_snapshot, build_room_view_player_snapshot_with_interactive,
+    clear_precomputed_all_online, clear_precomputed_box_context,
+    clear_precomputed_room_admin_bodies, clear_precomputed_room_view_players,
+    immediate_exit_destinations, installed_box_party_snapshot_by_pointer,
+    installed_box_party_snapshots, load_body_from_json, missing_party_person, password_hash,
+    password_verify, save_body_to_json, set_cast_room_players, set_precomputed_adult_channel,
+    set_precomputed_all_online, set_precomputed_box_context, set_precomputed_connected_names,
+    set_precomputed_online_names, set_precomputed_party_context, set_precomputed_room_admin_bodies,
+    set_precomputed_room_inventories, set_precomputed_room_mugong_targets,
+    set_precomputed_room_view_players, set_precomputed_tell_players,
+    take_admin_set_player_value_request, take_adult_channel_requests, take_auto_move_request,
+    take_box_deliveries, take_change_player_request, take_event_command_request,
+    take_force_command_request, take_guild_accept_request, take_guild_apply_request,
+    take_guild_kick_request, take_guild_nickname_request, take_guild_position_request,
+    take_guild_reset_request, take_guild_transfer_request, take_party_requests,
+    take_remove_skill_request, take_save_all_request, take_set_player_attr_request,
+    take_set_skill_request, take_soul_attach_request, take_soul_switch_request,
+    take_summon_player_request, take_teach_skill_request, try_fixture_event, try_item_event,
+    verify_and_upgrade_user_password, AdultChannelDelivery, BoxDelivery, CastRoomPlayerRef,
     PartyDelivery, TellPlayerSnapshot, PARTY_DISCONNECT_REQUEST,
 };
 use crate::world::event::{
@@ -1623,8 +1622,10 @@ async fn complete_char_creation_and_enter_game(
     )?;
     broadcaster.send_to(addr, "\r\n")?;
 
-    // Show the starting room
-    show_room(broadcaster, addr, &room_cache)?;
+    // Python Player.getStart() enters the room through Player.viewMapData().
+    // Use the same hot-reloaded Rhai `봐` renderer as movement, return and a
+    // normal look command so initial entry observes every view setting.
+    render_login_room_view(broadcaster, addr, &command_registry)?;
 
     if !run_automatic_adult_channel_join(broadcaster, addr, command_registry, room_cache).await? {
         send_game_prompt(broadcaster, addr).await?;
@@ -1820,8 +1821,8 @@ async fn complete_login_and_enter_game(
     )?;
     broadcaster.send_to(addr, "\r\n")?;
 
-    // Show the starting room
-    show_room_to_player(broadcaster, addr, &player_name).await?;
+    // Login must use the same Rhai room view as every other entry path.
+    render_login_room_view(broadcaster, addr, &command_registry)?;
 
     if !run_automatic_adult_channel_join(broadcaster, addr, command_registry, room_cache.clone())
         .await?
@@ -2165,148 +2166,78 @@ fn format_exit_compass(room: &crate::world::Room) -> String {
     compass
 }
 
-/// Show the current room to the player
-fn show_room(
+/// Render the login/new-character room through the hot-reloaded Rhai `봐`
+/// command.  This is Python's `Player.getStart() -> enterRoom() ->
+/// viewMapData()` boundary, so it must not use a Rust-only formatter.
+fn render_login_room_view(
     broadcaster: &Arc<crate::network::Broadcaster>,
     addr: SocketAddr,
-    _room_cache: &Arc<std::sync::Mutex<RoomCache>>,
+    command_registry: &CommandRegistry,
 ) -> Result<(), Box<dyn std::error::Error>> {
-    // Get player name
-    let player_name = {
-        let clients = broadcaster.clients.lock();
-        clients
+    let look = command_registry
+        .get("봐")
+        .cloned()
+        .ok_or("registered Rhai look command is missing")?;
+    let output = {
+        let mut clients = broadcaster.clients.lock();
+        let Some(player_name) = clients
             .get(&addr)
-            .map(|c| c.player_name())
-            .unwrap_or_else(|| "방문자".to_string())
-    };
-    // Lock released
+            .and_then(|client| client.player.as_ref())
+            .map(|player| player.body.get_name())
+        else {
+            return Ok(());
+        };
+        let (zone, room) = get_world_state()
+            .read()
+            .unwrap()
+            .get_player_position(&player_name)
+            .map(|position| (position.zone.clone(), position.room.clone()))
+            .unwrap_or_default();
 
-    // Use the WorldState-based function to show room
-    show_room_to_player_with_world(broadcaster, addr, &player_name)
-}
-
-/// Show room to player using WorldState
-async fn show_room_to_player(
-    broadcaster: &Arc<crate::network::Broadcaster>,
-    addr: SocketAddr,
-    player_name: &str,
-) -> Result<(), Box<dyn std::error::Error>> {
-    use crate::world::get_world_state;
-
-    // Get player position (clone to avoid lock issues)
-    let pos = {
-        let world = get_world_state().read().unwrap();
-        match world.get_player_position(player_name) {
-            Some(p) => p.clone(),
-            None => {
-                // Set default position and spawn mobs for start room
-                drop(world);
-                let start_pos = crate::world::PlayerPosition::start();
-                {
-                    let mut w = get_world_state().write().unwrap();
-                    w.set_player_position(player_name, start_pos.clone());
-                    w.spawn_mobs_for_room(&start_pos.zone, &start_pos.room);
-                }
-                start_pos
+        // The normal command path installs this snapshot while holding the
+        // client map lock.  Do the same here so the Rhai view includes other
+        // players without re-entering the non-reentrant client mutex.
+        let room_names = get_world_state()
+            .read()
+            .unwrap()
+            .get_players_in_room(&zone, &room);
+        let room_name_set = room_names
+            .into_iter()
+            .collect::<std::collections::HashSet<_>>();
+        let room_players = clients
+            .values()
+            .filter_map(|client| {
+                let player = client.player.as_ref()?;
+                (client.state == ClientState::Active
+                    && room_name_set.contains(&player.body.get_name()))
+                .then(|| {
+                    build_room_view_player_snapshot_with_interactive(
+                        &player.body,
+                        player.interactive,
+                    )
+                })
+            })
+            .collect::<Array>();
+        set_precomputed_room_view_players(HashMap::from([(
+            format!("{zone}:{room}"),
+            room_players,
+        )]));
+        let _snapshot_guard = PreComputedOtherDescsGuard;
+        let Some(player) = clients
+            .get_mut(&addr)
+            .and_then(|client| client.player_mut())
+        else {
+            return Ok(());
+        };
+        match (look.handler)(&mut player.body, &[]) {
+            CommandResult::Output(output) | CommandResult::OutputAndSendToUsers(output, _) => {
+                output
             }
+            CommandResult::Error(message) => return Err(message.into()),
+            _ => String::new(),
         }
     };
-
-    // Get room from cache
-    let world = get_world_state().read().unwrap();
-    let _room_key = format!("{}:{}", pos.zone, pos.room);
-    let room_output = if let Some(room) = world.room_cache.get_room_cached(&pos.zone, &pos.room) {
-        let room_ref = room
-            .read()
-            .map_err(|e| format!("Room read lock error: {}", e))?;
-
-        // Room name format
-        let room_name_formatted = format!(
-            "\x1b[1;30m[\x1b[0;37m[[\x1b[1;37m[]\x1b[1m {} \x1b[1;37m[]\x1b[0;37m]]\x1b[1;30m]\x1b[0;37m",
-            room_ref.display_name
-        );
-
-        // Get exits (방향은 korean_name, 고유명은 display_name. 숨겨진 제외)
-        let exits: Vec<String> = room_ref
-            .exits
-            .values()
-            .filter(|e| e.has_destination() && !e.hidden)
-            .map(|e| {
-                e.direction
-                    .as_ref()
-                    .map(|d| d.korean_name().to_string())
-                    .unwrap_or_else(|| e.display_name.clone())
-            })
-            .collect();
-        let exits_str = if exits.is_empty() {
-            "출구가 없습니다.".to_string()
-        } else {
-            format!("◁○   〔{}〕쪽으로 이동할 수 있습니다.", exits.join(" "))
-        };
-        let fixture_str = visible_fixture_short_lines(&world, &pos.zone, &pos.room).join("\r\n");
-        let fixture_str = if fixture_str.is_empty() {
-            String::new()
-        } else {
-            format!("{fixture_str}\r\n")
-        };
-
-        // Get mobs in room
-        let mobs = world.mob_cache.get_mobs_in_room(&pos.zone, &pos.room);
-        let mob_str = if mobs.is_empty() {
-            String::new()
-        } else {
-            let mut mob_msgs = Vec::new();
-            for mob in mobs {
-                if let Some(mob_data) = world.mob_cache.get_mob(&mob.mob_key) {
-                    if !mob_data.desc1.is_empty() {
-                        mob_msgs.push(mob_data.desc1.clone());
-                    }
-                }
-            }
-            if !mob_msgs.is_empty() {
-                format!("\r\n{}", mob_msgs.join("\r\n"))
-            } else {
-                String::new()
-            }
-        };
-
-        // 바닥에 떨어진 아이템(room_objs + room_inv_stack). 동일 이름은 N개로 묶어 표시.
-        let room_objs = world.get_room_objs(&pos.zone, &pos.room);
-        let room_stack = world.get_room_objs_stack(&pos.zone, &pos.room);
-        let item_str = build_room_objs_grouped(&room_objs, &room_stack);
-
-        // 같은 방의 다른 접속 유저. 봐/show_room_to_player_with_world와 동일.
-        let other_descs =
-            get_other_players_desc_in_room(broadcaster.as_ref(), &pos.zone, &pos.room, player_name);
-        let other_str = if other_descs.is_empty() {
-            String::new()
-        } else {
-            format!("\r\n{}", other_descs.join("\r\n"))
-        };
-
-        format!(
-            "{}\r\n{}\r\n{}{}{}{}{}\r\n[ {}/{} , {}/{} ]\r\n",
-            room_name_formatted,
-            room_ref.description.join("\r\n"),
-            fixture_str,
-            exits_str,
-            mob_str,
-            item_str,
-            other_str,
-            100,
-            900,
-            18,
-            18 // Default HP/MP display
-        )
-    } else {
-        format!(
-            "\x1b[1;37m[{}:{}]\x1b[0;37m\r\n알 수 없는 곳입니다.\r\n",
-            pos.zone, pos.room
-        )
-    };
-
-    broadcaster.send_to(addr, "\r\n")?;
-    broadcaster.send_to(addr, &room_output)?;
+    broadcaster.send_to(addr, &format!("{output}\r\n"))?;
     Ok(())
 }
 
@@ -3397,122 +3328,6 @@ fn apply_tell_delivery(
         return false;
     };
     broadcaster.send_to(target_addr, recipient_output).is_ok()
-}
-
-/// Show room to player using WorldState (synchronous version for use after movement)
-fn show_room_to_player_with_world(
-    broadcaster: &Arc<crate::network::Broadcaster>,
-    addr: SocketAddr,
-    player_name: &str,
-) -> Result<(), Box<dyn std::error::Error>> {
-    use crate::world::{format_exits_long, format_room_header, get_world_state, PlayerPosition};
-
-    // Get player position; if None (e.g. script char-creation path), set start and spawn mobs
-    let pos = {
-        let world = get_world_state().read().unwrap();
-        match world.get_player_position(player_name) {
-            Some(p) => p.clone(),
-            None => {
-                drop(world);
-                let start_pos = PlayerPosition::start();
-                {
-                    let mut w = get_world_state().write().unwrap();
-                    w.set_player_position(player_name, start_pos.clone());
-                    w.spawn_mobs_for_room(&start_pos.zone, &start_pos.room);
-                }
-                start_pos
-            }
-        }
-    };
-
-    // 방이 캐시에 없을 수 있으므로 get_room으로 로드 보장 (이동 후 복귀 시 등)
-    {
-        let mut w = get_world_state().write().unwrap();
-        let _ = w.room_cache.get_room(&pos.zone, &pos.room);
-    }
-
-    let world = get_world_state().read().unwrap();
-
-    if let Some(room) = world.room_cache.get_room_cached(&pos.zone, &pos.room) {
-        let room_ref = room
-            .read()
-            .map_err(|e| format!("Room read lock error: {}", e))?;
-
-        let room_name_formatted = format_room_header(&room_ref.display_name);
-        let exits_str = format_exits_long(&room_ref);
-        let fixture_lines = visible_fixture_short_lines(&world, &pos.zone, &pos.room);
-
-        let mobs = world.mob_cache.get_mobs_in_room(&pos.zone, &pos.room);
-        let mob_str = if mobs.is_empty() {
-            String::new()
-        } else {
-            let mut mob_msgs = Vec::new();
-            for mob in mobs {
-                if let Some(mob_data) = world.mob_cache.get_mob(&mob.mob_key) {
-                    if !mob_data.desc1.is_empty() {
-                        mob_msgs.push(mob_data.desc1.clone());
-                    }
-                }
-            }
-            if !mob_msgs.is_empty() {
-                format!("\r\n{}", mob_msgs.join("\r\n"))
-            } else {
-                String::new()
-            }
-        };
-
-        // 바닥에 떨어진 아이템(room_objs + room_inv_stack). 동일 이름은 N개로 묶어 표시.
-        let room_objs = world.get_room_objs(&pos.zone, &pos.room);
-        let room_stack = world.get_room_objs_stack(&pos.zone, &pos.room);
-        let item_str = build_room_objs_grouped(&room_objs, &room_stack);
-
-        // 같은 방의 다른 접속 유저. 파이썬 viewMapData: for obj in room.objs: is_player then getDesc.
-        let other_descs =
-            get_other_players_desc_in_room(broadcaster.as_ref(), &pos.zone, &pos.room, player_name);
-        let other_str = if other_descs.is_empty() {
-            String::new()
-        } else {
-            format!("\r\n{}", other_descs.join("\r\n"))
-        };
-
-        // 파이썬 viewMapData: 헤더 \r\n\r\n 설명 \r\n\r\n 출구 \r\n [몹] \r\n [바닥 아이템] \r\n [다른 유저]
-        broadcaster.send_to(addr, "\r\n")?;
-        broadcaster.send_to(addr, &room_name_formatted)?;
-        broadcaster.send_to(addr, "\r\n\r\n")?;
-        for description_line in &room_ref.description {
-            broadcaster.send_to(addr, description_line)?;
-            broadcaster.send_to(addr, "\r\n")?;
-        }
-        for fixture_line in fixture_lines {
-            broadcaster.send_to(addr, &fixture_line)?;
-            broadcaster.send_to(addr, "\r\n")?;
-        }
-        broadcaster.send_to(addr, "\r\n")?;
-        broadcaster.send_to(addr, &exits_str)?;
-        broadcaster.send_to(addr, "\r\n")?;
-        if !mob_str.is_empty() {
-            broadcaster.send_to(addr, &mob_str)?;
-            broadcaster.send_to(addr, "\r\n")?;
-        }
-        if !item_str.is_empty() {
-            broadcaster.send_to(addr, &item_str)?;
-            broadcaster.send_to(addr, "\r\n")?;
-        }
-        if !other_str.is_empty() {
-            broadcaster.send_to(addr, &other_str)?;
-            broadcaster.send_to(addr, "\r\n")?;
-        }
-    } else {
-        broadcaster.send_to(
-            addr,
-            &format!(
-                "\x1b[1;37m[{}:{}]\x1b[0;37m\r\n알 수 없는 곳입니다.\r\n",
-                pos.zone, pos.room
-            ),
-        )?;
-    }
-
-    Ok(())
 }
 
 /// Python `Player.viewMapData()` appends the current `zone:room` only for
