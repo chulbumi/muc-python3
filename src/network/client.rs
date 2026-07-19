@@ -2178,6 +2178,7 @@ fn render_login_room_view(
         .get("봐")
         .cloned()
         .ok_or("registered Rhai look command is missing")?;
+    let entry_events = command_registry.get_internal("entry_events").cloned();
     let output = {
         let mut clients = broadcaster.clients.lock();
         let Some(player_name) = clients
@@ -2187,6 +2188,10 @@ fn render_login_room_view(
         else {
             return Ok(());
         };
+        let connection_token = clients
+            .get(&addr)
+            .map(|client| client.connection_token.clone())
+            .unwrap_or_default();
         let (zone, room) = get_world_state()
             .read()
             .unwrap()
@@ -2229,13 +2234,32 @@ fn render_login_room_view(
         else {
             return Ok(());
         };
-        match (look.handler)(&mut player.body, &[]) {
+        player.body.temp_mut().insert(
+            "_connection_token".to_string(),
+            crate::object::Value::String(connection_token),
+        );
+        let mut output = match (look.handler)(&mut player.body, &[]) {
             CommandResult::Output(output) | CommandResult::OutputAndSendToUsers(output, _) => {
                 output
             }
             CommandResult::Error(message) => return Err(message.into()),
             _ => String::new(),
+        };
+        if let Some(entry_events) = entry_events {
+            match (entry_events)(&mut player.body, &[]) {
+                CommandResult::Output(lines) | CommandResult::OutputAndSendToUsers(lines, _) => {
+                    if !lines.is_empty() {
+                        if !output.is_empty() {
+                            output.push_str("\r\n");
+                        }
+                        output.push_str(&lines);
+                    }
+                }
+                CommandResult::Error(message) => return Err(message.into()),
+                _ => {}
+            }
         }
+        output
     };
     broadcaster.send_to(addr, &format!("{output}\r\n"))?;
     Ok(())

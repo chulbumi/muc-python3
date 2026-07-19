@@ -7,8 +7,12 @@ use crate::command::{CommandFn, CommandResult};
 use crate::player::{body::SendLine, Body};
 use crate::scheduler::CallOutScheduler;
 use crate::script::ScriptStorage;
+use crate::world::event::{
+    take_timed_room_dialogue_requests, TIMED_ROOM_DIALOGUE_FUNCTION, TIMED_ROOM_DIALOGUE_SCRIPT,
+};
 use std::collections::HashMap;
 use std::sync::Arc;
+use std::time::Duration;
 use tokio::sync::RwLock;
 use tracing::info;
 
@@ -17,6 +21,36 @@ pub type PlayerDescFn = Arc<dyn Fn(&str) -> Vec<String> + Send + Sync>;
 
 /// Type alias for player map callback
 pub type PlayerMapFn = Arc<dyn Fn() -> HashMap<String, String> + Send + Sync>;
+
+/// Turn an event-authored private dialogue sequence into independent call_out
+/// tasks.  The callback validates the recorded room again immediately before
+/// each line is delivered, so leaving the room stops all remaining dialogue.
+fn schedule_timed_room_dialogues(player: &mut Body, scheduler: Option<&Arc<CallOutScheduler>>) {
+    let requests = take_timed_room_dialogue_requests(player);
+    let Some(scheduler) = scheduler else {
+        return;
+    };
+    let target = player
+        .temp()
+        .get("_connection_token")
+        .and_then(crate::object::Value::as_str)
+        .filter(|token| !token.is_empty())
+        .map(str::to_string)
+        .unwrap_or_else(|| player.get_name());
+    for request in requests {
+        let delay = request.delay_seconds;
+        let Ok(argument) = serde_json::to_value(request) else {
+            continue;
+        };
+        scheduler.call_out(
+            &target,
+            TIMED_ROOM_DIALOGUE_FUNCTION,
+            Duration::from_secs(delay),
+            vec![argument],
+            Some(TIMED_ROOM_DIALOGUE_SCRIPT.to_string()),
+        );
+    }
+}
 
 /// Rhai sources loaded by [`ScriptStorage`] that are not player commands.
 ///
@@ -31,6 +65,7 @@ const NON_COMMAND_SCRIPTS: &[&str] = &[
     "__summon_move",
     "__death",
     "__combat_tick",
+    "__entry_events",
     "attack",
     "comm",
     "help",
@@ -218,6 +253,15 @@ pub fn create_script_command(
             )
         };
 
+        // Event Rhai may have requested a private timed room dialogue while
+        // this command entered a room.  Only commit requests from a completed
+        // script; an errored script must not leave delayed side effects.
+        if execution.is_ok() {
+            schedule_timed_room_dialogues(player, call_out_scheduler.as_ref());
+        } else {
+            let _ = take_timed_room_dialogue_requests(player);
+        }
+
         let command_reload_requested = matches!(
             player
                 .temp_mut()
@@ -336,6 +380,18 @@ pub async fn register_script_commands(
             create_script_command(
                 script_storage.clone(),
                 "__summon_move".to_string(),
+                get_other_players_desc.clone(),
+                get_other_players_map.clone(),
+                call_out_scheduler.clone(),
+            ),
+        );
+    }
+    if script_names.iter().any(|name| name == "__entry_events") {
+        registry.register_internal(
+            "entry_events",
+            create_script_command(
+                script_storage.clone(),
+                "__entry_events".to_string(),
                 get_other_players_desc.clone(),
                 get_other_players_map.clone(),
                 call_out_scheduler.clone(),
@@ -614,6 +670,10 @@ mod tests {
         let movement = registry
             .get_internal("movement")
             .expect("private movement hook must be registered");
+        assert!(
+            registry.get_internal("entry_events").is_some(),
+            "login's private entry-event hook must be registered"
+        );
         assert!(registry.get("__movement").is_none());
         assert!(!registry
             .command_names()

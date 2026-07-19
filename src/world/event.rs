@@ -9,6 +9,7 @@ use std::sync::{Arc, Mutex};
 
 use log::info;
 use rhai::{Dynamic, Engine, EvalAltResult, Map, Position, Scope};
+use serde::{Deserialize, Serialize};
 
 use crate::command::CommandResult;
 use crate::hangul::han_iga;
@@ -28,6 +29,82 @@ pub const EVENT_LP_PROMPT_MARKER: &str = "\u{001e}event-lp-prompt\u{001e}";
 /// `__death` Rhai presentation/drop sequence immediately after a lethal
 /// event directive, matching Python `Player.die()`.
 pub const EVENT_DEATH_FINISH_REQUEST: &str = "_event_death_finish_request";
+
+/// A single player-private line requested by an entry-event Rhai script.
+/// The command wrapper turns these into call_out tasks after the entire
+/// event/movement command has committed its state transition.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub(crate) struct TimedRoomDialogueRequest {
+    pub zone: String,
+    pub room: String,
+    pub visit_token: String,
+    pub delay_seconds: u64,
+    pub line: String,
+}
+
+pub(crate) const TIMED_ROOM_DIALOGUE_REQUESTS: &str = "_timed_room_dialogue_requests";
+pub(crate) const TIMED_ROOM_DIALOGUE_VISIT_TOKEN: &str = "_timed_room_dialogue_visit";
+pub(crate) const TIMED_ROOM_DIALOGUE_SCRIPT: &str = "__timed_room_dialogue";
+pub(crate) const TIMED_ROOM_DIALOGUE_FUNCTION: &str = "deliver";
+
+fn queue_timed_room_dialogues(body: &mut Body, interval_seconds: i64, lines: rhai::Array) {
+    let player_name = body.get_name();
+    let Some(position) = get_world_state()
+        .read()
+        .ok()
+        .and_then(|world| world.get_player_position(&player_name).cloned())
+    else {
+        return;
+    };
+    let interval_seconds = interval_seconds.max(0) as u64;
+    // This is an in-memory identity for this one entry sequence, not a
+    // persistent or per-room re-entry count.  Any earlier callbacks become
+    // invalid even if the player leaves and returns before their due time.
+    let visit_token = uuid::Uuid::new_v4().to_string();
+    body.temp_mut().insert(
+        TIMED_ROOM_DIALOGUE_VISIT_TOKEN.to_string(),
+        Value::String(visit_token.clone()),
+    );
+    let mut queued = body
+        .temp()
+        .get(TIMED_ROOM_DIALOGUE_REQUESTS)
+        .and_then(Value::as_str)
+        .and_then(|raw| serde_json::from_str::<Vec<TimedRoomDialogueRequest>>(raw).ok())
+        .unwrap_or_default();
+
+    for (index, line) in lines.into_iter().enumerate() {
+        let Ok(line) = line.into_string() else {
+            continue;
+        };
+        queued.push(TimedRoomDialogueRequest {
+            zone: position.zone.clone(),
+            room: position.room.clone(),
+            visit_token: visit_token.clone(),
+            // The first line follows one full interval.  A zero interval is
+            // intentionally allowed for authored immediate sequences.
+            delay_seconds: interval_seconds.saturating_mul(index as u64 + 1),
+            line: event_substitute(&line, &player_name),
+        });
+    }
+
+    if let Ok(serialized) = serde_json::to_string(&queued) {
+        body.temp_mut().insert(
+            TIMED_ROOM_DIALOGUE_REQUESTS.to_string(),
+            Value::String(serialized),
+        );
+    }
+}
+
+/// Consume dialogue requests left by an event script.  They are intentionally
+/// temporary: reconnects and a second player entering the same room begin an
+/// independent sequence.
+pub(crate) fn take_timed_room_dialogue_requests(body: &mut Body) -> Vec<TimedRoomDialogueRequest> {
+    body.temp_mut()
+        .remove(TIMED_ROOM_DIALOGUE_REQUESTS)
+        .and_then(|value| value.as_str().map(str::to_string))
+        .and_then(|raw| serde_json::from_str(&raw).ok())
+        .unwrap_or_default()
+}
 
 /// getNextWords: 첫 토큰 제외한 나머지. "이벤트 $대화 $대" -> "$대화 $대"
 fn get_next_words(key: &str) -> String {
@@ -516,6 +593,13 @@ fn do_event_rhai_source(
     engine.register_fn("literal_output", move |msg: &str| unsafe {
         (*out_ptr).push(msg.to_string());
     });
+    let dialogue_body_ptr = body_ptr;
+    engine.register_fn(
+        "schedule_room_dialogue",
+        move |interval_seconds: i64, lines: rhai::Array| unsafe {
+            queue_timed_room_dialogues(&mut *dialogue_body_ptr, interval_seconds, lines)
+        },
+    );
     engine.register_fn("post_position_once", crate::hangul::post_position1);
     let player_name_broadcast = player_name.clone();
     engine.register_fn("broadcast_output", move |msg: &str| {
@@ -2491,16 +2575,71 @@ mod tests {
 
     use super::{
         body_has_item_spec, check_event_key, del_item_from_body, do_event, do_event_rhai,
-        get_tendency, get_user_event, give_event_item_with_roll,
+        get_tendency, get_user_event, give_event_item_with_roll, take_timed_room_dialogue_requests,
     };
     use crate::command::CommandResult;
     use crate::object::{Object, Value};
     use crate::player::Body;
-    use crate::world::{EventScript, MobCache, MobInstance, RawMobData, RoomCache};
+    use crate::world::{
+        get_world_state, EventScript, MobCache, MobInstance, PlayerPosition, RawMobData, RoomCache,
+    };
 
     // Rank storage is process-global and persisted.  Tests that deliberately
     // fill/clear the same legacy board must not interleave under libtest.
     static RANK_TEST_LOCK: Mutex<()> = Mutex::new(());
+
+    #[test]
+    fn event_rhai_queues_private_room_dialogue_with_per_line_intervals() {
+        let player_name = format!("개별대화검사-{}", std::process::id());
+        let zone = format!("개별대화존-{}", std::process::id());
+        {
+            let mut world = get_world_state().write().unwrap();
+            world.set_player_position(
+                &player_name,
+                PlayerPosition::new(zone.clone(), "1".to_string()),
+            );
+        }
+        let mut body = Body::new();
+        body.set("이름", player_name.as_str());
+        let mut data = RawMobData::default();
+        data.zone = zone.clone();
+        data.events.insert(
+            "이벤트 $%입장이벤트%".to_string(),
+            EventScript::Rhai("개별대화.rhai".to_string()),
+        );
+        let source = r#"
+fn event() {
+    schedule_room_dialogue(3, ["첫 안내: [공](이/가) 도착했습니다.", "둘째 안내"]);
+}
+"#;
+        let result = super::do_event_rhai_source(
+            &mut body,
+            &data,
+            "이벤트 $%입장이벤트%",
+            &[],
+            "개별대화몹",
+            source,
+            None,
+        );
+        assert!(matches!(result, CommandResult::MobEvent { .. }));
+        let requests = take_timed_room_dialogue_requests(&mut body);
+        assert_eq!(requests.len(), 2);
+        assert_eq!(requests[0].zone, zone);
+        assert_eq!(requests[0].room, "1");
+        assert_eq!(requests[0].delay_seconds, 3);
+        assert_eq!(
+            requests[0].line,
+            format!("첫 안내: {}가 도착했습니다.", player_name)
+        );
+        assert_eq!(requests[1].delay_seconds, 6);
+        assert_eq!(requests[1].line, "둘째 안내");
+        assert!(!requests[0].visit_token.is_empty());
+        assert_eq!(requests[0].visit_token, requests[1].visit_token);
+        get_world_state()
+            .write()
+            .unwrap()
+            .remove_player_position(&player_name);
+    }
 
     fn add_test_items(body: &mut Body, index: &str, count: usize) {
         for _ in 0..count {

@@ -21051,6 +21051,62 @@ pub fn create_call_out_script_runner(
     create_call_out_script_runner_with_scheduler(script_storage, broadcaster, None)
 }
 
+/// Deliver one line from an event-authored, player-private room dialogue.
+/// The call_out target is the connection token rather than a character name:
+/// reconnecting cannot receive stale tutorial text, and each entrant has an
+/// independent sequence.  The room comparison happens at delivery time so a
+/// player who has left silently stops receiving the remaining lines.
+fn deliver_timed_room_dialogue(
+    broadcaster: &Broadcaster,
+    target: &str,
+    args: &[serde_json::Value],
+) -> Result<(), String> {
+    let request = args
+        .first()
+        .cloned()
+        .and_then(|value| {
+            serde_json::from_value::<crate::world::event::TimedRoomDialogueRequest>(value).ok()
+        })
+        .ok_or_else(|| "timed room dialogue: invalid request".to_string())?;
+    let Some(addr) = broadcaster.find_addr_by_connection_token(target) else {
+        return Ok(());
+    };
+    let message = broadcaster
+        .with_player_body_by_connection_token(target, |body| {
+            let player_name = body.get_name();
+            let in_original_room = get_world_state()
+                .read()
+                .ok()
+                .and_then(|world| world.get_player_position(&player_name).cloned())
+                .is_some_and(|position| {
+                    position.zone == request.zone && position.room == request.room
+                });
+            let active_token = body
+                .temp()
+                .get(crate::world::event::TIMED_ROOM_DIALOGUE_VISIT_TOKEN)
+                .and_then(Value::as_str)
+                .unwrap_or_default();
+            if !in_original_room || active_token != request.visit_token {
+                return None;
+            }
+            Some(format!(
+                "\r\n{}\r\n\x1b[0;37;40m[ {}/{}, {}/{} ] ",
+                expand_abbreviated_ansi(&request.line),
+                body.get_hp(),
+                body.get_max_hp(),
+                body.get_mp(),
+                body.get_max_mp(),
+            ))
+        })
+        .flatten();
+    if let Some(message) = message {
+        broadcaster
+            .send_to(addr, &message)
+            .map_err(|error| error.to_string())?;
+    }
+    Ok(())
+}
+
 pub fn create_call_out_script_runner_with_scheduler(
     script_storage: Arc<tokio::sync::RwLock<ScriptStorage>>,
     broadcaster: Arc<Broadcaster>,
@@ -21060,6 +21116,11 @@ pub fn create_call_out_script_runner_with_scheduler(
     Arc::new(
         move |target: &str, script: Option<&str>, function: &str, args: Vec<serde_json::Value>| {
             let script = script.ok_or_else(|| "call_out: script name required".to_string())?;
+            if script == crate::world::event::TIMED_ROOM_DIALOGUE_SCRIPT
+                && function == crate::world::event::TIMED_ROOM_DIALOGUE_FUNCTION
+            {
+                return deliver_timed_room_dialogue(broadcaster.as_ref(), target, &args);
+            }
             // process_due는 tokio 워커에서 호출되므로 blocking_read 전에 block_in_place로 블로킹 허용
             let (ast, global_data) = tokio::task::block_in_place(|| {
                 let storage = script_storage.blocking_read();

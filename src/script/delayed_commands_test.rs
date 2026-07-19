@@ -1,5 +1,142 @@
 use super::*;
 
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn timed_room_dialogue_is_private_and_stops_after_leaving_the_room() {
+    use crate::network::{Broadcaster, Client};
+    use crate::player::{Player, STATE_ACTIVE};
+    use crate::world::event::{
+        TimedRoomDialogueRequest, TIMED_ROOM_DIALOGUE_FUNCTION, TIMED_ROOM_DIALOGUE_SCRIPT,
+    };
+    use crate::world::{get_world_state, PlayerPosition};
+    use tokio::sync::mpsc;
+
+    let player_name = format!("개별대화전달-{}", std::process::id());
+    let zone = format!("개별대화전달존-{}", std::process::id());
+    let addr = "127.0.0.1:18101".parse().unwrap();
+    let (tx, mut rx) = mpsc::unbounded_channel();
+    let broadcaster = Arc::new(Broadcaster::new());
+    let mut client = Client::new(addr, tx);
+    client.complete_login();
+    let token = client.connection_token.clone();
+    let mut player = Player::new();
+    player.state = STATE_ACTIVE;
+    player.body.set("이름", player_name.as_str());
+    player.body.set("체력", 80_i64);
+    player.body.set("최고체력", 100_i64);
+    player.body.set("내공", 20_i64);
+    player.body.set("최고내공", 30_i64);
+    player.body.temp_mut().insert(
+        crate::world::event::TIMED_ROOM_DIALOGUE_VISIT_TOKEN.to_string(),
+        Value::String("첫입장".to_string()),
+    );
+    client.player = Some(player);
+    broadcaster.add_client(client);
+    {
+        let mut world = get_world_state().write().unwrap();
+        world.set_player_position(
+            &player_name,
+            PlayerPosition::new(zone.clone(), "1".to_string()),
+        );
+    }
+
+    let storage = Arc::new(tokio::sync::RwLock::new(ScriptStorage::default()));
+    let runner = create_call_out_script_runner(storage, broadcaster.clone());
+    let request = TimedRoomDialogueRequest {
+        zone: zone.clone(),
+        room: "1".to_string(),
+        visit_token: "첫입장".to_string(),
+        delay_seconds: 3,
+        line: "안내인이 말합니다. \"첫 안내입니다.\"".to_string(),
+    };
+    runner(
+        &token,
+        Some(TIMED_ROOM_DIALOGUE_SCRIPT),
+        TIMED_ROOM_DIALOGUE_FUNCTION,
+        vec![serde_json::to_value(request).unwrap()],
+    )
+    .unwrap();
+    let delivered = rx.try_recv().unwrap();
+    assert!(delivered.contains("첫 안내입니다."), "{delivered:?}");
+    assert!(delivered.contains("[ 80/100, 20/30 ]"), "{delivered:?}");
+
+    {
+        let mut world = get_world_state().write().unwrap();
+        world.set_player_position(&player_name, PlayerPosition::new(zone, "2".to_string()));
+    }
+    let request = TimedRoomDialogueRequest {
+        zone: format!("개별대화전달존-{}", std::process::id()),
+        room: "1".to_string(),
+        visit_token: "첫입장".to_string(),
+        delay_seconds: 6,
+        line: "떠난 뒤에는 보이면 안 됩니다.".to_string(),
+    };
+    runner(
+        &token,
+        Some(TIMED_ROOM_DIALOGUE_SCRIPT),
+        TIMED_ROOM_DIALOGUE_FUNCTION,
+        vec![serde_json::to_value(request).unwrap()],
+    )
+    .unwrap();
+    assert!(rx.try_recv().is_err());
+
+    // Returning to the same room starts a fresh event sequence.  The old
+    // token cannot revive its remaining callbacks after that re-entry.
+    {
+        let mut world = get_world_state().write().unwrap();
+        world.set_player_position(
+            &player_name,
+            PlayerPosition::new(
+                format!("개별대화전달존-{}", std::process::id()),
+                "1".to_string(),
+            ),
+        );
+    }
+    broadcaster.with_player_body_by_connection_token(&token, |body| {
+        body.temp_mut().insert(
+            crate::world::event::TIMED_ROOM_DIALOGUE_VISIT_TOKEN.to_string(),
+            Value::String("재입장".to_string()),
+        );
+    });
+    let stale = TimedRoomDialogueRequest {
+        zone: format!("개별대화전달존-{}", std::process::id()),
+        room: "1".to_string(),
+        visit_token: "첫입장".to_string(),
+        delay_seconds: 6,
+        line: "예전 시퀀스입니다.".to_string(),
+    };
+    runner(
+        &token,
+        Some(TIMED_ROOM_DIALOGUE_SCRIPT),
+        TIMED_ROOM_DIALOGUE_FUNCTION,
+        vec![serde_json::to_value(stale).unwrap()],
+    )
+    .unwrap();
+    assert!(rx.try_recv().is_err());
+    let fresh = TimedRoomDialogueRequest {
+        zone: format!("개별대화전달존-{}", std::process::id()),
+        room: "1".to_string(),
+        visit_token: "재입장".to_string(),
+        delay_seconds: 3,
+        line: "새 시퀀스의 첫 안내입니다.".to_string(),
+    };
+    runner(
+        &token,
+        Some(TIMED_ROOM_DIALOGUE_SCRIPT),
+        TIMED_ROOM_DIALOGUE_FUNCTION,
+        vec![serde_json::to_value(fresh).unwrap()],
+    )
+    .unwrap();
+    assert!(rx
+        .try_recv()
+        .unwrap()
+        .contains("새 시퀀스의 첫 안내입니다."));
+    broadcaster.remove_client(addr);
+    get_world_state()
+        .write()
+        .unwrap()
+        .remove_player_position(&player_name);
+}
+
 #[test]
 fn delayed_input_empty_command_matches_python_usage() {
     let mut body = Body::new();
